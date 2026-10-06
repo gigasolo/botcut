@@ -33,3 +33,20 @@ Speech-to-text is `grok-voice-transcribe-2.0` with filler words kept. The model 
 Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.15 seconds before and 0.25 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range.
 
 A dropped line that is not a near-duplicate of a kept line prints `unique? id N: ...`. The line stays dropped.
+
+## Captions
+
+```bash
+uv run botcut-cli captions out/cuts.json
+uv run botcut-cli captions out/cuts.json --burn
+```
+
+`captions` writes `out/rough_cut.srt` from the word cache under `out/work/`. Cues stay within 32 characters and 2.0 seconds, and break when the next word is more than 0.4 seconds away. `--burn` also writes `out/rough_cut.captioned.mp4`: Inter 18 bold, a 2px outline, bottom center. Words are not stored in `cuts.json`.
+
+## Short
+
+```bash
+uv run botcut-cli short out/cuts.json
+```
+
+`short` asks for one contiguous highlight and writes `out/short.mp4` at 1080×1920 with those captions burned in. It prints `Wrote <path> "<title>" (<len>s)`. Landscape frames are center-cropped with `crop=ih*9/16:ih` and then scaled. A frame that is already 9:16 or taller is only scaled. `BOTCUT_FAKE=1` uses the first three kept lines and does not call the network. A real highlight is asked to land between 30 and 60 seconds; a shorter range is still used when that is what comes back.

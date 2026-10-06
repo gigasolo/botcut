@@ -9,7 +9,15 @@ uv run botcut-cli run a.mp4 b.mp4 c.mp4 --out out/
 
 A single `.txt` argument is a shot list, one path per line. Blank lines and `#` comments are skipped.
 
-`out/cuts.json` is the cut list. `out/rough_cut.mp4` is the listening render. Word timestamps are cached at `out/work/<i>-<stem>.words.json`. A second run prints `cache hit` and does not call speech-to-text again.
+`out/cuts.json` is the cut list. `out/rough_cut.mp4` is the listening render. Word timestamps are cached at `out/work/<i>-<stem>.<stt>.words.json`. An older `out/work/<i>-<stem>.words.json` still counts as an xAI cache hit. A second run prints `cache hit` and does not call speech-to-text again.
+
+```bash
+uv run botcut-cli run a.mp4 --out out/ --stt local --whisper-model large-v3-turbo
+uv run botcut-cli run a.mp4 --out out/ --max-pause 0.8 --no-snap
+uv sync --extra local
+```
+
+`--stt` is `xai` (default) or `local`. Local transcription is faster-whisper on CPU int8 and needs `uv sync --extra local`. `--max-pause` (default `0.8`) splits a kept range when a silence inside it is longer than that. `--no-snap` leaves the padded edges where they are. Otherwise an edge that lands in silence moves to 0.10 s before speech or 0.15 s after it, and a snap that would leave less than 0.3 s is skipped.
 
 ## Environment
 

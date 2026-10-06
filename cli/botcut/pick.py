@@ -163,6 +163,59 @@ def segments(utts: list[dict], keep: list[dict], durations: list[float]) -> tupl
     return collapsed, unknown
 
 
+def snap(segments: list[dict], silences_by_clip: list[list[tuple[float, float]]]) -> list[dict]:
+    snapped = []
+    for seg in segments:
+        sils = _silences_for(silences_by_clip, seg["clip"])
+        start, end = float(seg["start"]), float(seg["end"])
+        for silence_start, silence_end in sils:
+            if silence_start <= start < silence_end:
+                start = silence_end - 0.10
+                break
+        for silence_start, silence_end in sils:
+            if silence_start < end <= silence_end:
+                end = silence_start + 0.15
+                break
+        if end - start < 0.3:
+            snapped.append(dict(seg))
+        else:
+            snapped.append({**seg, "start": max(0.0, start), "end": end})
+    return snapped
+
+
+def tighten(
+    segments: list[dict],
+    silences_by_clip: list[list[tuple[float, float]]],
+    max_pause: float,
+) -> list[dict]:
+    tightened = []
+    for seg in segments:
+        pieces = [dict(seg)]
+        for silence_start, silence_end in _silences_for(silences_by_clip, seg["clip"]):
+            if silence_end - silence_start <= max_pause:
+                continue
+            nxt = []
+            for piece in pieces:
+                if silence_start >= piece["start"] and silence_end <= piece["end"]:
+                    left_end = silence_start + 0.15
+                    right_start = silence_end - 0.15
+                    if left_end - piece["start"] > 0:
+                        nxt.append({**piece, "end": left_end})
+                    if piece["end"] - right_start > 0:
+                        nxt.append({**piece, "start": right_start})
+                else:
+                    nxt.append(piece)
+            pieces = nxt
+        tightened.extend(pieces)
+    return tightened
+
+
+def _silences_for(silences_by_clip: list[list[tuple[float, float]]], clip: int):
+    if clip < 0 or clip >= len(silences_by_clip):
+        return []
+    return silences_by_clip[clip]
+
+
 def dropped_utterances(utts: list[dict], keep: list[dict]) -> list[dict]:
     by_id = {u["id"]: u for u in utts}
     kept = {int(item["id"]) for item in keep if int(item["id"]) in by_id}

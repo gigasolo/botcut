@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 
 
@@ -47,6 +48,43 @@ def probe(path: str) -> dict:
         "height": height,
         "fps": fps,
     }
+
+
+def parse_silences(stderr: str, duration: float) -> list[tuple[float, float]]:
+    pairs = []
+    pending = None
+    for line in stderr.splitlines():
+        start = re.search(r"silence_start:\s*([0-9.]+)", line)
+        if start:
+            pending = float(start.group(1))
+            continue
+        end = re.search(r"silence_end:\s*([0-9.]+)", line)
+        if end and pending is not None:
+            pairs.append((pending, float(end.group(1))))
+            pending = None
+    if pending is not None and duration > pending:
+        pairs.append((pending, duration))
+    return pairs
+
+
+def silences(flac: str, duration: float) -> list[tuple[float, float]]:
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            flac,
+            "-af",
+            "silencedetect=noise=-35dB:d=0.3",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return parse_silences(proc.stderr or "", duration)
 
 
 def extract_audio(path: str, dst: str) -> None:

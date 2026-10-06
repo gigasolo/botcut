@@ -39,7 +39,7 @@ Handles catch on neighbouring clips and the playhead.
 
 ## Install
 
-Install via the Omarchy Package Repository via the `botcut` package. It's installed by default in new installations of Omarchy (from Quattro forward).
+Install this fork next to stock Omacut with `./bin/install`. The Arch package name is `botcut`.
 
 ## Requirements
 

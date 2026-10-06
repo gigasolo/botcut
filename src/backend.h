@@ -56,6 +56,9 @@ public:
 
     // Load a video (probes it, then kicks off thumbnail generation).
     Q_INVOKABLE bool load(const QUrl &url);
+    Q_INVOKABLE bool loadKeepList(const QUrl &url);
+    static bool parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
+                              edit::Clips *clips, QString *error);
 
     // Open native desktop file dialogs.
     Q_INVOKABLE void openVideoDialog();

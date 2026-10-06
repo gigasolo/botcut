@@ -37,6 +37,16 @@ Handles catch on neighbouring clips and the playhead.
 - *Q*: Quit (asks first if the edit hasn't been exported).
 - *?*: Show the hotkeys in the app.
 
+## Keep-lists
+
+`botcut file.keep.json` opens that video with the keep ranges already laid out as clips. Ctrl+Z once restores the full source.
+
+```json
+{"source": "master.mp4", "keep": [{"start": 1.25, "end": 4.8, "label": "optional, ignored"}]}
+```
+
+Times are seconds in the source. A relative `source` resolves against the directory that contains the JSON file. Labels are ignored.
+
 ## Install
 
 Install this fork next to stock Omacut with `./bin/install`. The Arch package name is `botcut`.

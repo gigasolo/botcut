@@ -205,6 +205,10 @@ private slots:
     void timelineTracksUnexportedCuts();
     void timelineAnswersWhereTimesFall();
     void timelineEditsAtATime();
+    void timelineLoadsKeepRangesAsOneUndoStep();
+    void keepListParsesAndResolvesSource();
+    void keepListRejectsBadFiles();
+    void keepListLoadsVideoWithClips();
     void trimArgsReencodeForPreciseCuts();
     void trimArgsConcatenateTheRanges();
     void trimArgsScaleTheShorterSide();
@@ -1104,6 +1108,49 @@ void BackendTests::timelineEditsAtATime() {
     QCOMPARE(timeline.clips(), (edit::Clips{{0.0, edit::minimumClip}}));
     timeline.moveEdge(0, true, 30.0);
     QCOMPARE(timeline.clips(), (edit::Clips{{0.0, edit::minimumClip}}));
+}
+
+void BackendTests::timelineLoadsKeepRangesAsOneUndoStep() {
+    Timeline timeline;
+    timeline.load(10.0, {{1.0, 3.0}, {5.0, 8.0}});
+    QCOMPARE(timeline.clips(), (edit::Clips{{1.0, 3.0}, {5.0, 8.0}}));
+    QVERIFY(timeline.unexported());
+    QVERIFY(timeline.canUndo());
+    timeline.undo();
+    QCOMPARE(timeline.clips(), edit::whole(10.0));
+}
+
+void BackendTests::keepListParsesAndResolvesSource() {
+    QString source, error;
+    edit::Clips clips;
+    QVERIFY(Backend::parseKeepList(R"({"source":"a.mp4","keep":[{"start":1,"end":2},{"start":3,"end":4.5}]})",
+                                   QStringLiteral("/tmp/x"), &source, &clips, &error));
+    QCOMPARE(source, QStringLiteral("/tmp/x/a.mp4"));
+    QCOMPARE(clips.size(), 2);
+}
+
+void BackendTests::keepListRejectsBadFiles() {
+    for (const QByteArray &json : {QByteArray("{}"), QByteArray(R"({"source":"a.mp4","keep":[]})"),
+                                  QByteArray(R"({"source":"a.mp4","keep":[{"start":2,"end":2}]})"),
+                                  QByteArray("nope")}) {
+        QString source, error;
+        edit::Clips clips;
+        QVERIFY(!Backend::parseKeepList(json, QStringLiteral("/tmp"), &source, &clips, &error));
+        QVERIFY(!error.isEmpty());
+    }
+}
+
+void BackendTests::keepListLoadsVideoWithClips() {
+    QVERIFY(!makeVideo(QStringLiteral("keep.mp4"), 4.0, false).isEmpty());
+    QFile json(m_dir.filePath(QStringLiteral("keep.keep.json")));
+    QVERIFY(json.open(QIODevice::WriteOnly));
+    json.write(R"({"source":"keep.mp4","keep":[{"start":0.5,"end":1.5},{"start":2.5,"end":3.5}]})");
+    json.close();
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.loadKeepList(QUrl::fromLocalFile(json.fileName())));
+    QCOMPARE(backend.timeline()->clips(), (edit::Clips{{0.5, 1.5}, {2.5, 3.5}}));
+    waitForBackgroundWork(backend);
 }
 
 void BackendTests::trimArgsReencodeForPreciseCuts() {

@@ -27,6 +27,12 @@ void Timeline::reset(double duration) {
     emit changed();
 }
 
+void Timeline::load(double duration, const edit::Clips &clips) {
+    reset(duration);
+    if (!clips.isEmpty())
+        apply(clips);
+}
+
 void Timeline::markExported(const edit::Clips &clips) {
     m_exported = clips;
     emit changed();

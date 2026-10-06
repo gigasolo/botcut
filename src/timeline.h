@@ -29,6 +29,8 @@ public:
 
     // A freshly loaded video: one clip spanning all of it, and no history.
     void reset(double duration);
+    // A loaded keep-list: reset, then the clips as one undoable step.
+    void load(double duration, const edit::Clips &clips);
     void markExported(const edit::Clips &clips);
 
     // The clip containing t, or -1 in a gap.

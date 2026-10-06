@@ -45,8 +45,13 @@ int main(int argc, char *argv[]) {
 
     // Optionally open a file passed on the command line.
     const QStringList args = app.arguments();
-    if (args.size() > 1)
-        backend.load(QUrl::fromLocalFile(args.at(1)));
+    if (args.size() > 1) {
+        const QString arg = args.at(1);
+        if (arg.endsWith(".json", Qt::CaseInsensitive))
+            backend.loadKeepList(QUrl::fromLocalFile(arg));
+        else
+            backend.load(QUrl::fromLocalFile(arg));
+    }
 
     return app.exec();
 }

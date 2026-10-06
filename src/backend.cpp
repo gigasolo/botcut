@@ -4,6 +4,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QProcess>
 #include <QTextStream>
 
@@ -189,6 +192,52 @@ bool Backend::load(const QUrl &url) {
 
     setStatus(QStringLiteral("Loading..."));
     startThumbs();
+    return true;
+}
+
+bool Backend::parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
+                            edit::Clips *clips, QString *error) {
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    const QJsonObject root = doc.object();
+    if (!doc.isObject() || !root.value("source").isString()) {
+        *error = QStringLiteral("Keep-list has no source");
+        return false;
+    }
+    const QJsonArray keep = root.value("keep").toArray();
+    if (keep.isEmpty()) {
+        *error = QStringLiteral("Keep-list has no ranges");
+        return false;
+    }
+    edit::Clips parsed;
+    for (int i = 0; i < keep.size(); ++i) {
+        const QJsonObject r = keep.at(i).toObject();
+        const double s = r.value("start").toDouble(-1), e = r.value("end").toDouble(-1);
+        if (!r.value("start").isDouble() || !r.value("end").isDouble() || s < 0 || e <= s) {
+            *error = QStringLiteral("Keep-list range %1 is invalid").arg(i + 1);
+            return false;
+        }
+        parsed.append({s, e});
+    }
+    *source = QDir(baseDir).absoluteFilePath(root.value("source").toString());
+    *clips = parsed;
+    return true;
+}
+
+bool Backend::loadKeepList(const QUrl &url) {
+    QFile file(url.toLocalFile());
+    QString source, error;
+    edit::Clips clips;
+    if (!file.open(QIODevice::ReadOnly)) {
+        emit loadError(QStringLiteral("Cannot read keep-list"));
+        return false;
+    }
+    if (!parseKeepList(file.readAll(), QFileInfo(file).absolutePath(), &source, &clips, &error)) {
+        emit loadError(error);
+        return false;
+    }
+    if (!load(QUrl::fromLocalFile(source)))
+        return false;
+    m_timeline.load(m_info.duration, clips);
     return true;
 }
 

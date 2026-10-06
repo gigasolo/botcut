@@ -7,6 +7,7 @@ dependencies = ["requests"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+local = ["faster-whisper>=1.1"]
 
 [project.scripts]
 botcut-cli = "botcut.cli:main"

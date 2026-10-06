@@ -56,6 +56,28 @@ def transcribe_xai(flac: str) -> dict:
     raise SystemExit("STT request failed")
 
 
+def transcribe_local(flac: str, model: str, stem: str) -> dict:
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError as exc:
+        raise SystemExit("Install local STT: uv sync --extra local") from exc
+    started = time.perf_counter()
+    whisper = WhisperModel(model, device="cpu", compute_type="int8")
+    segments, info = whisper.transcribe(flac, language="en", word_timestamps=True, vad_filter=True)
+    words = []
+    for segment in segments:
+        for word in segment.words or []:
+            text = str(word.word).strip()
+            if text:
+                words.append({"text": text, "start": float(word.start), "end": float(word.end)})
+    wall = max(time.perf_counter() - started, 1e-6)
+    duration = float(getattr(info, "duration", 0) or 0)
+    if duration <= 0 and words:
+        duration = words[-1]["end"]
+    print(f"local STT {stem}: {duration:.1f}s in {wall:.1f}s ({duration / wall:.1f}x realtime)")
+    return {"duration": duration, "words": words}
+
+
 def _word(word: dict) -> dict:
     return {"text": str(word["text"]), "start": float(word["start"]), "end": float(word["end"])}
 

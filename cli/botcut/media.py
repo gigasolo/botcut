@@ -37,16 +37,21 @@ def probe(path: str) -> dict:
     duration = float((data.get("format") or {}).get("duration") or audio.get("duration") or 0)
     if video is None:
         width, height, fps = 0, 0, 0.0
+        codec = None
     else:
         width = int(video.get("width") or 0)
         height = int(video.get("height") or 0)
         fps = _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
+        codec = video.get("codec_name")
     return {
         "path": os.path.abspath(path),
         "duration": duration,
         "width": width,
         "height": height,
         "fps": fps,
+        "codec": codec,
+        "audio_codec": audio.get("codec_name"),
+        "sample_rate": int(audio.get("sample_rate") or 0),
     }
 
 

@@ -30,6 +30,7 @@ from botcut.pick import (
     unknown_warnings,
     utterances,
 )
+from botcut.review import build_master, keep_list, launch, offsets, source_clips
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
 
@@ -49,6 +50,10 @@ def main(argv: list[str] | None = None) -> None:
     cap_p.add_argument("--burn", action="store_true", help="also write rough_cut.captioned.mp4")
     short_p = sub.add_parser("short", help="cut one 1080x1920 highlight")
     short_p.add_argument("cuts", help="path to cuts.json")
+    review_p = sub.add_parser("review", help="build a master and open the keep-list")
+    review_p.add_argument("cuts", help="path to cuts.json")
+    review_p.add_argument("--no-open", action="store_true", help="do not launch the BotCut app")
+    review_p.add_argument("--rebuild", action="store_true", help="rebuild master.mp4 even if it is current")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -64,6 +69,8 @@ def main(argv: list[str] | None = None) -> None:
             captions(args.cuts, burn=args.burn)
         elif args.cmd == "short":
             make_short(args.cuts)
+        elif args.cmd == "review":
+            review(args.cuts, no_open=args.no_open, rebuild=args.rebuild)
     except BrokenPipeError:
         sys.exit(0)
 
@@ -253,6 +260,20 @@ def make_short(cuts_path: str) -> None:
         raise SystemExit(f"Short render failed: {detail}")
     dst = os.path.abspath(os.path.join(out_dir, "short.mp4"))
     print(f'Wrote {dst} "{choice["title"]}" ({length:.1f}s)')
+
+
+def review(cuts_path: str, no_open: bool = False, rebuild: bool = False) -> None:
+    out_dir, doc = load_cuts(cuts_path)
+    clips = source_clips(doc)
+    master_path = build_master(clips, out_dir, rebuild)
+    listing = keep_list(doc, offsets(clips))
+    keep_path = os.path.abspath(os.path.join(out_dir, "master.keep.json"))
+    Path(keep_path).write_text(json.dumps(listing, indent=2) + "\n")
+    if not no_open:
+        launch(keep_path)
+    kept = sum(item["end"] - item["start"] for item in listing["keep"])
+    master_s = probe(master_path)["duration"]
+    print(f"Review: {keep_path} ({len(listing['keep'])} ranges, {kept:.1f}s of {master_s:.1f}s)")
 
 
 def load_cuts(cuts_path: str) -> tuple[str, dict]:

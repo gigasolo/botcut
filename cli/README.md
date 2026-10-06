@@ -50,3 +50,12 @@ uv run botcut-cli short out/cuts.json
 ```
 
 `short` asks for one contiguous highlight and writes `out/short.mp4` at 1080×1920 with those captions burned in. It prints `Wrote <path> "<title>" (<len>s)`. Landscape frames are center-cropped with `crop=ih*9/16:ih` and then scaled. A frame that is already 9:16 or taller is only scaled. `BOTCUT_FAKE=1` uses the first three kept lines and does not call the network. A real highlight is asked to land between 30 and 60 seconds; a shorter range is still used when that is what comes back.
+
+## Review
+
+```bash
+uv run botcut-cli review out/cuts.json
+uv run botcut-cli review out/cuts.json --no-open
+```
+
+`review` builds `out/master.mp4` from every shot, in order, and writes `out/master.keep.json` with the rough-cut ranges in master time. When the shots share a codec, size, frame rate, and audio format, the master is a stream copy. Otherwise it is re-encoded the same way as the rough cut. A stream copy that drifts by more than 0.1 seconds per clip prints `master drift …s; re-encoding` and is rebuilt. A second run prints `master up to date`. BotCut opens the keep-list when `botcut` is on `PATH`. `--no-open` skips that. `rough_cut.mp4` stays where it is.

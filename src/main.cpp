@@ -1,4 +1,4 @@
-// omacut — a dead-simple video length trimmer. Qt Quick (QML) UI, ffmpeg cuts.
+// BotCut — a dead-simple video length trimmer. Qt Quick (QML) UI, ffmpeg cuts.
 
 #include <QGuiApplication>
 #include <QIcon>
@@ -19,12 +19,12 @@ int main(int argc, char *argv[]) {
         qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda");
 
     QGuiApplication app(argc, argv);
-    app.setApplicationName("omacut");
+    app.setApplicationName("botcut");
 
-    // Associates the window with omacut.desktop so the compositor (Wayland app_id
+    // Associates the window with botcut.desktop so the compositor (Wayland app_id
     // = this name) and taskbars pick up our installed icon.
-    app.setDesktopFileName("omacut");
-    app.setWindowIcon(QIcon::fromTheme("omacut"));
+    app.setDesktopFileName("botcut");
+    app.setWindowIcon(QIcon::fromTheme("botcut"));
 
     // Modern, themeable controls (the same family Quickshell builds on).
     QQuickStyle::setStyle("Material");

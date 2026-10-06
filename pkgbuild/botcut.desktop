@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=BotCut
+GenericName=AI Rough-Cut Editor
+Comment=Review AI rough cuts and trim videos
+Exec=botcut %f
+Icon=botcut
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+MimeType=video/mp4;video/x-matroska;video/quicktime;video/webm;video/x-msvideo;video/mpeg;
+Keywords=video;trim;cut;clip;ffmpeg;ai;rough cut;
+StartupWMClass=botcut

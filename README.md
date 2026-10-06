@@ -1,4 +1,6 @@
-# Omacut
+# BotCut
+
+A fork of [Omacut](https://github.com/omacom/omacut) by David Heinemeier Hansson (MIT), extended with AI rough cuts from `botcut-cli`. Original copyright and license retained in `LICENSE`.
 
 A dead-simple video trimmer. Open a video, trim either end, split it into clips and cut ranges out of the middle, preview the result, and export. On Omarchy, the interface follows your theme's accent color.
 
@@ -37,7 +39,7 @@ Handles catch on neighbouring clips and the playhead.
 
 ## Install
 
-Install via the Omarchy Package Repository via the `omacut` package. It's installed by default in new installations of Omarchy (from Quattro forward).
+Install this fork next to stock Omacut with `./bin/install`. The Arch package name is `botcut`.
 
 ## Requirements
 
@@ -54,7 +56,7 @@ Uses Qt's own build tool, `qmake6` (no cmake needed):
 ./bin/build
 ```
 
-This produces a single `omacut` binary in `build/`.
+This produces a single `botcut` binary in `build/`.
 
 Requirements:
 

@@ -1,0 +1,1 @@
+"""BotCut rough-cut CLI."""

@@ -17,8 +17,10 @@ from botcut.captions import (
     to_srt,
     word_cache_candidates,
 )
-from botcut.media import extract_audio, probe, render_args, silences
+from botcut.media import extract_audio, probe, render_with_progress, resolve_encoder, silences
 from botcut.pick import (
+    DEFAULT_INTENT,
+    decision_lines,
     dropped_utterances,
     kept_utterances,
     model_name,
@@ -45,6 +47,23 @@ def main(argv: list[str] | None = None) -> None:
     run_p.add_argument("--whisper-model", default="large-v3-turbo")
     run_p.add_argument("--max-pause", type=float, default=0.8)
     run_p.add_argument("--no-snap", action="store_true")
+    run_p.add_argument("--mode", choices=("speech", "assemble"), default="speech")
+    run_p.add_argument("--intent", default="", help="what this movie is, for spoken cuts")
+    run_p.add_argument("--decide", action="store_true", help="write cuts.json and stop before ffmpeg")
+    run_p.add_argument(
+        "--scene-transition",
+        choices=("dip", "off"),
+        default="dip",
+        help="dip through black between source files, or cut",
+    )
+    render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
+    render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
+    render_p.add_argument(
+        "--scene-transition",
+        choices=("dip", "off"),
+        default="dip",
+        help="dip through black between source files, or cut",
+    )
     cap_p = sub.add_parser("captions", help="write an SRT for the rough cut")
     cap_p.add_argument("cuts", help="path to cuts.json")
     cap_p.add_argument("--burn", action="store_true", help="also write rough_cut.captioned.mp4")
@@ -64,7 +83,13 @@ def main(argv: list[str] | None = None) -> None:
                 whisper_model=args.whisper_model,
                 max_pause=args.max_pause,
                 snap_edges=not args.no_snap,
+                mode=args.mode,
+                intent=args.intent,
+                decide=args.decide,
+                scene_transition=args.scene_transition,
             )
+        elif args.cmd == "render":
+            render_saved(args.cuts, scene_transition=args.scene_transition)
         elif args.cmd == "captions":
             captions(args.cuts, burn=args.burn)
         elif args.cmd == "short":
@@ -82,13 +107,40 @@ def run(
     whisper_model: str = "large-v3-turbo",
     max_pause: float = 0.8,
     snap_edges: bool = True,
+    mode: str = "speech",
+    intent: str = "",
+    decide: bool = False,
+    scene_transition: str = "dip",
 ) -> None:
+    if mode not in ("speech", "assemble"):
+        raise SystemExit(f"Unknown mode: {mode}")
     paths = resolve_inputs(files)
+    print("Reading files", flush=True)
     clips = []
     for path in paths:
         if not os.path.isfile(path):
             raise SystemExit(f"No such file: {path}")
         clips.append(probe(path))
+    if mode == "assemble":
+        segs = [
+            {"clip": i, "start": 0.0, "end": float(clip["duration"]), "reason": "assemble"}
+            for i, clip in enumerate(clips)
+        ]
+        doc = {
+            "version": 1,
+            "mode": "assemble",
+            "stt": "none",
+            "model": "none",
+            "tighten": {"max_pause": max_pause, "snap": False},
+            "clips": [
+                {"index": i, "path": clip["path"], "duration": clip["duration"]}
+                for i, clip in enumerate(clips)
+            ],
+            "segments": segs,
+            "dropped": [],
+        }
+        _write_cut(out, doc, segs, clips, scene_transition)
+        return
 
     fake = os.environ.get("BOTCUT_FAKE") == "1"
     backend = "local" if stt == "local" else "xai"
@@ -98,6 +150,7 @@ def run(
     silences_by_clip = []
     for index, clip in enumerate(clips):
         stem = Path(clip["path"]).stem
+        print(f"Transcribing {index + 1}/{len(clips)} {Path(clip['path']).name}", flush=True)
         if fake:
             payload = transcribe_fake()
             cache = word_cache_candidates(work, index, stem, "fake")[0]
@@ -110,7 +163,9 @@ def run(
         silences_by_clip.append(_silences_for_clip(work, index, stem, flac, clip))
 
     utts = utterances(words_by_clip)
-    chosen = pick(utts)
+    print("Choosing takes", flush=True)
+    movie = intent.strip() or DEFAULT_INTENT
+    chosen = pick(utts, movie)
     segs, unknown = segments(utts, chosen, [clip["duration"] for clip in clips])
     if snap_edges:
         segs = snap(segs, silences_by_clip)
@@ -124,6 +179,8 @@ def run(
 
     doc = {
         "version": 1,
+        "mode": "speech",
+        "intent": movie,
         "stt": _stt_label(fake, stt, whisper_model),
         "model": "fake" if fake else model_name(),
         "tighten": {"max_pause": max_pause, "snap": snap_edges},
@@ -132,6 +189,7 @@ def run(
             for i, clip in enumerate(clips)
         ],
         "segments": segs,
+        "lines": decision_lines(utts, chosen),
         "dropped": [
             {
                 "id": utt["id"],
@@ -143,24 +201,119 @@ def run(
             for utt in dropped
         ],
     }
+    if decide:
+        _write_doc(out, doc)
+        kept_n = sum(1 for line in doc["lines"] if line["keep"])
+        print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
+        return
+    _write_cut(out, doc, segs, clips, scene_transition)
+
+
+def _write_doc(out: str, doc: dict) -> str:
     os.makedirs(out, exist_ok=True)
     cuts_path = os.path.join(out, "cuts.json")
     Path(cuts_path).write_text(json.dumps(doc, indent=2) + "\n")
     print(f"Wrote {os.path.abspath(cuts_path)}")
+    return cuts_path
+
+
+def _write_cut(out: str, doc: dict, segs: list, clips: list, scene_transition: str = "dip") -> None:
+    _write_doc(out, doc)
     if not segs:
         raise SystemExit("No segments to render")
     dst = os.path.join(out, "rough_cut.mp4")
-    proc = subprocess.run(
-        ["ffmpeg", *render_args(segs, clips, dst)],
-        capture_output=True,
-        text=True,
+    render_with_progress(
+        segs,
+        clips,
+        dst,
+        "Rendering",
+        "Render failed",
+        polish=True,
+        scene_transition=scene_transition,
     )
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[-500:] or "ffmpeg failed"
-        raise SystemExit(f"Render failed: {detail}")
     kept_s = sum(seg["end"] - seg["start"] for seg in segs)
     total_s = sum(clip["duration"] for clip in clips)
     print(f"Wrote {os.path.abspath(dst)} ({kept_s:.1f}s of {total_s:.1f}s)")
+
+
+def render_saved(cuts: str, scene_transition: str = "dip") -> None:
+    """Encode rough_cut.mp4 from a cuts.json the tray has already confirmed."""
+    path = cuts
+    if os.path.isdir(path):
+        path = os.path.join(path, "cuts.json")
+    path = os.path.abspath(path)
+    if not os.path.isfile(path):
+        raise SystemExit(f"No such file: {path}")
+    try:
+        doc = json.loads(Path(path).read_text())
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Cannot read {path}: {exc}") from exc
+    out = os.path.dirname(path)
+    rows = sorted(doc.get("clips") or [], key=lambda clip: int(clip["index"]))
+    if not rows:
+        raise SystemExit("cuts.json has no clips")
+    clips = [probe(row["path"]) for row in rows]
+    lines = doc.get("lines") or []
+    if lines:
+        tighten_doc = doc.get("tighten") or {}
+        segs = _segments_for_lines(
+            lines,
+            [float(clip["duration"]) for clip in clips],
+            _load_silences(out, clips),
+            bool(tighten_doc.get("snap", True)),
+            float(tighten_doc.get("max_pause", 0.8)),
+        )
+        doc["segments"] = segs
+        doc["dropped"] = [
+            {
+                "id": line["id"],
+                "clip": line["clip"],
+                "start": line["start"],
+                "end": line["end"],
+                "text": line["text"],
+            }
+            for line in lines
+            if not line.get("keep")
+        ]
+    else:
+        segs = doc.get("segments") or []
+    _write_cut(out, doc, segs, clips, scene_transition)
+
+
+def _segments_for_lines(
+    lines: list, durations: list, silences: list, snap_edges: bool, max_pause: float
+) -> list:
+    utts = [
+        {
+            "id": int(line["id"]),
+            "clip": int(line["clip"]),
+            "start": float(line["start"]),
+            "end": float(line["end"]),
+            "text": str(line.get("text") or ""),
+        }
+        for line in lines
+    ]
+    keep = [
+        {"id": int(line["id"]), "reason": str(line.get("reason") or "restored")}
+        for line in lines
+        if line.get("keep")
+    ]
+    segs, _unknown = segments(utts, keep, durations)
+    if snap_edges:
+        segs = snap(segs, silences)
+    return tighten(segs, silences, max_pause)
+
+
+def _load_silences(out: str, clips: list) -> list:
+    work = os.path.join(out, "work")
+    found = []
+    for index, clip in enumerate(clips):
+        cache = os.path.join(work, f"{index}-{Path(clip['path']).stem}.silences.json")
+        if os.path.isfile(cache):
+            found.append([tuple(pair) for pair in json.loads(Path(cache).read_text())])
+        else:
+            found.append([])
+    return found
 
 
 def _words_for_clip(
@@ -212,7 +365,13 @@ def captions(cuts_path: str, burn: bool = False) -> None:
     src = os.path.join(out_dir, "rough_cut.mp4")
     if not os.path.isfile(src):
         raise SystemExit(f"No such file: {src}")
-    proc = subprocess.run(["ffmpeg", *burn_args()], cwd=out_dir, capture_output=True, text=True)
+    encoder, device = resolve_encoder()
+    proc = subprocess.run(
+        ["ffmpeg", *burn_args(encoder=encoder, device=device)],
+        cwd=out_dir,
+        capture_output=True,
+        text=True,
+    )
     if proc.returncode != 0:
         detail = (proc.stderr or "").strip()[-500:] or "ffmpeg failed"
         raise SystemExit(f"Caption burn failed: {detail}")
@@ -249,8 +408,19 @@ def make_short(cuts_path: str) -> None:
         raise SystemExit(f"No such file: {src}")
     require_subtitles()
     info = probe(src)
+    encoder, device = resolve_encoder()
     proc = subprocess.run(
-        ["ffmpeg", *short_args(start, length, int(info["width"]), int(info["height"]))],
+        [
+            "ffmpeg",
+            *short_args(
+                start,
+                length,
+                int(info["width"]),
+                int(info["height"]),
+                encoder=encoder,
+                device=device,
+            ),
+        ],
         cwd=out_dir,
         capture_output=True,
         text=True,

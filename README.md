@@ -37,6 +37,12 @@ Handles catch on neighbouring clips and the playhead.
 - *Q*: Quit (asks first if the edit hasn't been exported).
 - *?*: Show the hotkeys in the app.
 
+## Several videos
+
+With no video open, drop videos or a folder onto the window, or add them with the button. Files added together are ordered oldest first, from the file's creation time. The selected file plays in the window. Move files up or down, or remove one, then choose a cut. **Save list** writes that order and the cut mode to a file. **Open list**, or dropping that file, puts them back. **This movie** is one line about what to keep. **Spoken cuts** uses that line, then lists every kept and dropped line so **Restore** can put one back before **Render**. It needs an xAI key. The tray says whether one is set, and **Set key** pastes one for this launch. **All files, in order** pastes every file from start to end and does not need a key. The timeline then opens with one clip per file, and the handles work as they do on a single video.
+
+The same switch on the command line is `botcut-cli run shots.txt --out out/ --mode assemble`.
+
 ## Keep-lists
 
 `botcut file.keep.json` opens that video with the keep ranges already laid out as clips. Ctrl+Z once restores the full source.

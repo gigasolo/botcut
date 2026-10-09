@@ -1,7 +1,9 @@
 #include <QtTest>
 
+#include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QTimeZone>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -10,13 +12,16 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSettings>
 #include <QSignalSpy>
 #include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QVariantList>
 
 #include "backend.h"
 #include "filepicker.h"
 #include "thumbprovider.h"
+#include "cutjob.h"
 #include "thumbworker.h"
 
 class FakeFilePicker : public FilePicker {
@@ -29,6 +34,9 @@ public:
     QList<int> lastScaleHeights;
 
     void openVideo() override { ++openCount; }
+    void openVideos() override { ++openCount; }
+    void openCutList() override {}
+    void saveCutList(const QUrl &) override {}
 
     void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) override {
         ++exportCount;
@@ -87,6 +95,60 @@ public:
 
     Q_INVOKABLE bool load(const QUrl &) { return false; }
     Q_INVOKABLE void openVideoDialog() { ++openCount; }
+    Q_PROPERTY(QStringList tray READ tray NOTIFY infoChanged)
+    Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY infoChanged)
+    Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY infoChanged)
+    Q_PROPERTY(bool gathering READ gathering NOTIFY infoChanged)
+    Q_PROPERTY(QUrl previewUrl READ previewUrl NOTIFY infoChanged)
+    Q_PROPERTY(bool trayMissing READ trayMissing NOTIFY infoChanged)
+    Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY infoChanged)
+    Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY infoChanged)
+    Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
+    Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY infoChanged)
+    Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY infoChanged)
+    Q_PROPERTY(QVariantList selects READ selects NOTIFY infoChanged)
+    void setTray(const QStringList &tray) { m_tray = tray; }
+    void setSelects(const QVariantList &selects) { m_selects = selects; }
+    QStringList tray() const { return m_tray; }
+    int trayIndex() const { return -1; }
+    void setTrayIndex(int) {}
+    QString cutMode() const { return m_cutMode; }
+    void setCutMode(const QString &mode) {
+        if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
+            return;
+        if (mode == m_cutMode)
+            return;
+        m_cutMode = mode;
+        emit infoChanged();
+    }
+    bool gathering() const { return m_source.isEmpty(); }
+    QUrl previewUrl() const { return {}; }
+    bool trayMissing() const { return false; }
+    bool apiKeySet() const { return false; }
+    bool renderedUnsaved() const { return m_renderedUnsaved; }
+    bool roughCut() const { return false; }
+    void setRenderedUnsaved(bool value) { m_renderedUnsaved = value; }
+    QString intent() const { return defaultCutIntent(); }
+    void setIntent(const QString &) {}
+    QString sceneTransition() const { return m_sceneTransition; }
+    void setSceneTransition(const QString &value) {
+        m_sceneTransition = value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
+    }
+    QVariantList selects() const { return m_selects; }
+    Q_INVOKABLE void restoreSelect(int) {}
+    Q_INVOKABLE void renderSelects() {}
+    Q_INVOKABLE void writeCaptions() {}
+    Q_INVOKABLE void makeShort() {}
+    Q_INVOKABLE void addVideosDialog() {}
+    Q_INVOKABLE void addDropped(const QList<QUrl> &) {}
+    Q_INVOKABLE bool trayFileExists(const QString &) const { return true; }
+    Q_INVOKABLE QString trayFileSize(const QString &) const { return QStringLiteral("1 MB"); }
+    Q_INVOKABLE void openCutListDialog() {}
+    Q_INVOKABLE void saveCutListDialog() {}
+    Q_INVOKABLE void setApiKey(const QString &) {}
+    Q_INVOKABLE void moveTray(int) {}
+    Q_INVOKABLE void removeTray() {}
+    Q_INVOKABLE void startCut() {}
     Q_INVOKABLE void exportDialog() {
         ++exportCount;
         exportedClips = timeline.clips();
@@ -97,6 +159,8 @@ public:
         lastThumbStart = start;
         lastThumbEnd = end;
     }
+    Q_INVOKABLE void showShots() {}
+    Q_INVOKABLE void showMovie() {}
 
     void announceInfo() {
         timeline.reset(m_duration);
@@ -109,6 +173,7 @@ public:
 
     Timeline timeline;
     edit::Clips exportedClips;
+    QString m_cutMode = QStringLiteral("speech");
     int openCount = 0;
     int exportCount = 0;
     int thumbRequestCount = 0;
@@ -128,6 +193,10 @@ signals:
 private:
     QUrl m_source;
     double m_duration;
+    QStringList m_tray;
+    QVariantList m_selects;
+    bool m_renderedUnsaved = false;
+    QString m_sceneTransition = QStringLiteral("dip");
 };
 
 // Finds a DialogButton by its label ("primary" tells them apart from Labels).
@@ -142,6 +211,43 @@ static QQuickItem *dialogButton(QQuickWindow *window, const QString &text) {
 
 static QPoint itemCenter(QQuickItem *item) {
     return item->mapToScene(QPointF(item->width() / 2, item->height() / 2)).toPoint();
+}
+
+static QQuickItem *visibleItemWithText(QQuickWindow *window, const QString &text) {
+    const auto items = window->findChildren<QQuickItem *>();
+    for (QQuickItem *item : items) {
+        if (!item->isVisible())
+            continue;
+        if (item->property("text").toString() == text)
+            return item;
+    }
+    return nullptr;
+}
+
+static bool visibleTextStartsWith(QQuickWindow *window, const QString &prefix) {
+    const auto items = window->findChildren<QQuickItem *>();
+    for (QQuickItem *item : items) {
+        if (!item->isVisible())
+            continue;
+        if (item->property("text").toString().startsWith(prefix))
+            return true;
+    }
+    return false;
+}
+
+static QString labelFitError(QQuickWindow *window, const QString &label) {
+    QQuickItem *match = visibleItemWithText(window, label);
+    if (!match)
+        return label + QStringLiteral(" is missing");
+    if (match->implicitWidth() <= 0)
+        return label + QStringLiteral(" has no width");
+    if (match->width() + 1.0 < match->implicitWidth()) {
+        return QStringLiteral("%1 width %2 is under its text width %3")
+            .arg(label)
+            .arg(match->width())
+            .arg(match->implicitWidth());
+    }
+    return {};
 }
 
 static QString mainQmlPath() {
@@ -178,6 +284,18 @@ class BackendTests : public QObject {
 private slots:
     void initTestCase();
     void openDialogDelegatesToFilePicker();
+    void trayOrdersFiles();
+    void droppedDirectoryAddsVideosOldestFirst();
+    void cutListRoundTripsOrderAndMode();
+    void dropSelectUnkeepsALine();
+    void missingFileBlocksCut();
+    void speechWithoutKeyDoesNotStart();
+    void savedKeyLoadsAndEnvironmentKeyIsNotStored();
+    void typedKeyStaysInTheChildEnvironment();
+    void gatherLabelsFit();
+    void cutLaunchUsesTheCliOrUv();
+    void sceneTransitionRoundTrips();
+    void cutStatusLines();
     void pickerSelectionLoadsVideo();
     void thumbnailSlotsAreExposedImmediately();
     void thumbProviderUsesRevisionPrefixedIds();
@@ -200,6 +318,9 @@ private slots:
     void qmlBracketsJumpBetweenClipEdges();
     void qmlZoomFocusesTheClip();
     void qmlQuitConfirmsUnexportedEdit();
+    void qmlLooseCutAsksToSaveOrLose();
+    void renderedCutCopiesInsteadOfEncoding();
+    void savedCutCopiesTheCaptionFile();
     void timelineSplitsTrimsAndJoins();
     void timelineUndoesAGestureAsOneStep();
     void timelineTracksUnexportedCuts();
@@ -212,6 +333,7 @@ private slots:
     void trimArgsReencodeForPreciseCuts();
     void trimArgsConcatenateTheRanges();
     void trimArgsScaleTheShorterSide();
+    void trimArgsUsesVaapiWhenGivenADevice();
     void exportHeightsNeverUpscale();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
@@ -230,8 +352,11 @@ private:
 
 void BackendTests::initTestCase() {
     QQuickStyle::setStyle(QStringLiteral("Material"));
+    QCoreApplication::setOrganizationName(QStringLiteral("gigasolo"));
+    QCoreApplication::setApplicationName(QStringLiteral("botcut"));
 
     QVERIFY2(m_dir.isValid(), "temporary directory is valid");
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, m_dir.path());
     m_videoPath = m_dir.filePath(QStringLiteral("clip.mp4"));
 
     QVERIFY2(!QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty(), "ffmpeg is available");
@@ -278,6 +403,503 @@ bool BackendTests::installBrokenFfmpeg(const QString &dirPath) {
                                | QFileDevice::ExeOwner);
 }
 
+void BackendTests::trayOrdersFiles() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString first = m_dir.filePath(QStringLiteral("one.mp4"));
+    const QString second = m_dir.filePath(QStringLiteral("two.mp4"));
+    QVERIFY(QFile(first).open(QIODevice::WriteOnly));
+    QVERIFY(QFile(second).open(QIODevice::WriteOnly));
+    const auto stamp = [](const QString &path, int day) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadWrite))
+            return false;
+        const QDateTime when(QDate(2020, 1, day), QTime(12, 0), QTimeZone::UTC);
+        return file.setFileTime(when, QFileDevice::FileModificationTime);
+    };
+    QVERIFY(stamp(second, 1));
+    QVERIFY(stamp(first, 2));
+    backend.addTrayFiles({first, second, second});
+    QCOMPARE(backend.tray(), (QStringList{QFileInfo(second).absoluteFilePath(),
+                                          QFileInfo(first).absoluteFilePath()}));
+    QCOMPARE(backend.trayIndex(), 0);
+    backend.moveTray(-1);
+    QCOMPARE(backend.tray().first(), QFileInfo(second).absoluteFilePath());
+    backend.moveTray(1);
+    QCOMPARE(backend.tray().first(), QFileInfo(first).absoluteFilePath());
+    QCOMPARE(backend.trayIndex(), 1);
+    backend.removeTray();
+    QCOMPARE(backend.tray().size(), 1);
+    QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
+    backend.setCutMode(QStringLiteral("assemble"));
+    QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
+    backend.setCutMode(QStringLiteral("nope"));
+    QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
+}
+
+void BackendTests::droppedDirectoryAddsVideosOldestFirst() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.gathering());
+    QCOMPARE(backend.previewUrl(), QUrl());
+
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString root = dir.path();
+    QVERIFY(QDir(root).mkpath(QStringLiteral("nested")));
+    const auto touch = [](const QString &path) {
+        QFile file(path);
+        return file.open(QIODevice::WriteOnly);
+    };
+    const QString older = QDir(root).filePath(QStringLiteral("b.mp4"));
+    const QString newer = QDir(root).filePath(QStringLiteral("a.MOV"));
+    QVERIFY(touch(older));
+    QVERIFY(touch(newer));
+    QVERIFY(touch(QDir(root).filePath(QStringLiteral("note.txt"))));
+    QVERIFY(touch(QDir(root).filePath(QStringLiteral(".hidden.mp4"))));
+    QVERIFY(touch(QDir(root).filePath(QStringLiteral("nested/c.mp4"))));
+    const auto stamp = [](const QString &path, int day) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadWrite))
+            return false;
+        const QDateTime when(QDate(2020, 6, day), QTime(8, 0), QTimeZone::UTC);
+        return file.setFileTime(when, QFileDevice::FileModificationTime);
+    };
+    QVERIFY(stamp(older, 1));
+    QVERIFY(stamp(newer, 3));
+
+    backend.addDropped({QUrl::fromLocalFile(root)});
+    const QString first = QFileInfo(older).absoluteFilePath();
+    const QString second = QFileInfo(newer).absoluteFilePath();
+    QCOMPARE(backend.tray(), (QStringList{first, second}));
+    QCOMPARE(backend.trayIndex(), 0);
+    QCOMPARE(backend.previewUrl(), QUrl::fromLocalFile(first));
+    QVERIFY(backend.gathering());
+
+    backend.setTrayIndex(1);
+    QCOMPARE(backend.previewUrl(), QUrl::fromLocalFile(second));
+
+    // Birth time on a copy is newer than the camera's modified time. The older
+    // camera time must win, even when the name and the birth time say otherwise.
+    const QString copiedNewer = m_dir.filePath(QStringLiteral("a-new.mp4"));
+    const QString copiedOlder = m_dir.filePath(QStringLiteral("z-old.mp4"));
+    const QString skip = m_dir.filePath(QStringLiteral("notes.txt"));
+    QVERIFY(touch(copiedNewer));
+    QTest::qSleep(1100);
+    QVERIFY(touch(copiedOlder));
+    QVERIFY(touch(skip));
+    const auto stampModified = [](const QString &path, const QDate &modified) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadWrite))
+            return false;
+        return file.setFileTime(QDateTime(modified, QTime(12, 0), QTimeZone::UTC),
+                                 QFileDevice::FileModificationTime);
+    };
+    QVERIFY(stampModified(copiedNewer, QDate(2019, 6, 1)));
+    QVERIFY(stampModified(copiedOlder, QDate(2019, 1, 1)));
+    backend.addDropped({QUrl::fromLocalFile(skip), QUrl::fromLocalFile(copiedNewer),
+                        QUrl::fromLocalFile(copiedOlder),
+                        QUrl(QStringLiteral("https://example.com/nope.mp4"))});
+    QCOMPARE(backend.tray(), (QStringList{first, second,
+                                          QFileInfo(copiedOlder).absoluteFilePath(),
+                                          QFileInfo(copiedNewer).absoluteFilePath()}));
+    QCOMPARE(backend.previewUrl(), QUrl::fromLocalFile(second));
+
+    backend.removeTray();
+    backend.removeTray();
+    backend.removeTray();
+    backend.removeTray();
+    QVERIFY(backend.tray().isEmpty());
+    QCOMPARE(backend.previewUrl(), QUrl());
+    QVERIFY(backend.gathering());
+}
+
+void BackendTests::cutListRoundTripsOrderAndMode() {
+    const QString first = QStringLiteral("/tmp/clips/b.mp4");
+    const QString second = QStringLiteral("/tmp/clips/a.MOV");
+    const QByteArray bytes = writeCutList(QStringLiteral("assemble"), {second, first});
+    const QString text = QString::fromUtf8(bytes);
+    QVERIFY(text.contains(QStringLiteral("\"mode\": \"assemble\"")));
+    QVERIFY(!text.contains(QStringLiteral("XAI")));
+    QVERIFY(!text.contains(QStringLiteral("apiKey")));
+    QVERIFY(!text.contains(QStringLiteral("supersecret")));
+
+    QString mode;
+    QStringList files;
+    QString error;
+    QString intent;
+    QVERIFY(parseCutList(bytes, QStringLiteral("/unused"), &mode, &files, &error, &intent));
+    QCOMPARE(mode, QStringLiteral("assemble"));
+    QCOMPARE(files, (QStringList{second, first}));
+    QCOMPARE(intent, defaultCutIntent());
+    QVERIFY(text.contains(QStringLiteral("\"intent\"")));
+    QVariantList noLines;
+    QVERIFY(parseCutList(bytes, QStringLiteral("/unused"), &mode, &files, &error, &intent, &noLines));
+    QVERIFY(noLines.isEmpty());
+
+    QVariantMap kept;
+    kept.insert(QStringLiteral("id"), 2);
+    kept.insert(QStringLiteral("clip"), 0);
+    kept.insert(QStringLiteral("start"), 1.25);
+    kept.insert(QStringLiteral("end"), 3.5);
+    kept.insert(QStringLiteral("text"), QStringLiteral("hello there"));
+    kept.insert(QStringLiteral("keep"), true);
+    kept.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    const QByteArray withLines = writeCutList(QStringLiteral("speech"), {second, first},
+                                               QStringLiteral("A ride"), {kept});
+    QVariantList parsedLines;
+    QVERIFY(parseCutList(withLines, QStringLiteral("/unused"), &mode, &files, &error, &intent,
+                         &parsedLines));
+    QCOMPARE(mode, QStringLiteral("speech"));
+    QCOMPARE(intent, QStringLiteral("A ride"));
+    QCOMPARE(parsedLines.size(), 1);
+    QCOMPARE(parsedLines.at(0).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello there"));
+    QCOMPARE(parsedLines.at(0).toMap().value(QStringLiteral("keep")).toBool(), true);
+    QCOMPARE(parsedLines.at(0).toMap().value(QStringLiteral("start")).toDouble(), 1.25);
+
+    const QByteArray extra = QByteArrayLiteral(
+        "{\"version\":1,\"mode\":\"speech\",\"apiKey\":\"supersecret\",\"files\":[\"a.mp4\"]}");
+    QVERIFY(parseCutList(extra, QStringLiteral("/tmp/clips"), &mode, &files, &error, &intent));
+    QCOMPARE(mode, QStringLiteral("speech"));
+    QCOMPARE(files, (QStringList{QStringLiteral("/tmp/clips/a.mp4")}));
+    QCOMPARE(intent, defaultCutIntent());
+    const QByteArray rewritten = writeCutList(mode, files);
+    QVERIFY(!QString::fromUtf8(rewritten).contains(QStringLiteral("supersecret")));
+}
+
+void BackendTests::dropSelectUnkeepsALine() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QVariantMap kept;
+    kept.insert(QStringLiteral("id"), 2);
+    kept.insert(QStringLiteral("clip"), 0);
+    kept.insert(QStringLiteral("start"), 1.25);
+    kept.insert(QStringLiteral("end"), 3.5);
+    kept.insert(QStringLiteral("text"), QStringLiteral("hello there"));
+    kept.insert(QStringLiteral("keep"), true);
+    kept.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    const QString clip = m_dir.filePath(QStringLiteral("line.mp4"));
+    QVERIFY(QFile(clip).open(QIODevice::WriteOnly));
+    QFile list(m_dir.filePath(QStringLiteral("lines.botcut.json")));
+    QVERIFY(list.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = writeCutList(QStringLiteral("speech"), {clip}, QStringLiteral("A ride"), {kept});
+    QCOMPARE(list.write(bytes), bytes.size());
+    list.close();
+
+    backend.addDropped({QUrl::fromLocalFile(list.fileName())});
+    QCOMPARE(backend.selects().size(), 1);
+    QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+
+    backend.dropSelect(2);
+    QVERIFY(!backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("reason")).toString(),
+             QStringLiteral("dropped"));
+    backend.dropSelect(2);
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("reason")).toString(),
+             QStringLiteral("dropped"));
+
+    backend.restoreSelect(2);
+    QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("reason")).toString(),
+             QStringLiteral("restored"));
+}
+
+void BackendTests::missingFileBlocksCut() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString real = m_dir.filePath(QStringLiteral("kept.mp4"));
+    QVERIFY(QFile(real).open(QIODevice::WriteOnly));
+    const QString missing = m_dir.filePath(QStringLiteral("gone.mp4"));
+    QFile list(m_dir.filePath(QStringLiteral("cut.botcut.json")));
+    QVERIFY(list.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = writeCutList(QStringLiteral("assemble"),
+                                           {QFileInfo(real).absoluteFilePath(), missing});
+    QCOMPARE(list.write(bytes), bytes.size());
+    list.close();
+
+    backend.addDropped({QUrl::fromLocalFile(list.fileName())});
+    QCOMPARE(backend.tray(), (QStringList{QFileInfo(real).absoluteFilePath(),
+                                          QFileInfo(missing).absoluteFilePath()}));
+    QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
+    QVERIFY(backend.trayMissing());
+    QVERIFY(backend.gathering());
+    backend.startCut();
+    QCOMPARE(backend.status(), QStringLiteral("A file in the list is missing"));
+    QVERIFY(!backend.busy());
+    QVERIFY(!backend.status().contains(QStringLiteral("supersecret")));
+}
+
+void BackendTests::speechWithoutKeyDoesNotStart() {
+    EnvVarGuard guard("XAI_API_KEY");
+    qunsetenv("XAI_API_KEY");
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString real = m_dir.filePath(QStringLiteral("spoken.mp4"));
+    QVERIFY(QFile(real).open(QIODevice::WriteOnly));
+    backend.addTrayFiles({real});
+    backend.setCutMode(QStringLiteral("speech"));
+    backend.setApiKey(QStringLiteral("supersecret"));
+    QVERIFY(backend.apiKeySet());
+    backend.setApiKey(QString());
+    QVERIFY(!backend.apiKeySet());
+
+    backend.startCut();
+    QCOMPARE(backend.status(), QStringLiteral("Set an xAI key for spoken cuts."));
+    QVERIFY(!backend.busy());
+    QVERIFY(!backend.status().contains(QStringLiteral("supersecret")));
+}
+
+void BackendTests::savedKeyLoadsAndEnvironmentKeyIsNotStored() {
+    EnvVarGuard guard("XAI_API_KEY");
+    qputenv("XAI_API_KEY", "from-env");
+
+    MemoryKeyStore store;
+    ThumbProvider provider;
+    Backend withEnv(&provider, new FakeFilePicker, &store);
+    QVERIFY(withEnv.apiKeySet());
+    QCOMPARE(store.load(), QString());
+    QVERIFY(!withEnv.status().contains(QStringLiteral("from-env")));
+
+    qunsetenv("XAI_API_KEY");
+    QVERIFY(!withEnv.apiKeySet());
+
+    withEnv.setApiKey(QStringLiteral("supersecret"));
+    QCOMPARE(store.load(), QStringLiteral("supersecret"));
+    QVERIFY(withEnv.apiKeySet());
+    QVERIFY(!withEnv.status().contains(QStringLiteral("supersecret")));
+
+    ThumbProvider nextProvider;
+    Backend next(&nextProvider, new FakeFilePicker, &store);
+    QVERIFY(next.apiKeySet());
+    next.setApiKey(QString());
+    QCOMPARE(store.load(), QString());
+    QVERIFY(!next.apiKeySet());
+    QVERIFY(!next.status().contains(QStringLiteral("supersecret")));
+}
+
+void BackendTests::gatherLabelsFit() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({QStringLiteral("/tmp/one.mp4"), QStringLiteral("/tmp/two.mp4"),
+                     QStringLiteral("/tmp/three.mp4"), QStringLiteral("/tmp/four.mp4")});
+    QVariantList lines;
+    for (int i = 0; i < 8; ++i) {
+        QVariantMap line;
+        line.insert(QStringLiteral("id"), i);
+        line.insert(QStringLiteral("text"),
+                    QStringLiteral("a spoken line that is long enough to fill the row"));
+        line.insert(QStringLiteral("keep"), i % 2 == 0);
+        line.insert(QStringLiteral("reason"), QStringLiteral("unique?"));
+        lines.append(line);
+    }
+    backend.setSelects(lines);
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->resize(960, 640);
+    window->show();
+    QTest::qWait(100);
+
+    QQuickItem *cut = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
+    QVERIFY(cut);
+    QVERIFY(cut->isVisible());
+    const qreal cutTop = cut->mapToScene(QPointF(0, 0)).y();
+    const qreal cutBottom = cut->mapToScene(QPointF(0, cut->height())).y();
+    QVERIFY2(cutTop >= 0, qPrintable(QStringLiteral("cut top %1").arg(cutTop)));
+    QVERIFY2(cutBottom <= window->height() + 1.0,
+             qPrintable(QStringLiteral("cut bottom %1 is past the window bottom %2")
+                            .arg(cutBottom)
+                            .arg(window->height())));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Lines")));
+    QVERIFY2(labelFitError(window, QStringLiteral("Render")).isEmpty(),
+             qPrintable(labelFitError(window, QStringLiteral("Render"))));
+
+    const QStringList mainLabels{QStringLiteral("Open list"), QStringLiteral("Save list"),
+                                 QStringLiteral("Trim one file")};
+    for (const QString &label : mainLabels)
+        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
+    QVERIFY(!visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("This movie")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Spoken cuts")));
+
+    QQuickItem *settings = window->findChild<QQuickItem *>(QStringLiteral("settingsButton"));
+    QVERIFY(settings);
+    QVERIFY(settings->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(settings));
+    QVERIFY(window->property("settingsOpen").toBool());
+
+    const QStringList settingLabels{QStringLiteral("Spoken cuts"), QStringLiteral("This movie"),
+                                    QStringLiteral("Dip to black between files")};
+    for (const QString &label : settingLabels)
+        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
+    QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+
+    QQuickItem *spoken = window->findChild<QQuickItem *>(QStringLiteral("spokenCutsBox"));
+    QVERIFY(spoken);
+    QVERIFY(spoken->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(spoken));
+    QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
+    QVERIFY(!visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+    QVERIFY2(labelFitError(window, QStringLiteral("Keeps every file, in this order.")).isEmpty(),
+             qPrintable(labelFitError(window, QStringLiteral("Keeps every file, in this order."))));
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(spoken));
+    QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
+    QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Keeps every file, in this order.")));
+}
+
+void BackendTests::typedKeyStaysInTheChildEnvironment() {
+    QProcessEnvironment base;
+    base.insert(QStringLiteral("PATH"), QStringLiteral("/usr/bin"));
+    const QProcessEnvironment withKey = cutProcessEnvironment(base, QStringLiteral("supersecret"));
+    QCOMPARE(withKey.value(QStringLiteral("XAI_API_KEY")), QStringLiteral("supersecret"));
+    QCOMPARE(withKey.value(QStringLiteral("PATH")), QStringLiteral("/usr/bin"));
+
+    const QProcessEnvironment untouched = cutProcessEnvironment(base, QString());
+    QCOMPARE(untouched.value(QStringLiteral("XAI_API_KEY")), QString());
+
+    const CutLaunch launch = cutRunLaunch({QStringLiteral("/tmp/a.mp4")}, QStringLiteral("speech"),
+                                           QStringLiteral("/tmp/out"), QStringLiteral("/usr/bin/botcut-cli"),
+                                           QString(), QString());
+    QVERIFY(!launch.arguments.join(QStringLiteral(" ")).contains(QStringLiteral("supersecret")));
+    QVERIFY(!launch.arguments.contains(QStringLiteral("XAI_API_KEY")));
+}
+
+void BackendTests::cutLaunchUsesTheCliOrUv() {
+    const QStringList files{QStringLiteral("/tmp/a.mp4"), QStringLiteral("/tmp/b.mp4")};
+    const CutLaunch direct = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
+                                           QStringLiteral("/usr/bin/botcut-cli"), QString(), QString());
+    QCOMPARE(direct.program, QStringLiteral("/usr/bin/botcut-cli"));
+    QCOMPARE(direct.arguments, (QStringList{QStringLiteral("run"), QStringLiteral("/tmp/a.mp4"),
+                                             QStringLiteral("/tmp/b.mp4"), QStringLiteral("--out"),
+                                             QStringLiteral("/tmp/out"), QStringLiteral("--mode"),
+                                             QStringLiteral("assemble"), QStringLiteral("--intent"),
+                                             defaultCutIntent(), QStringLiteral("--scene-transition"),
+                                             QStringLiteral("dip")}));
+    QVERIFY(direct.error.isEmpty());
+
+    const CutLaunch viaUv = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                          QString(), QStringLiteral("/usr/bin/uv"),
+                                          QStringLiteral("/home/lonbaker/code/botcut/cli"));
+    QCOMPARE(viaUv.program, QStringLiteral("/usr/bin/uv"));
+    QCOMPARE(viaUv.arguments.mid(0, 4),
+             (QStringList{QStringLiteral("run"), QStringLiteral("--project"),
+                          QStringLiteral("/home/lonbaker/code/botcut/cli"),
+                          QStringLiteral("botcut-cli")}));
+    QCOMPARE(viaUv.arguments.at(viaUv.arguments.indexOf(QStringLiteral("--mode")) + 1),
+             QStringLiteral("speech"));
+    QVERIFY(!viaUv.arguments.contains(QStringLiteral("--decide")));
+
+    const CutLaunch decided = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                            QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                            QStringLiteral("a ride"), true);
+    QCOMPARE(decided.arguments.at(decided.arguments.indexOf(QStringLiteral("--intent")) + 1),
+             QStringLiteral("a ride"));
+    QCOMPARE(decided.arguments.last(), QStringLiteral("--decide"));
+
+    const CutLaunch missing = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
+                                            QString(), QString(), QString());
+    QVERIFY(missing.program.isEmpty());
+    QVERIFY(missing.error.contains(QStringLiteral("botcut-cli")));
+
+    const CutLaunch review = cutReviewLaunch(QStringLiteral("/tmp/out/cuts.json"),
+                                              QStringLiteral("/usr/bin/botcut-cli"), QString(), QString());
+    QCOMPARE(review.arguments, (QStringList{QStringLiteral("review"), QStringLiteral("/tmp/out/cuts.json"),
+                                             QStringLiteral("--no-open")}));
+
+    const CutLaunch hard = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
+                                         QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                         QString(), false, QStringLiteral("off"));
+    QCOMPARE(hard.arguments.at(hard.arguments.indexOf(QStringLiteral("--scene-transition")) + 1),
+             QStringLiteral("off"));
+    QVERIFY(!hard.arguments.contains(QStringLiteral("--decide")));
+
+    const CutLaunch rendered = cutRenderLaunch(QStringLiteral("/tmp/out"),
+                                                QStringLiteral("/usr/bin/botcut-cli"), QString(),
+                                                QString(), QStringLiteral("weird"));
+    QCOMPARE(rendered.arguments, (QStringList{QStringLiteral("render"), QStringLiteral("/tmp/out"),
+                                               QStringLiteral("--scene-transition"),
+                                               QStringLiteral("dip")}));
+
+    const QString cutsPath = QStringLiteral("/tmp/out/cuts.json");
+    const CutLaunch captions = cutCaptionsLaunch(cutsPath, QStringLiteral("/usr/bin/botcut-cli"),
+                                                  QString(), QString());
+    QCOMPARE(captions.program, QStringLiteral("/usr/bin/botcut-cli"));
+    QCOMPARE(captions.arguments, (QStringList{QStringLiteral("captions"), cutsPath}));
+    QVERIFY(!captions.arguments.contains(QStringLiteral("--burn")));
+    QVERIFY(captions.error.isEmpty());
+
+    const CutLaunch captionsUv = cutCaptionsLaunch(cutsPath, QString(), QStringLiteral("/usr/bin/uv"),
+                                                    QStringLiteral("/home/lonbaker/code/botcut/cli"));
+    QCOMPARE(captionsUv.program, QStringLiteral("/usr/bin/uv"));
+    QCOMPARE(captionsUv.arguments.mid(0, 4),
+             (QStringList{QStringLiteral("run"), QStringLiteral("--project"),
+                          QStringLiteral("/home/lonbaker/code/botcut/cli"),
+                          QStringLiteral("botcut-cli")}));
+    QCOMPARE(captionsUv.arguments.mid(4), (QStringList{QStringLiteral("captions"), cutsPath}));
+    QVERIFY(!captionsUv.arguments.contains(QStringLiteral("--burn")));
+
+    const CutLaunch missingCaptions = cutCaptionsLaunch(QString(), QStringLiteral("/usr/bin/botcut-cli"),
+                                                         QString(), QString());
+    QVERIFY(missingCaptions.program.isEmpty());
+    QCOMPARE(missingCaptions.error, QStringLiteral("No cuts.json"));
+
+    const CutLaunch highlight = cutShortLaunch(cutsPath, QStringLiteral("/usr/bin/botcut-cli"),
+                                                QString(), QString());
+    QCOMPARE(highlight.program, QStringLiteral("/usr/bin/botcut-cli"));
+    QCOMPARE(highlight.arguments, (QStringList{QStringLiteral("short"), cutsPath}));
+    QVERIFY(highlight.error.isEmpty());
+
+    const CutLaunch missingShort = cutShortLaunch(QString(), QString(), QString(), QString());
+    QVERIFY(missingShort.program.isEmpty());
+    QCOMPARE(missingShort.error, QStringLiteral("No cuts.json"));
+}
+
+void BackendTests::sceneTransitionRoundTrips() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend first(&provider, picker);
+    QCOMPARE(first.sceneTransition(), QStringLiteral("dip"));
+    first.setSceneTransition(QStringLiteral("off"));
+    QCOMPARE(first.sceneTransition(), QStringLiteral("off"));
+
+    auto *againPicker = new FakeFilePicker;
+    Backend again(&provider, againPicker);
+    QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
+    again.setSceneTransition(QStringLiteral("nope"));
+    QCOMPARE(again.sceneTransition(), QStringLiteral("dip"));
+
+    auto *thirdPicker = new FakeFilePicker;
+    Backend third(&provider, thirdPicker);
+    QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
+    third.setSceneTransition(QStringLiteral("dip"));
+    QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
+}
+
+void BackendTests::cutStatusLines() {
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Reading files")), QStringLiteral("Reading files"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Transcribing 2/4 clip.MP4")),
+             QStringLiteral("Transcribing 2/4 clip.MP4"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Choosing takes")), QStringLiteral("Choosing takes"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Rendering 42%")), QStringLiteral("Rendering 42%"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Opening 42%")), QStringLiteral("Opening 42%"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Rendering 0%")), QStringLiteral("Rendering 0%"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Opening 100%")), QStringLiteral("Opening 100%"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("3 kept, 1 dropped")),
+             QStringLiteral("3 kept, 1 dropped"));
+
+    const QString filter = QStringLiteral(
+        "[0:v]scale=3840:2160:force_original_aspect_ratio=decrease,"
+        "pad=3840:2160:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=24[v0]");
+    QVERIFY(cutStatusFromLine(filter).isEmpty());
+    QVERIFY(cutStatusFromLine(QStringLiteral("Authorization: Bearer supersecret")).isEmpty());
+    QVERIFY(cutStatusFromLine(QString(220, QLatin1Char('x'))).isEmpty());
+}
+
 void BackendTests::openDialogDelegatesToFilePicker() {
     ThumbProvider provider;
     auto *picker = new FakeFilePicker;
@@ -294,10 +916,14 @@ void BackendTests::pickerSelectionLoadsVideo() {
     auto *picker = new FakeFilePicker;
     Backend backend(&provider, picker);
     QSignalSpy infoSpy(&backend, &Backend::infoChanged);
+    QSignalSpy gatheringSpy(&backend, &Backend::gatheringChanged);
+    QVERIFY(backend.gathering());
 
     emit picker->openSelected(videoUrl());
 
     QCOMPARE(infoSpy.count(), 1);
+    QCOMPARE(gatheringSpy.count(), 1);
+    QVERIFY(!backend.gathering());
     QCOMPARE(backend.source(), videoUrl());
     QVERIFY(backend.duration() > 0);
     waitForBackgroundWork(backend);
@@ -537,7 +1163,7 @@ void BackendTests::exportClipCanReplaceSourceFile() {
     QVERIFY(ffmpeg::probe(sourcePath).ok);
     QVERIFY2(formatName(sourcePath).contains(QStringLiteral("mp4")),
              qPrintable(formatName(sourcePath)));
-    QVERIFY(!QFileInfo::exists(sourcePath + QStringLiteral(".omacut-part.mp4")));
+    QVERIFY(!QFileInfo::exists(sourcePath + QStringLiteral(".botcut-part.mp4")));
 }
 
 void BackendTests::exportZeroLengthClipFails() {
@@ -652,7 +1278,7 @@ void BackendTests::failedExportPreservesExistingFile() {
     QFile check(outPath);
     QVERIFY(check.open(QIODevice::ReadOnly));
     QCOMPARE(check.readAll(), original);
-    QVERIFY(!QFileInfo::exists(outPath + QStringLiteral(".omacut-part.mp4")));
+    QVERIFY(!QFileInfo::exists(outPath + QStringLiteral(".botcut-part.mp4")));
 }
 
 void BackendTests::qmlDoesNotCreateAudioOutputWithoutVideo() {
@@ -689,6 +1315,11 @@ void BackendTests::qmlShortcutsTriggerBackendActions() {
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("helpVisible").toBool(), false, 3000);
     QCOMPARE(backend.openCount, 1);
+
+    window->setProperty("settingsOpen", true);
+    QVERIFY(window->property("settingsOpen").toBool());
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
 }
 
 // Brings Main.qml up against the stub backend, loaded and focused, ready for keys.
@@ -981,6 +1612,126 @@ void BackendTests::qmlQuitConfirmsUnexportedEdit() {
     QCOMPARE(quitSpy.count(), 1);
 }
 
+void BackendTests::qmlLooseCutAsksToSaveOrLose() {
+    ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
+                            20.0);
+    backend.setRenderedUnsaved(true);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QCOMPARE(window->property("looseCut").toBool(), true);
+    QCOMPARE(window->property("unexported").toBool(), false);
+
+    QTest::keyClick(window, Qt::Key_Q);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
+    QVERIFY(dialogButton(window, QStringLiteral("Save")));
+    QVERIFY(dialogButton(window, QStringLiteral("Lose it")));
+
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 1, 3000);
+    QCOMPARE(window->property("quitConfirmVisible").toBool(), false);
+
+    QSignalSpy quitSpy(&harness.engine(), &QQmlApplicationEngine::quit);
+    QTest::keyClick(window, Qt::Key_Q);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
+    QTest::keyClick(window, Qt::Key_Left);
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 3000);
+    QCOMPARE(quitSpy.count(), 1);
+    QCOMPARE(backend.exportCount, 1);
+}
+
+void BackendTests::renderedCutCopiesInsteadOfEncoding() {
+    const QString seed = makeVideo(QStringLiteral("seed-for-copy.mp4"), 1.0, false);
+    QVERIFY(!seed.isEmpty());
+    const QString dirPath = QDir::temp().filePath(QStringLiteral("botcut-cut-save-test"));
+    QVERIFY(QDir().mkpath(dirPath));
+    const QString rough = QDir(dirPath).filePath(QStringLiteral("rough_cut.mp4"));
+    QFile::remove(rough);
+    QVERIFY(QFile::copy(seed, rough));
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QVERIFY(backend.load(QUrl::fromLocalFile(rough)));
+    QVERIFY(backend.renderedUnsaved());
+    const QString suggested = backend.suggestedExportUrl().toLocalFile();
+    QVERIFY(!suggested.startsWith(QDir::temp().absolutePath()));
+    QCOMPARE(QFileInfo(suggested).fileName(), QStringLiteral("cut.mp4"));
+
+    const QString saved = m_dir.filePath(QStringLiteral("saved-cut.mp4"));
+    QFile::remove(saved);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    emit picker->exportSelected(QUrl::fromLocalFile(saved), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(doneSpy.count(), 1, 5000);
+    QCOMPARE(failedSpy.count(), 0);
+    QVERIFY(QFileInfo::exists(saved));
+    QVERIFY(!backend.renderedUnsaved());
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(saved));
+    QCOMPARE(QFileInfo(saved).size(), QFileInfo(rough).size());
+    QVERIFY(QFileInfo::exists(rough));
+    QDir(dirPath).removeRecursively();
+}
+
+void BackendTests::savedCutCopiesTheCaptionFile() {
+    const QString seed = makeVideo(QStringLiteral("seed-for-captions.mp4"), 1.0, false);
+    QVERIFY(!seed.isEmpty());
+    const QString dirPath = QDir::temp().filePath(QStringLiteral("botcut-cut-caption-test"));
+    QVERIFY(QDir().mkpath(dirPath));
+    const QString rough = QDir(dirPath).filePath(QStringLiteral("rough_cut.mp4"));
+    QFile::remove(rough);
+    QVERIFY(QFile::copy(seed, rough));
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QVERIFY(backend.load(QUrl::fromLocalFile(rough)));
+    QVERIFY(!backend.roughCut());
+
+    QFile cuts(QDir(dirPath).filePath(QStringLiteral("cuts.json")));
+    QVERIFY(cuts.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    cuts.write("{}\n");
+    cuts.close();
+    QVERIFY(backend.roughCut());
+
+    const QString srtBody = QStringLiteral("1\n00:00:00,000 --> 00:00:01,000\nHello\n");
+    QFile srt(QDir(dirPath).filePath(QStringLiteral("rough_cut.srt")));
+    QVERIFY(srt.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    srt.write(srtBody.toUtf8());
+    srt.close();
+
+    const QString saved = m_dir.filePath(QStringLiteral("saved-cut.mp4"));
+    const QString savedSrt = m_dir.filePath(QStringLiteral("saved-cut.srt"));
+    QFile::remove(saved);
+    QFile::remove(savedSrt);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    emit picker->exportSelected(QUrl::fromLocalFile(saved), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(doneSpy.count(), 1, 5000);
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(saved));
+    QVERIFY(!backend.roughCut());
+    QVERIFY(backend.status().isEmpty());
+    QFile copied(savedSrt);
+    QVERIFY(copied.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(copied.readAll()), srtBody);
+
+    QVERIFY(backend.load(QUrl::fromLocalFile(rough)));
+    const QString blocked = m_dir.filePath(QStringLiteral("blocked-cut.mp4"));
+    const QString blockedSrt = m_dir.filePath(QStringLiteral("blocked-cut.srt"));
+    QFile::remove(blocked);
+    QDir(blockedSrt).removeRecursively();
+    QVERIFY(QDir().mkpath(blockedSrt));
+    QSignalSpy blockedDone(&backend, &Backend::exportDone);
+    emit picker->exportSelected(QUrl::fromLocalFile(blocked), 0);
+    QTRY_COMPARE_WITH_TIMEOUT(blockedDone.count(), 1, 5000);
+    QVERIFY(QFileInfo::exists(blocked));
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(blocked));
+    QVERIFY(QFileInfo(blockedSrt).isDir());
+    QCOMPARE(backend.status(), QStringLiteral("Could not copy the captions."));
+    QDir(blockedSrt).removeRecursively();
+    QDir(dirPath).removeRecursively();
+}
+
 void BackendTests::timelineSplitsTrimsAndJoins() {
     Timeline timeline;
     timeline.reset(10.0);
@@ -1206,6 +1957,46 @@ void BackendTests::trimArgsScaleTheShorterSide() {
                                       {{0.0, 1.0}}, true, 1080)),
              QStringLiteral("[0:v:0][0:a:0]concat=n=1:v=1:a=1[joined][a];"
                             "[joined]scale='if(gt(iw,ih),-2,1080)':'if(gt(iw,ih),1080,-2)'[v]"));
+}
+
+void BackendTests::trimArgsUsesVaapiWhenGivenADevice() {
+    const QString device = QStringLiteral("/dev/dri/renderD128");
+    const QStringList args = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                              {{0.0, 1.0}, {2.0, 3.5}}, true, 1080, device, 3840, 2160, 0);
+    QCOMPARE(args.count(QStringLiteral("-hwaccel")), 2);
+    QVERIFY(!args.contains(QStringLiteral("libx264")));
+    QVERIFY(args.contains(QStringLiteral("h264_vaapi")));
+    QCOMPARE(args.value(args.indexOf(QStringLiteral("-qp")) + 1), QStringLiteral("20"));
+    const QString graph = args.value(args.indexOf(QStringLiteral("-filter_complex")) + 1);
+    QVERIFY(graph.contains(QStringLiteral(
+        "scale_vaapi=1920:1080:format=nv12:force_original_aspect_ratio=decrease")));
+    QVERIFY(graph.contains(QStringLiteral(
+        "hwdownload,format=nv12,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,format=nv12,hwupload")));
+    QVERIFY(!graph.contains(QStringLiteral("pad_vaapi")));
+    QVERIFY(graph.contains(QStringLiteral("concat=n=2:v=1:a=1[v][a]")));
+
+    const QStringList full = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                              {{0.25, 0.75}}, false, 0, device, 3840, 2160, 0);
+    QVERIFY(!full.contains(QStringLiteral("aac")));
+    const QString fullGraph = full.value(full.indexOf(QStringLiteral("-filter_complex")) + 1);
+    QVERIFY(fullGraph.contains(QStringLiteral(
+        "scale_vaapi=format=nv12,hwdownload,format=nv12,setsar=1,format=nv12,hwupload")));
+    QVERIFY(!fullGraph.contains(QStringLiteral("pad=")));
+
+    const QStringList turned = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                                {{0.0, 1.0}}, true, 0, device, 1920, 1080, -90);
+    QVERIFY(!turned.contains(QStringLiteral("-hwaccel")));
+    QVERIFY(turned.contains(QStringLiteral("h264_vaapi")));
+    QVERIFY(turned.value(turned.indexOf(QStringLiteral("-filter_complex")) + 1)
+                .contains(QStringLiteral("hwupload")));
+
+    // 1 fps stays on the CPU decoder. Hardware decode segfaults on this Arc.
+    const QStringList slow = ffmpeg::trimArgs(QStringLiteral("in.mp4"), QStringLiteral("out.mp4"),
+                                              {{0.0, 1.0}}, false, 0, device, 32, 32, 0, 1.0);
+    QVERIFY(!slow.contains(QStringLiteral("-hwaccel")));
+    QVERIFY(slow.contains(QStringLiteral("h264_vaapi")));
+    QVERIFY(slow.value(slow.indexOf(QStringLiteral("-filter_complex")) + 1)
+                .contains(QStringLiteral("hwupload")));
 }
 
 void BackendTests::exportHeightsNeverUpscale() {

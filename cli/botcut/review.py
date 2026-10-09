@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 
-from botcut.media import probe, render_args
+from botcut.media import probe, render_with_progress
 
 FPS_TOLERANCE = 0.01
 
@@ -154,11 +154,4 @@ def _render_normalized(clips: list[dict], master_path: str) -> None:
         {"clip": i, "start": 0.0, "end": float(clip["duration"]), "reason": "master"}
         for i, clip in enumerate(clips)
     ]
-    proc = subprocess.run(
-        ["ffmpeg", *render_args(segments, clips, master_path)],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[-500:] or "ffmpeg failed"
-        raise SystemExit(f"Master render failed: {detail}")
+    render_with_progress(segments, clips, master_path, "Opening", "Master render failed")

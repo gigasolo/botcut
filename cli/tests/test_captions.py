@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from botcut.captions import group_cues, load_words_by_clip, remap_words, to_srt
+from botcut.captions import burn_args, group_cues, load_words_by_clip, remap_words, to_srt
 
 
 def test_remap_across_two_clips_starts_at_zero_and_stays_ordered():
@@ -44,6 +44,21 @@ def test_srt_cues_stay_within_32_chars_and_two_seconds():
     srt = to_srt(words)
     assert "-->" in srt
     assert srt.splitlines()[1].startswith("00:")
+
+
+def test_burn_args_draws_on_software_frames_and_encodes_with_vaapi():
+    args = burn_args(encoder="vaapi", device="/dev/dri/renderD128")
+    assert args[args.index("-c:v") + 1] == "h264_vaapi"
+    assert args[args.index("-qp") + 1] == "20"
+    assert args[args.index("-c:a") + 1] == "copy"
+    assert "libx264" not in args
+    video_filter = args[args.index("-vf") + 1]
+    assert video_filter.startswith("hwdownload,format=nv12,subtitles=rough_cut.srt:")
+    assert video_filter.endswith(",format=nv12,hwupload")
+    assert "-hwaccel" in args
+    cpu = burn_args()
+    assert cpu[cpu.index("-c:v") + 1] == "libx264"
+    assert "hwdownload" not in cpu[cpu.index("-vf") + 1]
 
 
 def test_missing_word_cache_names_the_file(tmp_path):

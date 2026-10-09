@@ -11,6 +11,9 @@ public:
     explicit PortalFilePicker(QObject *parent = nullptr);
 
     void openVideo() override;
+    void openVideos() override;
+    void openCutList() override;
+    void saveCutList(const QUrl &suggestedUrl) override;
     void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) override;
 
 private slots:
@@ -20,6 +23,9 @@ private:
     enum class Action {
         None,
         Open,
+        Add,
+        OpenList,
+        SaveList,
         Export
     };
 

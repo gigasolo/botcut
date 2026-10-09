@@ -13,6 +13,51 @@ def test_short_args_crops_landscape_and_only_scales_vertical():
     assert "crop=" not in tall
     assert "scale=1080:1920" in tall
 
+    wide_gpu = short_args(1.25, 12.0, 1920, 1080, encoder="vaapi", device="/dev/dri/renderD128")
+    video_filter = wide_gpu[wide_gpu.index("-vf") + 1]
+    assert "crop=ih*9/16:ih" in video_filter
+    assert "scale=1080:1920" in video_filter
+    assert "subtitles=short.srt:" in video_filter
+    assert video_filter.startswith("hwdownload,format=nv12,")
+    assert video_filter.endswith(",format=nv12,hwupload")
+    assert wide_gpu[wide_gpu.index("-c:v") + 1] == "h264_vaapi"
+    assert wide_gpu[wide_gpu.index("-c:a") + 1] == "aac"
+    assert "libx264" not in wide_gpu
+
+
+def test_highlight_sends_low_effort(monkeypatch):
+    monkeypatch.delenv("BOTCUT_LLM_MODEL", raising=False)
+    monkeypatch.delenv("BOTCUT_FAKE", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "supersecret")
+    seen = {}
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [
+                    {"message": {"content": '{"start_id": 1, "end_id": 2, "title": "Hello"}'}}
+                ]
+            }
+
+    def post(url, headers=None, json=None, timeout=None):
+        seen["body"] = json
+        return Response()
+
+    monkeypatch.setattr("botcut.short.requests.post", post)
+    choice = pick_highlight(
+        [
+            {"id": 1, "clip": 0, "start": 0.0, "end": 1.0, "text": "a"},
+            {"id": 2, "clip": 0, "start": 1.0, "end": 2.0, "text": "b"},
+        ]
+    )
+    assert choice["title"] == "Hello"
+    assert seen["body"]["model"] == "grok-4.7"
+    assert seen["body"]["reasoning_effort"] == "low"
+    assert "supersecret" not in str(seen["body"])
+
 
 def test_fake_highlight_uses_the_first_three_ids(monkeypatch):
     monkeypatch.setenv("BOTCUT_FAKE", "1")

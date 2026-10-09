@@ -143,7 +143,40 @@ def subtitles_filter(srt_name: str) -> str:
     return f"subtitles={srt_name}:force_style='{FORCE_STYLE}'"
 
 
-def burn_args() -> list[str]:
+def burn_args(encoder: str = "x264", device: str | None = None) -> list[str]:
+    if encoder not in ("x264", "vaapi"):
+        raise SystemExit(f"Unknown encoder {encoder}")
+    if encoder == "vaapi" and not device:
+        raise SystemExit("VA-API encode needs a device")
+    if encoder == "vaapi":
+        # Libass draws on software frames. Decode and encode stay on the GPU.
+        video_filter = f"hwdownload,format=nv12,{subtitles_filter('rough_cut.srt')},format=nv12,hwupload"
+        return [
+            "-y",
+            "-init_hw_device",
+            f"vaapi=va:{device}",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            str(device),
+            "-hwaccel_output_format",
+            "vaapi",
+            "-i",
+            "rough_cut.mp4",
+            "-vf",
+            video_filter,
+            "-c:v",
+            "h264_vaapi",
+            "-qp",
+            "20",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "rough_cut.captioned.mp4",
+        ]
     return [
         "-y",
         "-i",

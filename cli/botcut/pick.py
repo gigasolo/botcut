@@ -14,17 +14,30 @@ import requests
 
 UTTERANCE_GAP = 0.5
 MERGE_GAP = 1.0
-PAD_BEFORE = 0.15
-PAD_AFTER = 0.25
+PAD_BEFORE = 0.25
+PAD_AFTER = 0.40
 # Token-set overlap, or a 4-token phrase contained in order inside a kept line.
 NEAR_JACCARD = 0.5
 NEAR_MIN_TOKENS = 4
 
-SYSTEM_PROMPT = (
+DEFAULT_INTENT = (
+    "Keep each moment in order. Drop flubs and true retakes. Keep a beat that appears only once."
+)
+
+RETAKE_PROMPT = (
     "These are takes recorded in order for one video. "
     "When a line is repeated, keep the last complete clean take unless an earlier one is clearly better. "
     'Drop false starts, flubs, "let me redo that", off-topic chatter, and filler-only utterances. '
     "Never drop unique content. Return ids only."
+)
+
+STORY_PROMPT = (
+    "These clips are one movie, in order. "
+    "Drop false starts, flubs, and filler-only lines. "
+    "When the same line is a retake, keep the last clean one. "
+    "Keep a beat that appears only once. "
+    "Do not drop a clip that has its own content. "
+    "Return ids only."
 )
 
 KEEP_SCHEMA = {
@@ -85,16 +98,16 @@ def utterances(words_by_clip: list[list[dict]]) -> list[dict]:
     return found
 
 
-def pick(utts: list[dict]) -> list[dict]:
+def pick(utts: list[dict], intent: str = "") -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return [{"id": u["id"], "reason": "fake"} for u in utts]
     key = os.environ.get("XAI_API_KEY")
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
     body = {
-        "model": model_name(),
+        **chat_fields(),
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt(intent)},
             {"role": "user", "content": _user_message(utts)},
         ],
         "response_format": KEEP_SCHEMA,
@@ -250,8 +263,75 @@ def near_duplicate(left: str, right: str) -> bool:
     return len(short) >= NEAR_MIN_TOKENS and _in_order(short, long)
 
 
+def system_prompt(intent: str = "") -> str:
+    """Story prompt by default. A line about repeated takes keeps the retake prompt.
+
+    The default sentence mentions retakes as something to drop, so that wording
+    stays on the story prompt.
+    """
+    line = intent.strip() or DEFAULT_INTENT
+    if _retake_job(line):
+        return f"{RETAKE_PROMPT}\nThe movie is: {line}"
+    return f"{STORY_PROMPT}\nThe movie is: {line}"
+
+
+def _retake_job(intent: str) -> bool:
+    text = intent.lower()
+    if text == DEFAULT_INTENT.lower():
+        return False
+    return "repeated take" in text or "retake" in text
+
+
+def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
+    reasons = {int(item["id"]): str(item["reason"]) for item in keep}
+    kept = kept_utterances(utts, keep)
+    dropped = dropped_utterances(utts, keep)
+    drop_reason = {}
+    for utt in dropped:
+        if any(near_duplicate(utt["text"], other["text"]) for other in kept):
+            drop_reason[int(utt["id"])] = "retake"
+        else:
+            drop_reason[int(utt["id"])] = "unique?"
+    rows = []
+    for utt in utts:
+        uid = int(utt["id"])
+        kept_reason = reasons.get(uid)
+        rows.append(
+            {
+                "id": uid,
+                "clip": int(utt["clip"]),
+                "start": float(utt["start"]),
+                "end": float(utt["end"]),
+                "text": str(utt["text"]),
+                "keep": kept_reason is not None,
+                "reason": kept_reason if kept_reason is not None else drop_reason.get(uid, "dropped"),
+            }
+        )
+    return rows
+
+
 def model_name() -> str:
-    return os.environ.get("BOTCUT_LLM_MODEL") or "grok-4.3"
+    return os.environ.get("BOTCUT_LLM_MODEL") or "grok-4.7"
+
+
+def reasoning_effort(model: str) -> str | None:
+    """Low effort for Grok 4.5 and newer. Older chat models omit the field."""
+    name = model.split("/")[-1]
+    if not name.startswith("grok-4."):
+        return None
+    minor = name.removeprefix("grok-4.").split("-", 1)[0]
+    if minor.isdigit() and int(minor) >= 5:
+        return "low"
+    return None
+
+
+def chat_fields(model: str | None = None) -> dict:
+    chosen = model_name() if model is None else model
+    fields: dict = {"model": chosen}
+    effort = reasoning_effort(chosen)
+    if effort:
+        fields["reasoning_effort"] = effort
+    return fields
 
 
 def llm_url() -> str:

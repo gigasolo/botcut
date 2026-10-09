@@ -19,6 +19,7 @@ int main(int argc, char *argv[]) {
         qputenv("QT_FFMPEG_DECODING_HW_DEVICE_TYPES", "vaapi,cuda");
 
     QGuiApplication app(argc, argv);
+    app.setOrganizationName("gigasolo");
     app.setApplicationName("botcut");
 
     // Associates the window with botcut.desktop so the compositor (Wayland app_id

@@ -1,15 +1,20 @@
 #include "backend.h"
 
 #include <QColor>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QVariantMap>
 #include <QProcess>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QTextStream>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
 
@@ -31,6 +36,21 @@ QString omarchyColorsPath() {
     return omarchyCurrentDir() + QStringLiteral("/theme/colors.toml");
 }
 
+bool isTempRoughCut(const QString &path) {
+    const QFileInfo info(path);
+    if (info.fileName() != QLatin1String("rough_cut.mp4"))
+        return false;
+    const QDir dir = info.dir();
+    if (!dir.dirName().startsWith(QLatin1String("botcut-cut-")))
+        return false;
+    return dir.absolutePath() == QDir(QDir::temp().filePath(dir.dirName())).absolutePath();
+}
+
+QString saveFolder() {
+    const QString movies = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    return QDir(movies).exists() ? movies : QDir::homePath();
+}
+
 QString mp4PathFor(const QString &path) {
     const QFileInfo file(path);
     if (file.suffix().compare(QStringLiteral("mp4"), Qt::CaseInsensitive) == 0)
@@ -42,19 +62,80 @@ QString mp4PathFor(const QString &path) {
     return file.dir().filePath(baseName + QStringLiteral(".mp4"));
 }
 
+// Empty when there is no subtitle file, or the copy landed. A message when it did not.
+QString captionCopyError(const QString &movieSrc, const QString &movieDst) {
+    const QFileInfo srcInfo(movieSrc);
+    const QString srtSrc = srcInfo.dir().filePath(QStringLiteral("rough_cut.srt"));
+    if (!QFileInfo::exists(srtSrc) || !QFileInfo(srtSrc).isFile())
+        return {};
+    const QFileInfo dstInfo(movieDst);
+    const QString srtDst = dstInfo.dir().filePath(dstInfo.completeBaseName() + QStringLiteral(".srt"));
+    if (QFileInfo(srtSrc).absoluteFilePath() == QFileInfo(srtDst).absoluteFilePath())
+        return {};
+    QFile::remove(srtDst);
+    if (!QFile::copy(srtSrc, srtDst))
+        return QStringLiteral("Could not copy the captions.");
+    return {};
+}
+
 bool replaceWithTemp(const QString &tmpPath, const QString &outPath) {
     const QByteArray tmpName = QFile::encodeName(tmpPath);
     const QByteArray outName = QFile::encodeName(outPath);
     return std::rename(tmpName.constData(), outName.constData()) == 0;
 }
+
+const QStringList kVideoSuffixes = {
+    QStringLiteral("mp4"), QStringLiteral("mov"), QStringLiteral("mkv"),
+    QStringLiteral("webm"), QStringLiteral("m4v"), QStringLiteral("avi"),
+    QStringLiteral("mpeg"), QStringLiteral("mpg"),
+};
+
+bool isVideoFile(const QFileInfo &info) {
+    if (!info.exists() || !info.isFile() || info.isHidden())
+        return false;
+    return kVideoSuffixes.contains(info.suffix(), Qt::CaseInsensitive);
+}
+
+// Earlier of birth and modified time. A copy stamps birth at the copy and
+// keeps the camera's modified time, so the earlier one is when the clip was made.
+QDateTime createdTime(const QFileInfo &info) {
+    const QDateTime birth = info.birthTime();
+    const QDateTime modified = info.lastModified();
+    if (birth.isValid() && modified.isValid())
+        return birth <= modified ? birth : modified;
+    if (birth.isValid())
+        return birth;
+    return modified;
+}
+
+void sortOldestFirst(QStringList *paths) {
+    std::stable_sort(paths->begin(), paths->end(), [](const QString &a, const QString &b) {
+        const QFileInfo ia(a);
+        const QFileInfo ib(b);
+        const QDateTime ta = createdTime(ia);
+        const QDateTime tb = createdTime(ib);
+        if (ta.isValid() != tb.isValid())
+            return ta.isValid();
+        if (ta.isValid() && ta != tb)
+            return ta < tb;
+        return ia.fileName().compare(ib.fileName(), Qt::CaseInsensitive) < 0;
+    });
+}
 }
 
 Backend::Backend(ThumbProvider *provider, QObject *parent)
-    : Backend(provider, new PortalFilePicker(), parent) {}
+    : Backend(provider, new PortalFilePicker(), new LibsecretKeyStore(), true, parent) {}
 
 Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *parent)
+    : Backend(provider, filePicker, new MemoryKeyStore(), true, parent) {}
+
+Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, QObject *parent)
+    : Backend(provider, filePicker, keys ? keys : new MemoryKeyStore(), keys == nullptr, parent) {}
+
+Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, bool ownsKeys,
+                 QObject *parent)
     : QObject(parent), m_provider(provider), m_filePicker(filePicker),
-      m_themeAccent(kDefaultAccent) {
+      m_intent(defaultCutIntent()), m_keys(keys), m_ownsKeys(ownsKeys), m_themeAccent(kDefaultAccent) {
     if (!m_filePicker->parent())
         m_filePicker->setParent(this);
     wireFilePicker();
@@ -71,16 +152,34 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, QObject *paren
     connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, themeChanged);
     watchTheme();
     loadThemeAccent();
+    if (m_keys)
+        m_apiKey = m_keys->load();
+    const QString stored = QSettings().value(QStringLiteral("sceneTransition"), QStringLiteral("dip")).toString();
+    m_sceneTransition = stored == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
 }
 
 Backend::~Backend() {
     stopThumbs();
+    if (m_ownsKeys)
+        delete m_keys;
 }
 
 void Backend::wireFilePicker() {
     connect(m_filePicker, &FilePicker::openSelected, this, &Backend::load);
+    connect(m_filePicker, &FilePicker::videosSelected, this, [this](const QList<QUrl> &urls) {
+        QStringList paths;
+        for (const QUrl &url : urls)
+            paths.append(url.toLocalFile());
+        addTrayFiles(paths);
+    });
+    connect(m_filePicker, &FilePicker::cutListOpenSelected, this, &Backend::loadCutListFile);
+    connect(m_filePicker, &FilePicker::cutListSaveSelected, this, &Backend::writeCutListFile);
     connect(m_filePicker, &FilePicker::exportSelected, this, [this](const QUrl &url, int scaleHeight) {
-        exportClips(url, m_exportDialogClips, scaleHeight);
+        // An untouched rough cut is already the movie. Copy it. A trim still encodes.
+        if (renderedUnsaved() && edit::untouched(m_timeline.clips(), m_info.duration))
+            copyCut(url);
+        else
+            exportClips(url, m_exportDialogClips, scaleHeight);
     });
     connect(m_filePicker, &FilePicker::failed, this, &Backend::loadError);
 }
@@ -173,6 +272,11 @@ bool Backend::load(const QUrl &url) {
     m_path = path;
     m_source = url;
     m_timeline.reset(m_info.duration);
+    const bool wasUnsaved = renderedUnsaved();
+    m_renderedHere = isTempRoughCut(path);
+    m_cutSaved = false;
+    if (wasUnsaved != renderedUnsaved())
+        emit renderedUnsavedChanged();
 
     // New video: drop the old filmstrip and bump the revision so QML reloads.
     stopThumbs();
@@ -188,11 +292,31 @@ bool Backend::load(const QUrl &url) {
     m_provider->setImages(QVector<QImage>(kThumbCount));
     emit thumbsChanged();
 
+    const bool leaveGathering = m_gathering;
+    m_gathering = false;
     emit infoChanged();
+    if (leaveGathering)
+        emit gatheringChanged();
 
     setStatus(QStringLiteral("Loading..."));
     startThumbs();
     return true;
+}
+
+void Backend::showShots() {
+    if (m_gathering)
+        return;
+    m_gathering = true;
+    emit gatheringChanged();
+}
+
+void Backend::showMovie() {
+    if (m_source.isEmpty())
+        return;
+    if (!m_gathering)
+        return;
+    m_gathering = false;
+    emit gatheringChanged();
 }
 
 bool Backend::parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
@@ -245,6 +369,598 @@ void Backend::openVideoDialog() {
     m_filePicker->openVideo();
 }
 
+void Backend::addVideosDialog() {
+    m_filePicker->openVideos();
+}
+
+void Backend::setTrayIndex(int index) {
+    if (m_tray.isEmpty())
+        index = -1;
+    else
+        index = qBound(0, index, m_tray.size() - 1);
+    if (index == m_trayIndex)
+        return;
+    m_trayIndex = index;
+    emit trayChanged();
+}
+
+QUrl Backend::previewUrl() const {
+    if (m_trayIndex < 0 || m_trayIndex >= m_tray.size())
+        return {};
+    return QUrl::fromLocalFile(m_tray.at(m_trayIndex));
+}
+
+bool Backend::trayMissing() const {
+    for (const QString &path : m_tray) {
+        if (!QFileInfo(path).isFile())
+            return true;
+    }
+    return false;
+}
+
+bool Backend::trayFileExists(const QString &path) const {
+    return QFileInfo(path).isFile();
+}
+
+QString Backend::trayFileSize(const QString &path) const {
+    const QFileInfo info(path);
+    if (!info.isFile())
+        return {};
+    const qint64 bytes = info.size();
+    if (bytes < 1024)
+        return QString::number(bytes) + QStringLiteral(" B");
+    if (bytes < 1024 * 1024)
+        return QString::number((bytes + 512) / 1024) + QStringLiteral(" KB");
+    if (bytes < 1024LL * 1024 * 1024)
+        return QString::number((bytes + 512 * 1024) / (1024 * 1024)) + QStringLiteral(" MB");
+    return QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 1) + QStringLiteral(" GB");
+}
+
+bool Backend::apiKeySet() const {
+    return !m_apiKey.isEmpty() || !qEnvironmentVariableIsEmpty("XAI_API_KEY");
+}
+
+void Backend::setApiKey(const QString &key) {
+    const QString trimmed = key.trimmed();
+    if (trimmed.isEmpty()) {
+        const bool forgotten = m_keys && m_keys->forget();
+        if (m_apiKey.isEmpty() && forgotten)
+            return;
+        m_apiKey.clear();
+        emit apiKeyChanged();
+        if (!forgotten)
+            setStatus(QStringLiteral("Could not forget the saved key."));
+        return;
+    }
+    const bool same = trimmed == m_apiKey;
+    m_apiKey = trimmed;
+    if (!same)
+        emit apiKeyChanged();
+    // An environment key is never written here. Only a key the user applies is.
+    if (!m_keys || !m_keys->save(trimmed))
+        setStatus(QStringLiteral("Could not save the key."));
+}
+
+void Backend::setIntent(const QString &intent) {
+    if (intent == m_intent)
+        return;
+    m_intent = intent;
+    emit intentChanged();
+}
+
+QString Backend::intentForCut() const {
+    const QString trimmed = m_intent.trimmed();
+    return trimmed.isEmpty() ? defaultCutIntent() : trimmed;
+}
+
+void Backend::setSceneTransition(const QString &value) {
+    const QString next = value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
+    if (next == m_sceneTransition)
+        return;
+    m_sceneTransition = next;
+    QSettings().setValue(QStringLiteral("sceneTransition"), next);
+    emit sceneTransitionChanged();
+}
+
+void Backend::setCutMode(const QString &mode) {
+    if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
+        return;
+    if (mode == m_cutMode)
+        return;
+    m_cutMode = mode;
+    emit cutModeChanged();
+}
+
+void Backend::addTrayFiles(const QStringList &paths) {
+    QStringList added;
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (!info.exists() || !info.isFile())
+            continue;
+        const QString abs = info.absoluteFilePath();
+        if (m_tray.contains(abs) || added.contains(abs))
+            continue;
+        added.append(abs);
+    }
+    if (added.isEmpty())
+        return;
+    sortOldestFirst(&added);
+    m_tray.append(added);
+    if (m_trayIndex < 0)
+        m_trayIndex = 0;
+    emit trayChanged();
+}
+
+void Backend::addDropped(const QList<QUrl> &urls) {
+    for (const QUrl &url : urls) {
+        if (!url.isLocalFile())
+            continue;
+        const QFileInfo info(url.toLocalFile());
+        if (info.isFile() && info.fileName().endsWith(QStringLiteral(".botcut.json"), Qt::CaseInsensitive)) {
+            loadCutListFile(url);
+            return;
+        }
+    }
+    QStringList paths;
+    for (const QUrl &url : urls) {
+        if (!url.isLocalFile())
+            continue;
+        const QFileInfo info(url.toLocalFile());
+        if (info.isDir()) {
+            const QFileInfoList entries = QDir(info.absoluteFilePath())
+                .entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Readable, QDir::Name);
+            for (const QFileInfo &entry : entries) {
+                if (isVideoFile(entry))
+                    paths.append(entry.absoluteFilePath());
+            }
+            continue;
+        }
+        if (isVideoFile(info))
+            paths.append(info.absoluteFilePath());
+    }
+    addTrayFiles(paths);
+}
+
+void Backend::moveTray(int delta) {
+    const int next = m_trayIndex + delta;
+    if (m_trayIndex < 0 || next < 0 || next >= m_tray.size())
+        return;
+    m_tray.swapItemsAt(m_trayIndex, next);
+    m_trayIndex = next;
+    emit trayChanged();
+}
+
+void Backend::removeTray() {
+    if (m_trayIndex < 0 || m_trayIndex >= m_tray.size())
+        return;
+    m_tray.removeAt(m_trayIndex);
+    if (m_tray.isEmpty())
+        m_trayIndex = -1;
+    else if (m_trayIndex >= m_tray.size())
+        m_trayIndex = m_tray.size() - 1;
+    emit trayChanged();
+}
+
+namespace {
+QString findTool(const QString &name) {
+    const QString found = QStandardPaths::findExecutable(name);
+    if (!found.isEmpty())
+        return found;
+    const QString local = QDir::home().filePath(QStringLiteral(".local/bin/") + name);
+    return QFileInfo::exists(local) ? local : QString();
+}
+}
+
+void Backend::openCutListDialog() {
+    m_filePicker->openCutList();
+}
+
+void Backend::saveCutListDialog() {
+    if (m_tray.isEmpty())
+        return;
+    m_filePicker->saveCutList(suggestedCutListUrl());
+}
+
+QUrl Backend::suggestedCutListUrl() const {
+    QString dir = QDir::homePath();
+    if (!m_tray.isEmpty())
+        dir = QFileInfo(m_tray.first()).absolutePath();
+    return QUrl::fromLocalFile(QDir(dir).filePath(QStringLiteral("cut.botcut.json")));
+}
+
+void Backend::loadCutListFile(const QUrl &url) {
+    QFile file(url.toLocalFile());
+    if (!file.open(QIODevice::ReadOnly)) {
+        setStatus(QStringLiteral("Could not open the list"));
+        return;
+    }
+    QString mode;
+    QString error;
+    QStringList files;
+    QString intent;
+    QVariantList lines;
+    if (!parseCutList(file.readAll(), QFileInfo(file).absolutePath(), &mode, &files, &error, &intent,
+                      &lines)) {
+        setStatus(error);
+        return;
+    }
+    m_tray = files;
+    m_trayIndex = 0;
+    m_selects = lines;
+    m_cutOut.clear();
+    emit selectsChanged();
+    emit trayChanged();
+    setCutMode(mode);
+    setIntent(intent);
+    setStatus(QString());
+}
+
+void Backend::writeCutListFile(const QUrl &url) {
+    QString path = url.toLocalFile();
+    if (path.isEmpty()) {
+        setStatus(QStringLiteral("Could not save the list"));
+        return;
+    }
+    if (!path.endsWith(QStringLiteral(".botcut.json"), Qt::CaseInsensitive))
+        path += QStringLiteral(".botcut.json");
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects);
+    if (bytes.isEmpty()) {
+        setStatus(QStringLiteral("Could not save the list"));
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        setStatus(QStringLiteral("Could not save the list"));
+        return;
+    }
+    if (file.write(bytes) != bytes.size()) {
+        setStatus(QStringLiteral("Could not save the list"));
+        return;
+    }
+    setStatus(QStringLiteral("Saved the list"));
+}
+
+void Backend::startCut() {
+    if (m_tray.isEmpty() || m_busy)
+        return;
+    if (trayMissing()) {
+        setStatus(QStringLiteral("A file in the list is missing"));
+        return;
+    }
+    if (m_cutMode == QLatin1String("speech") && !apiKeySet()) {
+        setStatus(QStringLiteral("Set an xAI key for spoken cuts."));
+        return;
+    }
+    const QString cli = findTool(QStringLiteral("botcut-cli"));
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    m_cutOut = QDir::temp().filePath(
+        QStringLiteral("botcut-cut-%1").arg(QDateTime::currentMSecsSinceEpoch()));
+    QDir().mkpath(m_cutOut);
+    m_selects.clear();
+    emit selectsChanged();
+    const bool decide = m_cutMode == QLatin1String("speech");
+    const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, m_cutOut, cli,
+                                          projectOk ? uv : QString(), projectOk ? project : QString(),
+                                          intentForCut(), decide, m_sceneTransition);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return;
+    }
+    setBusy(true);
+    setStatus(QStringLiteral("Cutting…"));
+    m_cutStage = decide ? CutStage::Decide : CutStage::Run;
+    startCutProcess(launch);
+}
+
+void Backend::restoreSelect(int id) {
+    for (int i = 0; i < m_selects.size(); ++i) {
+        QVariantMap row = m_selects.at(i).toMap();
+        if (row.value(QStringLiteral("id")).toInt() != id || row.value(QStringLiteral("keep")).toBool())
+            continue;
+        row.insert(QStringLiteral("keep"), true);
+        row.insert(QStringLiteral("reason"), QStringLiteral("restored"));
+        m_selects[i] = row;
+        emit selectsChanged();
+        return;
+    }
+}
+
+void Backend::dropSelect(int id) {
+    for (int i = 0; i < m_selects.size(); ++i) {
+        QVariantMap row = m_selects.at(i).toMap();
+        if (row.value(QStringLiteral("id")).toInt() != id || !row.value(QStringLiteral("keep")).toBool())
+            continue;
+        row.insert(QStringLiteral("keep"), false);
+        row.insert(QStringLiteral("reason"), QStringLiteral("dropped"));
+        m_selects[i] = row;
+        emit selectsChanged();
+        return;
+    }
+}
+
+void Backend::loadSelects(const QString &cutsPath) {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        setStatus(QStringLiteral("Could not read the selects"));
+        return;
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    const QJsonArray lines = doc.object().value(QStringLiteral("lines")).toArray();
+    QVariantList rows;
+    for (const QJsonValue &value : lines) {
+        if (!value.isObject())
+            continue;
+        const QJsonObject line = value.toObject();
+        QVariantMap row;
+        row.insert(QStringLiteral("id"), line.value(QStringLiteral("id")).toInt());
+        row.insert(QStringLiteral("clip"), line.value(QStringLiteral("clip")).toInt());
+        row.insert(QStringLiteral("start"), line.value(QStringLiteral("start")).toDouble());
+        row.insert(QStringLiteral("end"), line.value(QStringLiteral("end")).toDouble());
+        row.insert(QStringLiteral("text"), line.value(QStringLiteral("text")).toString());
+        row.insert(QStringLiteral("keep"), line.value(QStringLiteral("keep")).toBool());
+        row.insert(QStringLiteral("reason"), line.value(QStringLiteral("reason")).toString());
+        rows.append(row);
+    }
+    m_selects = rows;
+    emit selectsChanged();
+}
+
+bool Backend::writeSelects(const QString &cutsPath) const {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject root = doc.object();
+    QJsonArray lines;
+    for (const QVariant &item : m_selects) {
+        const QVariantMap row = item.toMap();
+        QJsonObject line;
+        line.insert(QStringLiteral("id"), row.value(QStringLiteral("id")).toInt());
+        line.insert(QStringLiteral("clip"), row.value(QStringLiteral("clip")).toInt());
+        line.insert(QStringLiteral("start"), row.value(QStringLiteral("start")).toDouble());
+        line.insert(QStringLiteral("end"), row.value(QStringLiteral("end")).toDouble());
+        line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
+        line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
+        line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
+        lines.append(line);
+    }
+    root.insert(QStringLiteral("lines"), lines);
+    doc.setObject(root);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
+    return file.write(bytes) == bytes.size();
+}
+
+bool Backend::writeCutsForRender() {
+    const QString existing = m_cutOut.isEmpty()
+                                 ? QString()
+                                 : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+    if (!existing.isEmpty() && QFileInfo::exists(existing))
+        return writeSelects(existing);
+
+    m_cutOut = QDir::temp().filePath(
+        QStringLiteral("botcut-cut-%1").arg(QDateTime::currentMSecsSinceEpoch()));
+    if (!QDir().mkpath(m_cutOut))
+        return false;
+    QJsonArray clips;
+    for (int i = 0; i < m_tray.size(); ++i) {
+        QJsonObject clip;
+        clip.insert(QStringLiteral("index"), i);
+        clip.insert(QStringLiteral("path"), m_tray.at(i));
+        clips.append(clip);
+    }
+    QJsonArray lines;
+    for (const QVariant &item : m_selects) {
+        const QVariantMap row = item.toMap();
+        QJsonObject line;
+        line.insert(QStringLiteral("id"), row.value(QStringLiteral("id")).toInt());
+        line.insert(QStringLiteral("clip"), row.value(QStringLiteral("clip")).toInt());
+        line.insert(QStringLiteral("start"), row.value(QStringLiteral("start")).toDouble());
+        line.insert(QStringLiteral("end"), row.value(QStringLiteral("end")).toDouble());
+        line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
+        line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
+        line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
+        lines.append(line);
+    }
+    QJsonObject tighten;
+    tighten.insert(QStringLiteral("snap"), true);
+    tighten.insert(QStringLiteral("max_pause"), 0.8);
+    QJsonObject root;
+    root.insert(QStringLiteral("clips"), clips);
+    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("tighten"), tighten);
+    QFile file(QDir(m_cutOut).filePath(QStringLiteral("cuts.json")));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    return file.write(bytes) == bytes.size();
+}
+
+QString Backend::cutsBesideMovie() const {
+    if (m_path.isEmpty())
+        return {};
+    const QFileInfo info(m_path);
+    if (info.fileName() != QLatin1String("rough_cut.mp4"))
+        return {};
+    const QString cuts = info.dir().filePath(QStringLiteral("cuts.json"));
+    return QFileInfo::exists(cuts) && QFileInfo(cuts).isFile() ? cuts : QString();
+}
+
+bool Backend::roughCut() const {
+    return !cutsBesideMovie().isEmpty();
+}
+
+void Backend::startBesideCut(CutStage stage, const QString &running,
+                             CutLaunch (*make)(const QString &, const QString &, const QString &,
+                                               const QString &)) {
+    if (m_busy)
+        return;
+    const QString cuts = cutsBesideMovie();
+    if (cuts.isEmpty())
+        return;
+    const QString cli = findTool(QStringLiteral("botcut-cli"));
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = make(cuts, cli, projectOk ? uv : QString(),
+                                  projectOk ? project : QString());
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return;
+    }
+    setBusy(true);
+    setStatus(running);
+    m_cutStage = stage;
+    startCutProcess(launch);
+}
+
+void Backend::writeCaptions() {
+    startBesideCut(CutStage::Captions, QStringLiteral("Writing captions"), cutCaptionsLaunch);
+}
+
+void Backend::makeShort() {
+    startBesideCut(CutStage::Short, QStringLiteral("Cutting a short"), cutShortLaunch);
+}
+
+void Backend::renderSelects() {
+    if (m_busy || m_selects.isEmpty())
+        return;
+    bool anyKept = false;
+    for (const QVariant &item : m_selects) {
+        if (item.toMap().value(QStringLiteral("keep")).toBool()) {
+            anyKept = true;
+            break;
+        }
+    }
+    if (!anyKept) {
+        setStatus(QStringLiteral("Restore a line to render"));
+        return;
+    }
+    if (!writeCutsForRender()) {
+        setStatus(QStringLiteral("Could not save the selects"));
+        return;
+    }
+    const QString cli = findTool(QStringLiteral("botcut-cli"));
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = cutRenderLaunch(m_cutOut, cli, projectOk ? uv : QString(),
+                                             projectOk ? project : QString(), m_sceneTransition);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return;
+    }
+    setBusy(true);
+    setStatus(QStringLiteral("Rendering 0%"));
+    m_cutStage = CutStage::Render;
+    startCutProcess(launch);
+}
+
+void Backend::startCutProcess(const CutLaunch &launch) {
+    if (m_cutProcess == nullptr) {
+        m_cutProcess = new QProcess(this);
+        m_cutProcess->setProcessChannelMode(QProcess::MergedChannels);
+        connect(m_cutProcess, &QProcess::readyRead, this, &Backend::readCutOutput);
+        connect(m_cutProcess, &QProcess::finished, this, &Backend::cutProcessFinished);
+        connect(m_cutProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            if (error != QProcess::FailedToStart)
+                return;
+            m_cutStage = CutStage::Idle;
+            setBusy(false);
+            setStatus(QStringLiteral("Could not start %1").arg(m_cutProcess->program()));
+        });
+    }
+    m_cutLog.clear();
+    m_cutLine.clear();
+    m_cutProcess->setProcessEnvironment(cutProcessEnvironment(QProcessEnvironment::systemEnvironment(), m_apiKey));
+    m_cutProcess->start(launch.program, launch.arguments);
+}
+
+void Backend::readCutOutput() {
+    if (m_cutProcess == nullptr)
+        return;
+    const QString chunk = QString::fromUtf8(m_cutProcess->readAll());
+    if (chunk.isEmpty())
+        return;
+    m_cutLog += chunk;
+    if (m_cutLog.size() > 4000)
+        m_cutLog = m_cutLog.right(4000);
+    m_cutLine += chunk;
+    int newline = 0;
+    while ((newline = m_cutLine.indexOf(QLatin1Char('\n'))) >= 0) {
+        const QString status = cutStatusFromLine(m_cutLine.left(newline));
+        m_cutLine.remove(0, newline + 1);
+        if (!status.isEmpty())
+            setStatus(status);
+    }
+}
+
+void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
+    readCutOutput();
+    if (!m_cutLine.isEmpty()) {
+        const QString pending = cutStatusFromLine(m_cutLine);
+        if (!pending.isEmpty())
+            setStatus(pending);
+        m_cutLine.clear();
+    }
+    const auto lastLine = [this] {
+        QString tail = m_cutLog.right(400).trimmed();
+        const int newline = tail.lastIndexOf(QLatin1Char('\n'));
+        if (newline >= 0)
+            tail = tail.mid(newline + 1).trimmed();
+        return tail;
+    };
+    if (status != QProcess::NormalExit || code != 0) {
+        m_cutStage = CutStage::Idle;
+        setBusy(false);
+        const QString tail = lastLine();
+        setStatus(tail.isEmpty() ? QStringLiteral("Cut failed") : tail);
+        return;
+    }
+    if (m_cutStage == CutStage::Decide) {
+        m_cutStage = CutStage::Idle;
+        setBusy(false);
+        loadSelects(QDir(m_cutOut).filePath(QStringLiteral("cuts.json")));
+        return;
+    }
+    if (m_cutStage == CutStage::Run || m_cutStage == CutStage::Render) {
+        m_cutStage = CutStage::Idle;
+        setBusy(false);
+        const QString cut = QDir(m_cutOut).filePath(QStringLiteral("rough_cut.mp4"));
+        if (!QFileInfo::exists(cut) || !load(QUrl::fromLocalFile(cut)))
+            setStatus(QStringLiteral("Could not open the cut"));
+        return;
+    }
+    if (m_cutStage == CutStage::Captions || m_cutStage == CutStage::Short) {
+        const bool captions = m_cutStage == CutStage::Captions;
+        m_cutStage = CutStage::Idle;
+        setBusy(false);
+        const QString side = QDir(QFileInfo(m_path).absolutePath())
+                                 .filePath(captions ? QStringLiteral("rough_cut.srt")
+                                                    : QStringLiteral("short.mp4"));
+        if (QFileInfo::exists(side) && QFileInfo(side).isFile()) {
+            setStatus(captions ? QStringLiteral("Wrote the captions")
+                               : QStringLiteral("Wrote the short"));
+            return;
+        }
+        const QString tail = lastLine();
+        setStatus(tail.isEmpty()
+                      ? (captions ? QStringLiteral("Could not write the captions")
+                                  : QStringLiteral("Could not write the short"))
+                      : tail);
+        return;
+    }
+    m_cutStage = CutStage::Idle;
+    setBusy(false);
+    setStatus(QString());
+}
+
 void Backend::exportDialog() {
     if (m_path.isEmpty() || !m_info.ok)
         return;
@@ -290,7 +1006,7 @@ void Backend::startThumbs() {
         if (worker == m_thumbWorker && revision == m_thumbRevision) {
             m_thumbWorker = nullptr;
             m_thumbWorkerDone = true;
-            if (m_thumbReadyCount >= m_thumbCount)
+            if (m_thumbReadyCount >= m_thumbCount && m_status == QLatin1String("Loading..."))
                 setStatus(QString());
             else if (!m_thumbRevealTimer.isActive())
                 m_thumbRevealTimer.start();
@@ -310,7 +1026,8 @@ void Backend::revealNextThumb() {
         return;
 
     m_thumbRevealTimer.stop();
-    if (m_thumbWorkerDone && m_thumbReadyCount >= m_thumbCount)
+    if (m_thumbWorkerDone && m_thumbReadyCount >= m_thumbCount
+            && m_status == QLatin1String("Loading..."))
         setStatus(QString());
 }
 
@@ -362,8 +1079,83 @@ QUrl Backend::suggestedExportUrl() const {
     if (m_path.isEmpty())
         return {};
     const QFileInfo src(m_path);
-    const QString target = src.dir().filePath(src.completeBaseName() + "_trimmed.mp4");
-    return QUrl::fromLocalFile(target);
+    // The portal will not open a save dialog whose folder is /tmp, which is
+    // where a fresh rough cut lives. Offer a folder the user can write.
+    if (m_renderedHere) {
+        QString name = src.completeBaseName() + QStringLiteral("_trimmed.mp4");
+        if (edit::untouched(m_timeline.clips(), m_info.duration)) {
+            name = m_tray.isEmpty() ? QStringLiteral("cut.mp4")
+                                    : QFileInfo(m_tray.first()).completeBaseName() + QStringLiteral(".mp4");
+        }
+        return QUrl::fromLocalFile(QDir(saveFolder()).filePath(name));
+    }
+    return QUrl::fromLocalFile(src.dir().filePath(src.completeBaseName() + QStringLiteral("_trimmed.mp4")));
+}
+
+void Backend::copyCut(const QUrl &dst) {
+    if (m_path.isEmpty() || !m_info.ok || m_busy)
+        return;
+    const QString selectedPath = dst.toLocalFile();
+    const QString outPath = mp4PathFor(selectedPath);
+    if (outPath != selectedPath && QFileInfo::exists(outPath)) {
+        emit exportFailed(QStringLiteral("%1 already exists.").arg(QFileInfo(outPath).fileName()));
+        return;
+    }
+    if (QFileInfo(outPath).absoluteFilePath() == QFileInfo(m_path).absoluteFilePath()) {
+        noteCutSaved(outPath);
+        return;
+    }
+    const QString cp = QStandardPaths::findExecutable(QStringLiteral("cp"));
+    if (cp.isEmpty()) {
+        emit exportFailed(QStringLiteral("Could not save the movie."));
+        return;
+    }
+    setBusy(true);
+    setStatus(QStringLiteral("Saving…"));
+    auto *proc = new QProcess(this);
+    auto completed = std::make_shared<bool>(false);
+    connect(proc, &QProcess::finished, this, [this, proc, outPath, completed](int code, QProcess::ExitStatus exitStatus) {
+        if (*completed)
+            return;
+        *completed = true;
+        const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
+        proc->deleteLater();
+        if (exitStatus != QProcess::NormalExit || code != 0) {
+            setBusy(false);
+            setStatus(QString());
+            emit exportFailed(err.isEmpty() ? QStringLiteral("Could not save the movie.") : err);
+            return;
+        }
+        const QString captionNote = captionCopyError(m_path, outPath);
+        if (!load(QUrl::fromLocalFile(outPath))) {
+            setBusy(false);
+            setStatus(QStringLiteral("Could not open the cut"));
+            emit exportFailed(QStringLiteral("Could not open the cut"));
+            return;
+        }
+        noteCutSaved(outPath);
+        if (!captionNote.isEmpty())
+            setStatus(captionNote);
+    });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, completed](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart || *completed)
+            return;
+        *completed = true;
+        const QString err = proc->errorString();
+        proc->deleteLater();
+        setBusy(false);
+        setStatus(QString());
+        emit exportFailed(err.isEmpty() ? QStringLiteral("Could not save the movie.") : err);
+    });
+    proc->start(cp, {QStringLiteral("-f"), m_path, outPath});
+}
+
+void Backend::noteCutSaved(const QString &path) {
+    m_cutSaved = true;
+    setBusy(false);
+    setStatus(QString());
+    emit renderedUnsavedChanged();
+    emit exportDone(path);
 }
 
 void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight) {
@@ -394,14 +1186,22 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
         return;
     }
 
+    QString deviceError;
+    const QString device = ffmpeg::vaapiDevice(&deviceError);
+    if (!deviceError.isEmpty()) {
+        emit exportFailed(deviceError);
+        return;
+    }
+
     setBusy(true);
     setStatus(QStringLiteral("Exporting 0%"));
 
     // Encode to a sibling temp file and atomically replace the target only after
     // success, so failed/cancelled exports preserve any existing file.
-    const QString tmpPath = outPath + QStringLiteral(".omacut-part.mp4");
+    const QString tmpPath = outPath + QStringLiteral(".botcut-part.mp4");
     QFile::remove(tmpPath);
-    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, ranges, m_info.audio, scaleHeight);
+    const QStringList args = ffmpeg::trimArgs(m_path, tmpPath, ranges, m_info.audio, scaleHeight, device,
+                                              m_info.width, m_info.height, m_info.rotation, m_info.frameRate);
 
     auto *proc = new QProcess(this);
     auto completed = std::make_shared<bool>(false);
@@ -445,6 +1245,10 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
                 setBusy(false);
                 setStatus(QString());
                 m_timeline.markExported(clips);
+                if (m_renderedHere && !m_cutSaved) {
+                    m_cutSaved = true;
+                    emit renderedUnsavedChanged();
+                }
                 emit exportDone(outPath);
             });
     connect(proc, &QProcess::errorOccurred, this,

@@ -147,8 +147,19 @@ PortalFileFilters mp4Filters() {
     return {mp4Filter()};
 }
 
+PortalFileFilter cutListFilter() {
+    return {QStringLiteral("BotCut list"), {{0, QStringLiteral("*.botcut.json")}}};
+}
+
+PortalFileFilters cutListFilters() {
+    return {
+        cutListFilter(),
+        {QStringLiteral("All files"), {{0, QStringLiteral("*")}}},
+    };
+}
+
 QString portalToken() {
-    return QStringLiteral("omacut_%1").arg(QRandomGenerator::global()->generate());
+    return QStringLiteral("botcut_%1").arg(QRandomGenerator::global()->generate());
 }
 
 QByteArray portalPathBytes(const QString &path) {
@@ -177,6 +188,44 @@ void PortalFilePicker::openVideo() {
     options.insert(QStringLiteral("current_filter"), QVariant::fromValue(videoFilter()));
 
     requestFile(QStringLiteral("OpenFile"), QStringLiteral("Open Video File"), options, Action::Open);
+}
+
+void PortalFilePicker::openVideos() {
+    QVariantMap options;
+    options.insert(QStringLiteral("accept_label"), QStringLiteral("Add"));
+    options.insert(QStringLiteral("modal"), true);
+    options.insert(QStringLiteral("multiple"), true);
+    options.insert(QStringLiteral("current_folder"), portalPathBytes(openFolder()));
+    options.insert(QStringLiteral("filters"), QVariant::fromValue(videoFilters()));
+    options.insert(QStringLiteral("current_filter"), QVariant::fromValue(videoFilter()));
+
+    requestFile(QStringLiteral("OpenFile"), QStringLiteral("Add Videos"), options, Action::Add);
+}
+
+void PortalFilePicker::openCutList() {
+    QVariantMap options;
+    options.insert(QStringLiteral("accept_label"), QStringLiteral("Open"));
+    options.insert(QStringLiteral("modal"), true);
+    options.insert(QStringLiteral("multiple"), false);
+    options.insert(QStringLiteral("current_folder"), portalPathBytes(openFolder()));
+    options.insert(QStringLiteral("filters"), QVariant::fromValue(cutListFilters()));
+    options.insert(QStringLiteral("current_filter"), QVariant::fromValue(cutListFilter()));
+
+    requestFile(QStringLiteral("OpenFile"), QStringLiteral("Open Cut List"), options, Action::OpenList);
+}
+
+void PortalFilePicker::saveCutList(const QUrl &suggestedUrl) {
+    const QFileInfo target(suggestedUrl.toLocalFile());
+
+    QVariantMap options;
+    options.insert(QStringLiteral("accept_label"), QStringLiteral("Save"));
+    options.insert(QStringLiteral("modal"), true);
+    options.insert(QStringLiteral("current_folder"), portalPathBytes(target.absolutePath()));
+    options.insert(QStringLiteral("current_name"), target.fileName());
+    options.insert(QStringLiteral("filters"), QVariant::fromValue(cutListFilters()));
+    options.insert(QStringLiteral("current_filter"), QVariant::fromValue(cutListFilter()));
+
+    requestFile(QStringLiteral("SaveFile"), QStringLiteral("Save Cut List"), options, Action::SaveList);
 }
 
 void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) {
@@ -295,6 +344,21 @@ void PortalFilePicker::handleResponse(uint response, const QVariantMap &results)
     const QUrl url(uris.first());
     if (action == Action::Open) {
         emit openSelected(url);
+        return;
+    }
+    if (action == Action::Add) {
+        QList<QUrl> urls;
+        for (const QString &uri : uris)
+            urls.append(QUrl(uri));
+        emit videosSelected(urls);
+        return;
+    }
+    if (action == Action::OpenList) {
+        emit cutListOpenSelected(url);
+        return;
+    }
+    if (action == Action::SaveList) {
+        emit cutListSaveSelected(url);
         return;
     }
     if (action != Action::Export)

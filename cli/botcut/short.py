@@ -9,7 +9,7 @@ import time
 import requests
 
 from botcut.captions import subtitles_filter
-from botcut.pick import RETRY_DELAYS, RETRY_STATUS, _safe_body, llm_url, model_name
+from botcut.pick import RETRY_DELAYS, RETRY_STATUS, _safe_body, chat_fields, llm_url
 
 HIGHLIGHT_SCHEMA = {
     "type": "json_schema",
@@ -41,7 +41,7 @@ def pick_highlight(utts: list[dict]) -> dict:
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
     body = {
-        "model": model_name(),
+        **chat_fields(),
         "messages": [
             {
                 "role": "system",
@@ -137,12 +137,58 @@ def needs_crop(width: int, height: int) -> bool:
     return (height / width) < (16 / 9)
 
 
-def short_args(start: float, duration: float, width: int, height: int, srt_name: str = "short.srt") -> list[str]:
+def short_args(
+    start: float,
+    duration: float,
+    width: int,
+    height: int,
+    srt_name: str = "short.srt",
+    encoder: str = "x264",
+    device: str | None = None,
+) -> list[str]:
+    if encoder not in ("x264", "vaapi"):
+        raise SystemExit(f"Unknown encoder {encoder}")
+    if encoder == "vaapi" and not device:
+        raise SystemExit("VA-API encode needs a device")
     filters = []
     if needs_crop(width, height):
         filters.append("crop=ih*9/16:ih")
     filters.append("scale=1080:1920")
     filters.append(subtitles_filter(srt_name))
+    video_filter = ",".join(filters)
+    if encoder == "vaapi":
+        # No crop_vaapi in this ffmpeg. Download, crop, draw, then upload.
+        video_filter = f"hwdownload,format=nv12,{video_filter},format=nv12,hwupload"
+        return [
+            "-y",
+            "-init_hw_device",
+            f"vaapi=va:{device}",
+            "-filter_hw_device",
+            "va",
+            "-hwaccel",
+            "vaapi",
+            "-hwaccel_device",
+            str(device),
+            "-hwaccel_output_format",
+            "vaapi",
+            "-ss",
+            f"{start:.3f}",
+            "-i",
+            "rough_cut.mp4",
+            "-t",
+            f"{duration:.3f}",
+            "-vf",
+            video_filter,
+            "-c:v",
+            "h264_vaapi",
+            "-qp",
+            "20",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "short.mp4",
+        ]
     return [
         "-y",
         "-ss",
@@ -152,7 +198,7 @@ def short_args(start: float, duration: float, width: int, height: int, srt_name:
         "-t",
         f"{duration:.3f}",
         "-vf",
-        ",".join(filters),
+        video_filter,
         "-c:v",
         "libx264",
         "-preset",

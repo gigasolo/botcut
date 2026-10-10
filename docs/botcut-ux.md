@@ -66,7 +66,7 @@ This has to be buildable in Qt Quick. Use flat rectangles, one accent, and the s
 │ Disabled                     │ 45% opacity                                        │
 └──────────────────────────────┴────────────────────────────────────────────────────┘
 
-The accent is the only yellow. It marks the one next action, the playhead, the trim handles, a missing xAI key when spoken cuts are on, and a short notice. It does not wash the whole window.
+The accent is the Omarchy theme color. It marks the one next action, the playhead, the trim handles, a missing xAI key when spoken cuts are on, and a short notice. It does not wash the whole window. The brand mark is a 20 px accent square.
 
 The window title is "BotCut". With a preview or a movie it becomes "BotCut — " plus the file name.
 

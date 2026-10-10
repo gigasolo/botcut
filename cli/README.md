@@ -1,6 +1,6 @@
 # botcut-cli
 
-Rough-cut one ordered list of shots. The Qt app is unchanged in this step.
+Rough-cut one ordered list of shots. The Qt app calls `run`, `render`, `captions`, and `short`. It does not run `review` after a cut.
 
 ```bash
 cd cli

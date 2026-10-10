@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QFileSystemWatcher>
+#include <QHash>
 #include <QImage>
 #include <QObject>
 #include <QProcess>
@@ -19,6 +20,7 @@
 class ThumbProvider;
 class FilePicker;
 class ThumbWorker;
+class TrayThumbWorker;
 
 // The bridge between QML and the ffmpeg/ffprobe layer. Holds the currently
 // loaded video's info and drives thumbnail generation and export.
@@ -40,6 +42,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool gathering READ gathering NOTIFY gatheringChanged)
     Q_PROPERTY(QUrl previewUrl READ previewUrl NOTIFY trayChanged)
     Q_PROPERTY(bool trayMissing READ trayMissing NOTIFY trayChanged)
+    Q_PROPERTY(int trayThumbRevision READ trayThumbRevision NOTIFY trayThumbsChanged)
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY apiKeyChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY renderedUnsavedChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
@@ -103,6 +106,8 @@ public:
     Q_INVOKABLE void addDropped(const QList<QUrl> &urls);
     Q_INVOKABLE bool trayFileExists(const QString &path) const;
     Q_INVOKABLE QString trayFileSize(const QString &path) const;
+    Q_INVOKABLE QString trayThumb(const QString &path) const;
+    int trayThumbRevision() const { return m_trayThumbRevision; }
     Q_INVOKABLE void moveTray(int delta);
     Q_INVOKABLE void removeTray();
     Q_INVOKABLE void openCutListDialog();
@@ -140,6 +145,7 @@ signals:
     void busyChanged();
     void statusChanged();
     void trayChanged();
+    void trayThumbsChanged();
     void cutModeChanged();
     void sceneTransitionChanged();
     void intentChanged();
@@ -160,6 +166,8 @@ private:
     void noteCutSaved(const QString &path);
     void startThumbs();
     void stopThumbs();
+    void scheduleTrayThumbs();
+    void stopTrayThumbs();
     void revealNextThumb();
     void wireFilePicker();
     void loadThemeAccent();
@@ -181,6 +189,10 @@ private:
     ThumbProvider *m_provider;
     FilePicker *m_filePicker;
     ThumbWorker *m_thumbWorker = nullptr;
+    TrayThumbWorker *m_trayThumbWorker = nullptr;
+    QHash<QString, QString> m_trayThumbs;
+    int m_trayThumbRevision = 0;
+    friend class BackendTests;
     Timeline m_timeline;
     edit::Clips m_exportDialogClips;
     ffmpeg::VideoInfo m_info;

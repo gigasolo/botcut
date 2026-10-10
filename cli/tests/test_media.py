@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from botcut.media import render_args, render_percent, resolve_encoder
+from botcut.media import grab_still, render_args, render_percent, resolve_encoder
 from botcut.stt import STT_FIELDS, transcribe_xai
 
 
@@ -297,3 +297,31 @@ def test_stt_posts_file_last_and_redacts_the_key(monkeypatch, tmp_path):
     assert seen["auth"] == "Bearer supersecret"
     assert "supersecret" not in str(exc.value)
     assert "STT HTTP 400" in str(exc.value)
+
+
+def test_grab_still_writes_one_jpeg(tmp_path):
+    video = tmp_path / "shot.mp4"
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=640x360:d=1",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=f=440",
+            "-t",
+            "1",
+            str(video),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    dest = tmp_path / "stills" / "0.jpg"
+    assert grab_still(str(video), 0.4, str(dest))
+    assert dest.stat().st_size > 0
+    assert grab_still(str(tmp_path / "missing.mp4"), 0.0, str(tmp_path / "no.jpg")) is False

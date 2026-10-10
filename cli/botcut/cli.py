@@ -163,6 +163,7 @@ def run(
         silences_by_clip.append(_silences_for_clip(work, index, stem, flac, clip))
 
     utts = utterances(words_by_clip)
+    _attach_stills(utts, clips, os.path.join(work, "stills"))
     print("Choosing takes", flush=True)
     movie = intent.strip() or DEFAULT_INTENT
     chosen = pick(utts, movie)
@@ -207,6 +208,23 @@ def run(
         print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
         return
     _write_cut(out, doc, segs, clips, scene_transition)
+
+
+def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
+    """One JPEG at the middle of each line. A missed frame does not stop the cut."""
+    from botcut.media import grab_still
+
+    print("Reading pictures", flush=True)
+    os.makedirs(directory, exist_ok=True)
+    for utt in utts:
+        clip = clips[int(utt["clip"])]
+        dur = float(clip.get("duration") or 0)
+        mid = (float(utt["start"]) + float(utt["end"])) / 2
+        if dur > 0:
+            mid = min(max(0.0, mid), max(0.0, dur - 0.05))
+        dest = os.path.join(directory, f"{int(utt['id'])}.jpg")
+        if grab_still(clip["path"], mid, dest):
+            utt["still"] = os.path.abspath(dest)
 
 
 def _write_doc(out: str, doc: dict) -> str:

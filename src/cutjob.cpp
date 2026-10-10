@@ -152,6 +152,13 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
                 row.insert(QStringLiteral("text"), line.value(QStringLiteral("text")).toString());
                 row.insert(QStringLiteral("keep"), line.value(QStringLiteral("keep")).toBool());
                 row.insert(QStringLiteral("reason"), line.value(QStringLiteral("reason")).toString());
+                const QString still = line.value(QStringLiteral("still")).toString();
+                if (!still.isEmpty()) {
+                    const QFileInfo stillInfo(still);
+                    row.insert(QStringLiteral("still"),
+                               stillInfo.isRelative() ? QDir(baseDir).absoluteFilePath(still)
+                                                      : stillInfo.absoluteFilePath());
+                }
                 lines->append(row);
             }
         }
@@ -184,6 +191,9 @@ QByteArray writeCutList(const QString &mode, const QStringList &files, const QSt
             line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
             line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
             line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
+            const QString still = row.value(QStringLiteral("still")).toString();
+            if (!still.isEmpty())
+                line.insert(QStringLiteral("still"), still);
             lineArray.append(line);
         }
         root.insert(QStringLiteral("lines"), lineArray);
@@ -202,7 +212,8 @@ QString cutStatusFromLine(const QString &line) {
     const QString trimmed = line.trimmed();
     if (trimmed.isEmpty() || trimmed.size() > 200)
         return {};
-    if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Choosing takes"))
+    if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Reading pictures")
+        || trimmed == QLatin1String("Choosing takes"))
         return trimmed;
     static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));
     if (decided.match(trimmed).hasMatch())

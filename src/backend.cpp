@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QVariantMap>
+#include <QPointer>
 #include <QProcess>
 #include <QSettings>
 #include <QStandardPaths>
@@ -159,13 +160,20 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
 }
 
 Backend::~Backend() {
+    stopTrayThumbs();
     stopThumbs();
     if (m_ownsKeys)
         delete m_keys;
 }
 
 void Backend::wireFilePicker() {
-    connect(m_filePicker, &FilePicker::openSelected, this, &Backend::load);
+    connect(m_filePicker, &FilePicker::openSelected, this, [this](const QUrl &url) {
+        // A trim dialog that was already open must not leave the shot list mid-cut.
+        // Saving a finished movie still calls load() itself, while busy is set.
+        if (m_busy)
+            return;
+        load(url);
+    });
     connect(m_filePicker, &FilePicker::videosSelected, this, [this](const QList<QUrl> &urls) {
         QStringList paths;
         for (const QUrl &url : urls)
@@ -189,6 +197,10 @@ void Backend::setBusy(bool busy) {
         return;
     m_busy = busy;
     emit busyChanged();
+    if (busy)
+        stopTrayThumbs();
+    else
+        scheduleTrayThumbs();
 }
 
 void Backend::setStatus(const QString &status) {
@@ -366,10 +378,14 @@ bool Backend::loadKeepList(const QUrl &url) {
 }
 
 void Backend::openVideoDialog() {
+    if (m_busy)
+        return;
     m_filePicker->openVideo();
 }
 
 void Backend::addVideosDialog() {
+    if (m_busy)
+        return;
     m_filePicker->openVideos();
 }
 
@@ -442,6 +458,8 @@ void Backend::setApiKey(const QString &key) {
 }
 
 void Backend::setIntent(const QString &intent) {
+    if (m_busy)
+        return;
     if (intent == m_intent)
         return;
     m_intent = intent;
@@ -454,6 +472,8 @@ QString Backend::intentForCut() const {
 }
 
 void Backend::setSceneTransition(const QString &value) {
+    if (m_busy)
+        return;
     const QString next = value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
     if (next == m_sceneTransition)
         return;
@@ -463,6 +483,8 @@ void Backend::setSceneTransition(const QString &value) {
 }
 
 void Backend::setCutMode(const QString &mode) {
+    if (m_busy)
+        return;
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
         return;
     if (mode == m_cutMode)
@@ -472,6 +494,8 @@ void Backend::setCutMode(const QString &mode) {
 }
 
 void Backend::addTrayFiles(const QStringList &paths) {
+    if (m_busy)
+        return;
     QStringList added;
     for (const QString &path : paths) {
         const QFileInfo info(path);
@@ -489,9 +513,12 @@ void Backend::addTrayFiles(const QStringList &paths) {
     if (m_trayIndex < 0)
         m_trayIndex = 0;
     emit trayChanged();
+    scheduleTrayThumbs();
 }
 
 void Backend::addDropped(const QList<QUrl> &urls) {
+    if (m_busy)
+        return;
     for (const QUrl &url : urls) {
         if (!url.isLocalFile())
             continue;
@@ -522,6 +549,8 @@ void Backend::addDropped(const QList<QUrl> &urls) {
 }
 
 void Backend::moveTray(int delta) {
+    if (m_busy)
+        return;
     const int next = m_trayIndex + delta;
     if (m_trayIndex < 0 || next < 0 || next >= m_tray.size())
         return;
@@ -531,6 +560,8 @@ void Backend::moveTray(int delta) {
 }
 
 void Backend::removeTray() {
+    if (m_busy)
+        return;
     if (m_trayIndex < 0 || m_trayIndex >= m_tray.size())
         return;
     m_tray.removeAt(m_trayIndex);
@@ -552,6 +583,8 @@ QString findTool(const QString &name) {
 }
 
 void Backend::openCutListDialog() {
+    if (m_busy)
+        return;
     m_filePicker->openCutList();
 }
 
@@ -569,6 +602,8 @@ QUrl Backend::suggestedCutListUrl() const {
 }
 
 void Backend::loadCutListFile(const QUrl &url) {
+    if (m_busy)
+        return;
     QFile file(url.toLocalFile());
     if (!file.open(QIODevice::ReadOnly)) {
         setStatus(QStringLiteral("Could not open the list"));
@@ -593,6 +628,7 @@ void Backend::loadCutListFile(const QUrl &url) {
     setCutMode(mode);
     setIntent(intent);
     setStatus(QString());
+    scheduleTrayThumbs();
 }
 
 void Backend::writeCutListFile(const QUrl &url) {
@@ -655,6 +691,8 @@ void Backend::startCut() {
 }
 
 void Backend::restoreSelect(int id) {
+    if (m_busy)
+        return;
     for (int i = 0; i < m_selects.size(); ++i) {
         QVariantMap row = m_selects.at(i).toMap();
         if (row.value(QStringLiteral("id")).toInt() != id || row.value(QStringLiteral("keep")).toBool())
@@ -668,6 +706,8 @@ void Backend::restoreSelect(int id) {
 }
 
 void Backend::dropSelect(int id) {
+    if (m_busy)
+        return;
     for (int i = 0; i < m_selects.size(); ++i) {
         QVariantMap row = m_selects.at(i).toMap();
         if (row.value(QStringLiteral("id")).toInt() != id || !row.value(QStringLiteral("keep")).toBool())
@@ -701,6 +741,13 @@ void Backend::loadSelects(const QString &cutsPath) {
         row.insert(QStringLiteral("text"), line.value(QStringLiteral("text")).toString());
         row.insert(QStringLiteral("keep"), line.value(QStringLiteral("keep")).toBool());
         row.insert(QStringLiteral("reason"), line.value(QStringLiteral("reason")).toString());
+        const QString still = line.value(QStringLiteral("still")).toString();
+        if (!still.isEmpty()) {
+            const QFileInfo stillInfo(still);
+            row.insert(QStringLiteral("still"),
+                       stillInfo.isRelative() ? QFileInfo(cutsPath).dir().absoluteFilePath(still)
+                                              : stillInfo.absoluteFilePath());
+        }
         rows.append(row);
     }
     m_selects = rows;
@@ -727,6 +774,9 @@ bool Backend::writeSelects(const QString &cutsPath) const {
         line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
         line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
         line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
+        const QString still = row.value(QStringLiteral("still")).toString();
+        if (!still.isEmpty())
+            line.insert(QStringLiteral("still"), still);
         lines.append(line);
     }
     root.insert(QStringLiteral("lines"), lines);
@@ -766,6 +816,9 @@ bool Backend::writeCutsForRender() {
         line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
         line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
         line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
+        const QString still = row.value(QStringLiteral("still")).toString();
+        if (!still.isEmpty())
+            line.insert(QStringLiteral("still"), still);
         lines.append(line);
     }
     QJsonObject tighten;
@@ -962,7 +1015,7 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
 }
 
 void Backend::exportDialog() {
-    if (m_path.isEmpty() || !m_info.ok)
+    if (m_busy || m_path.isEmpty() || !m_info.ok)
         return;
 
     m_exportDialogClips = m_timeline.clips();
@@ -977,6 +1030,72 @@ QList<int> Backend::exportHeights(int width, int height) {
             heights << candidate;
     }
     return heights;
+}
+
+QString Backend::trayThumb(const QString &path) const {
+    return m_trayThumbs.value(QFileInfo(path).absoluteFilePath());
+}
+
+void Backend::stopTrayThumbs() {
+    if (!m_trayThumbWorker)
+        return;
+    TrayThumbWorker *worker = m_trayThumbWorker;
+    m_trayThumbWorker = nullptr;
+    worker->disconnect(this);
+    worker->requestStop();
+    worker->wait();
+    delete worker;
+}
+
+void Backend::scheduleTrayThumbs() {
+    if (m_busy || m_trayThumbWorker)
+        return;
+    for (const QString &path : m_tray) {
+        const QFileInfo info(path);
+        if (!info.isFile())
+            continue;
+        const QString abs = info.absoluteFilePath();
+        // An empty value means the grab was tried and missed. A short file
+        // with no frame at 1s stays a dark placeholder, and is not retried.
+        if (m_trayThumbs.contains(abs))
+            continue;
+        auto *worker = new TrayThumbWorker(abs, this);
+        m_trayThumbWorker = worker;
+        const QPointer<TrayThumbWorker> guard(worker);
+        connect(worker, &TrayThumbWorker::grabbed, this,
+                [this, guard](const QString &shot, const QImage &image) {
+            if (!guard || guard != m_trayThumbWorker || image.isNull())
+                return;
+            const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                                + QStringLiteral("/shots");
+            QDir().mkpath(dir);
+            const QString file = dir + QLatin1Char('/')
+                                 + QString::number(qHash(shot), 16) + QStringLiteral(".jpg");
+            if (!image.save(file, "JPEG", 80)) {
+                m_trayThumbs.insert(shot, QString());
+                return;
+            }
+            m_trayThumbs.insert(shot, file);
+            ++m_trayThumbRevision;
+            emit trayThumbsChanged();
+        });
+        connect(worker, &TrayThumbWorker::finished, this, [this, guard, abs] {
+            // A stop() deletes the worker. A queued callback then sees a null
+            // guard and leaves the path uncached, so the next idle pass retries.
+            if (!guard)
+                return;
+            const bool current = guard == m_trayThumbWorker;
+            if (current)
+                m_trayThumbWorker = nullptr;
+            if (current && !m_trayThumbs.contains(abs))
+                m_trayThumbs.insert(abs, QString());
+            guard->deleteLater();
+            if (current)
+                scheduleTrayThumbs();
+        });
+        worker->start();
+        return;
+    }
 }
 
 void Backend::startThumbs() {

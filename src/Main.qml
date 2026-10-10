@@ -69,6 +69,13 @@ ApplicationWindow {
             return "Dropped";
         return reason;
     }
+    function fileUrl(path) {
+        if (!path)
+            return "";
+        if (String(path).indexOf("file:") === 0)
+            return path;
+        return "file://" + encodeURI(path);
+    }
     function lineClock(seconds) {
         var whole = Math.max(0, Math.floor(seconds));
         var mins = Math.floor(whole / 60);
@@ -404,7 +411,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+O"
         context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible
+        enabled: !win.quitConfirmVisible && !backend.busy
         onActivated: openVideo()
     }
 
@@ -949,7 +956,7 @@ ApplicationWindow {
         DropArea {
             id: dropTarget
             anchors.fill: parent
-            enabled: win.gathering && !win.settingsOpen
+            enabled: win.gathering && !win.settingsOpen && !backend.busy
             onDropped: (drop) => {
                 backend.addDropped(drop.urls);
                 drop.accept(Qt.CopyAction);
@@ -1003,6 +1010,7 @@ ApplicationWindow {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 text: "Add videos"
                                 filled: true
+                                enabled: !backend.busy
                                 onClicked: backend.addVideosDialog()
                             }
                         }
@@ -1137,6 +1145,7 @@ ApplicationWindow {
                 Layout.preferredHeight: 36
                 radius: 8
                 color: "transparent"
+                opacity: backend.busy ? 0.45 : 1
                 DashedOutline { corner: 8 }
                 Label {
                     anchors.centerIn: parent
@@ -1146,7 +1155,8 @@ ApplicationWindow {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
+                    enabled: !backend.busy
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: backend.addVideosDialog()
                 }
             }
@@ -1180,10 +1190,36 @@ ApplicationWindow {
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 12
+                        anchors.leftMargin: 8
                         anchors.rightMargin: 8
                         spacing: 8
 
+                        Rectangle {
+                            visible: backend.trayFileExists(modelData)
+                            Layout.preferredWidth: 64
+                            Layout.preferredHeight: 36
+                            Layout.alignment: Qt.AlignVCenter
+                            radius: 4
+                            clip: true
+                            color: "#0e0e10"
+                            Image {
+                                anchors.fill: parent
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                // Reading the revision keeps the picture in the binding,
+                                // so a grab that finishes later replaces the placeholder.
+                                source: backend.trayThumbRevision >= 0
+                                        ? fileUrl(backend.trayThumb(modelData)) : ""
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.trayIndex = index;
+                                    trayList.positionViewAtIndex(index, ListView.Contain);
+                                }
+                            }
+                        }
                         Label {
                             Layout.fillWidth: true
                             text: baseName(modelData)
@@ -1207,7 +1243,7 @@ ApplicationWindow {
                         QuietButton {
                             text: "Up"
                             visible: shotHot
-                            enabled: index > 0
+                            enabled: index > 0 && !backend.busy
                             onClicked: {
                                 backend.trayIndex = index;
                                 backend.moveTray(-1);
@@ -1217,7 +1253,7 @@ ApplicationWindow {
                         QuietButton {
                             text: "Down"
                             visible: shotHot
-                            enabled: index < backend.tray.length - 1
+                            enabled: index < backend.tray.length - 1 && !backend.busy
                             onClicked: {
                                 backend.trayIndex = index;
                                 backend.moveTray(1);
@@ -1226,6 +1262,7 @@ ApplicationWindow {
                         }
                         QuietButton {
                             text: "Remove"
+                            enabled: !backend.busy
                             onClicked: {
                                 backend.trayIndex = index;
                                 backend.removeTray();
@@ -1303,6 +1340,20 @@ ApplicationWindow {
                                     anchors.leftMargin: 10
                                     anchors.rightMargin: 8
                                     spacing: 8
+                                    Rectangle {
+                                        visible: modelData.still !== undefined && modelData.still !== ""
+                                        Layout.preferredWidth: 48
+                                        Layout.preferredHeight: 27
+                                        radius: 4
+                                        clip: true
+                                        color: "black"
+                                        Image {
+                                            anchors.fill: parent
+                                            fillMode: Image.PreserveAspectCrop
+                                            asynchronous: true
+                                            source: parent.visible ? fileUrl(modelData.still) : ""
+                                        }
+                                    }
                                     Label {
                                         text: lineClock(modelData.start)
                                         color: win.accent
@@ -1330,11 +1381,13 @@ ApplicationWindow {
                                     QuietButton {
                                         visible: lineHot && modelData.keep
                                         text: "Drop"
+                                        enabled: !backend.busy
                                         onClicked: backend.dropSelect(modelData.id)
                                     }
                                     QuietButton {
                                         visible: lineHot && !modelData.keep
                                         text: "Restore"
+                                        enabled: !backend.busy
                                         onClicked: backend.restoreSelect(modelData.id)
                                     }
                                 }
@@ -1423,6 +1476,7 @@ ApplicationWindow {
             QuietButton {
                 Layout.minimumWidth: implicitWidth
                 text: "Open list"
+                enabled: !backend.busy
                 onClicked: backend.openCutListDialog()
             }
             QuietButton {
@@ -1434,6 +1488,7 @@ ApplicationWindow {
             QuietButton {
                 Layout.minimumWidth: implicitWidth
                 text: "Trim one file"
+                enabled: !backend.busy
                 onClicked: openVideo()
             }
             Item { Layout.fillWidth: true }
@@ -1536,6 +1591,7 @@ ApplicationWindow {
                         id: spokenCutsBox
                         objectName: "spokenCutsBox"
                         focusPolicy: Qt.NoFocus
+                        enabled: !backend.busy
                         checked: backend.cutMode === "speech"
                         onClicked: backend.cutMode = checked ? "speech" : "assemble"
                     }
@@ -1564,6 +1620,7 @@ ApplicationWindow {
                 TextArea {
                     id: intentField
                     visible: backend.cutMode === "speech"
+                    enabled: !backend.busy
                     Layout.fillWidth: true
                     Layout.preferredHeight: 78
                     wrapMode: TextEdit.Wrap
@@ -1572,6 +1629,11 @@ ApplicationWindow {
                     color: "#f4f4f5"
                     Component.onCompleted: text = backend.intent
                     onTextChanged: {
+                        if (backend.busy) {
+                            if (text !== backend.intent)
+                                text = backend.intent
+                            return
+                        }
                         if (text !== backend.intent)
                             backend.intent = text
                     }
@@ -1607,6 +1669,7 @@ ApplicationWindow {
                     font.pixelSize: 13
                     padding: 0
                     focusPolicy: Qt.NoFocus
+                    enabled: !backend.busy
                     checked: backend.sceneTransition === "dip"
                     onClicked: backend.sceneTransition = checked ? "dip" : "off"
                 }

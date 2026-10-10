@@ -31,3 +31,24 @@ private:
     int m_count;
     std::shared_ptr<std::atomic<bool>> m_cancel = std::make_shared<std::atomic<bool>>(false);
 };
+
+// One still for a shot row, at 1 second, off the UI thread.
+class TrayThumbWorker : public QThread {
+    Q_OBJECT
+
+public:
+    explicit TrayThumbWorker(QString path, QObject *parent = nullptr)
+        : QThread(parent), m_path(std::move(path)) {}
+
+    void requestStop();
+
+signals:
+    void grabbed(const QString &path, const QImage &image);
+
+protected:
+    void run() override;
+
+private:
+    QString m_path;
+    std::shared_ptr<std::atomic<bool>> m_cancel = std::make_shared<std::atomic<bool>>(false);
+};

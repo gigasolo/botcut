@@ -5,6 +5,8 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 ## 2026-10-09
 
 - The README, the CLI notes, and `docs/` match the sidebar window, Spoken cuts, and the keyring.
+- Spoken cuts send one still from the middle of each line with the transcript. The line row shows that still. A missed frame does not stop the cut.
+- Each shot row shows a picture from one second into the file. While a cut is running, Open list, Add videos, reorder, remove, Trim one file, and the cut settings stay locked. Save list stays available.
 
 ## 2026-10-08
 

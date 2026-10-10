@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from botcut.pick import (
@@ -148,6 +150,43 @@ def test_story_prompt_carries_the_intent_and_retakes_stay_retakes():
     retake = system_prompt("repeated takes of the intro")
     assert "takes recorded in order" in retake
     assert "repeated takes of the intro" in retake
+
+
+def test_a_still_is_sent_beside_its_line_and_the_key_stays_out(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOTCUT_LLM_MODEL", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "supersecret")
+    still = tmp_path / "0.jpg"
+    still.write_bytes(b"\xff\xd8\xff\xd9")
+    seen = {}
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"keep": [{"id": 0, "reason": "clear"}]}'}}]}
+
+    def post(url, headers=None, json=None, timeout=None):
+        seen["body"] = json
+        return Response()
+
+    monkeypatch.setattr("botcut.pick.requests.post", post)
+    utt = {
+        "id": 0,
+        "clip": 0,
+        "start": 0.0,
+        "end": 1.0,
+        "text": "hello",
+        "still": str(still),
+    }
+    assert pick([utt]) == [{"id": 0, "reason": "clear"}]
+    content = seen["body"]["messages"][1]["content"]
+    assert isinstance(content, list)
+    assert any(part.get("type") == "image_url" for part in content)
+    assert any("Still for [0]" in part.get("text", "") for part in content)
+    assert "supersecret" not in str(seen["body"])
+    lines = decision_lines([utt], [{"id": 0, "reason": "clear"}])
+    assert lines[0]["still"] == os.path.abspath(str(still))
 
 
 def test_decision_lines_mark_a_unique_drop():

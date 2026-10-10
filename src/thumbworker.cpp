@@ -10,6 +10,18 @@ namespace {
 constexpr int kMaxThumbJobs = 4;
 }
 
+void TrayThumbWorker::requestStop() {
+    m_cancel->store(true, std::memory_order_relaxed);
+    QThread::requestInterruption();
+}
+
+void TrayThumbWorker::run() {
+    const QImage image = ffmpeg::thumbnail(m_path, 1.0, 72, m_cancel.get());
+    if (m_cancel->load(std::memory_order_relaxed) || image.isNull())
+        return;
+    emit grabbed(m_path, image);
+}
+
 void ThumbWorker::requestStop() {
     m_cancel->store(true, std::memory_order_relaxed);
     QThread::requestInterruption();

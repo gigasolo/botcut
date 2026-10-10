@@ -5,10 +5,12 @@ The model returns ids and reasons. It never supplies timestamps.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import time
+from pathlib import Path
 
 import requests
 
@@ -108,7 +110,7 @@ def pick(utts: list[dict], intent: str = "") -> list[dict]:
         **chat_fields(),
         "messages": [
             {"role": "system", "content": system_prompt(intent)},
-            {"role": "user", "content": _user_message(utts)},
+            {"role": "user", "content": user_content(utts)},
         ],
         "response_format": KEEP_SCHEMA,
     }
@@ -296,17 +298,19 @@ def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
     for utt in utts:
         uid = int(utt["id"])
         kept_reason = reasons.get(uid)
-        rows.append(
-            {
-                "id": uid,
-                "clip": int(utt["clip"]),
-                "start": float(utt["start"]),
-                "end": float(utt["end"]),
-                "text": str(utt["text"]),
-                "keep": kept_reason is not None,
-                "reason": kept_reason if kept_reason is not None else drop_reason.get(uid, "dropped"),
-            }
-        )
+        row = {
+            "id": uid,
+            "clip": int(utt["clip"]),
+            "start": float(utt["start"]),
+            "end": float(utt["end"]),
+            "text": str(utt["text"]),
+            "keep": kept_reason is not None,
+            "reason": kept_reason if kept_reason is not None else drop_reason.get(uid, "dropped"),
+        }
+        still = str(utt.get("still") or "")
+        if still and os.path.isfile(still):
+            row["still"] = os.path.abspath(still)
+        rows.append(row)
     return rows
 
 
@@ -343,10 +347,49 @@ def _utt(uid: int, clip: int, start: float, end: float, text: str) -> dict:
     return {"id": uid, "clip": clip, "start": start, "end": end, "text": text}
 
 
+# A long interview can have more stills than one request should carry.
+MAX_STILLS = 40
+
+
 def _user_message(utts: list[dict]) -> str:
     return "\n".join(
         f"[{u['id']}] (clip {u['clip']}, {u['start']:.2f}-{u['end']:.2f}) {u['text']}" for u in utts
     )
+
+
+def user_content(utts: list[dict]) -> str | list[dict]:
+    """Text when no still exists. Otherwise the lines, then one JPEG per shown line."""
+    ready = [u for u in utts if u.get("still") and os.path.isfile(str(u["still"]))]
+    if not ready:
+        return _user_message(utts)
+    if len(ready) > MAX_STILLS:
+        step = len(ready) / MAX_STILLS
+        ready = [ready[int(i * step)] for i in range(MAX_STILLS)]
+    parts: list[dict] = [
+        {
+            "type": "text",
+            "text": (
+                "A still from the middle of a line follows that line when one exists. "
+                "Drop a blurred, dark, or unusable picture. Keep a clean look. "
+                "Return ids and reasons only. A reason may mention the picture.\n\n"
+                + _user_message(utts)
+            ),
+        }
+    ]
+    for utt in ready:
+        parts.append({"type": "text", "text": f"Still for [{int(utt['id'])}]"})
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": _jpeg_data_url(str(utt["still"]))},
+            }
+        )
+    return parts
+
+
+def _jpeg_data_url(path: str) -> str:
+    encoded = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return "data:image/jpeg;base64," + encoded
 
 
 def _tokens(text: str) -> list[str]:

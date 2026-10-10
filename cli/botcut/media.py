@@ -10,6 +10,38 @@ import subprocess
 import threading
 
 
+def grab_still(video: str, at: float, dest: str) -> bool:
+    """One software-decoded JPEG from the middle of a line. A failure leaves the cut running."""
+    if not os.path.isfile(video):
+        return False
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    when = max(0.0, at)
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{when:.3f}",
+                "-i",
+                video,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=320:-2",
+                "-q:v",
+                "5",
+                dest,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0
+
+
 def probe(path: str) -> dict:
     if not os.path.isfile(path):
         raise SystemExit(f"No such file: {path}")

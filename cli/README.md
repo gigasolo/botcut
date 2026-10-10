@@ -31,7 +31,7 @@ uv sync --extra local
 | `BOTCUT_LLM_MODEL` | `grok-4.7` | Model that returns keep ids and reasons. Grok 4.5 and newer are asked for low reasoning effort. |
 | `BOTCUT_FAKE` | unset | `1` skips the network: a fixture transcript, every id kept with reason `fake`. |
 
-Speech-to-text is `grok-voice-transcribe-2.0` with filler words kept. The model chooses utterance ids. It does not choose timestamps.
+Speech-to-text is `grok-voice-transcribe-2.0` with filler words kept. The model chooses utterance ids. It does not choose timestamps. One JPEG from the middle of each line is sent with the transcript, and stored under `out/work/stills/`. A missed frame does not stop the cut. The reason may mention the picture.
 
 Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.25 seconds before and 0.40 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range. The rough cut levels the clips, fades up from black, and fades out to black. Joins inside one file fade the audio by 20 ms. Between source files the picture dips through black and the audio fades for 120 ms, unless `--scene-transition off`. The app remembers that choice for every movie. The review master stays a straight concat.
 

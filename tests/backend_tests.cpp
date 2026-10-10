@@ -101,6 +101,7 @@ public:
     Q_PROPERTY(bool gathering READ gathering NOTIFY infoChanged)
     Q_PROPERTY(QUrl previewUrl READ previewUrl NOTIFY infoChanged)
     Q_PROPERTY(bool trayMissing READ trayMissing NOTIFY infoChanged)
+    Q_PROPERTY(int trayThumbRevision READ trayThumbRevision NOTIFY infoChanged)
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY infoChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY infoChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
@@ -124,6 +125,7 @@ public:
     bool gathering() const { return m_source.isEmpty(); }
     QUrl previewUrl() const { return {}; }
     bool trayMissing() const { return false; }
+    int trayThumbRevision() const { return 0; }
     bool apiKeySet() const { return false; }
     bool renderedUnsaved() const { return m_renderedUnsaved; }
     bool roughCut() const { return false; }
@@ -143,6 +145,7 @@ public:
     Q_INVOKABLE void addDropped(const QList<QUrl> &) {}
     Q_INVOKABLE bool trayFileExists(const QString &) const { return true; }
     Q_INVOKABLE QString trayFileSize(const QString &) const { return QStringLiteral("1 MB"); }
+    Q_INVOKABLE QString trayThumb(const QString &) const { return {}; }
     Q_INVOKABLE void openCutListDialog() {}
     Q_INVOKABLE void saveCutListDialog() {}
     Q_INVOKABLE void setApiKey(const QString &) {}
@@ -289,6 +292,8 @@ private slots:
     void cutListRoundTripsOrderAndMode();
     void dropSelectUnkeepsALine();
     void missingFileBlocksCut();
+    void busyIgnoresTrayEdits();
+    void shotRowThumbArrives();
     void speechWithoutKeyDoesNotStart();
     void savedKeyLoadsAndEnvironmentKeyIsNotStored();
     void typedKeyStaysInTheChildEnvironment();
@@ -631,6 +636,108 @@ void BackendTests::missingFileBlocksCut() {
     QVERIFY(!backend.status().contains(QStringLiteral("supersecret")));
 }
 
+void BackendTests::busyIgnoresTrayEdits() {
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    const QString a = m_dir.filePath(QStringLiteral("busy-a.mp4"));
+    const QString b = m_dir.filePath(QStringLiteral("busy-b.mp4"));
+    const QString c = m_dir.filePath(QStringLiteral("busy-c.mp4"));
+    QVERIFY(QFile(a).open(QIODevice::WriteOnly));
+    QVERIFY(QFile(b).open(QIODevice::WriteOnly));
+    QVERIFY(QFile(c).open(QIODevice::WriteOnly));
+
+    QVariantMap kept;
+    kept.insert(QStringLiteral("id"), 1);
+    kept.insert(QStringLiteral("text"), QStringLiteral("hello"));
+    kept.insert(QStringLiteral("keep"), true);
+    kept.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QFile list(m_dir.filePath(QStringLiteral("busy-list.botcut.json")));
+    QVERIFY(list.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = writeCutList(QStringLiteral("speech"),
+                                           {QFileInfo(a).absoluteFilePath(),
+                                            QFileInfo(b).absoluteFilePath()},
+                                           QStringLiteral("A ride"), {kept});
+    QCOMPARE(list.write(bytes), bytes.size());
+    list.close();
+
+    backend.addDropped({QUrl::fromLocalFile(list.fileName())});
+    QCOMPARE(backend.tray().size(), 2);
+    QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
+    QCOMPARE(backend.intent(), QStringLiteral("A ride"));
+    QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
+    QCOMPARE(backend.selects().size(), 1);
+    QVERIFY(backend.gathering());
+
+    // Set the flag directly so this does not stop the thumbnail worker.
+    backend.m_busy = true;
+    const QStringList tray = backend.tray();
+    const int index = backend.trayIndex();
+    const int opens = picker->openCount;
+
+    backend.addTrayFiles({c});
+    backend.moveTray(1);
+    backend.removeTray();
+    QCOMPARE(backend.tray(), tray);
+    QCOMPARE(backend.trayIndex(), index);
+
+    QFile other(m_dir.filePath(QStringLiteral("busy-other.botcut.json")));
+    QVERIFY(other.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray otherBytes = writeCutList(QStringLiteral("assemble"),
+                                                {QFileInfo(c).absoluteFilePath()});
+    QCOMPARE(other.write(otherBytes), otherBytes.size());
+    other.close();
+    backend.addDropped({QUrl::fromLocalFile(other.fileName())});
+    backend.openCutListDialog();
+    backend.openVideoDialog();
+    backend.addVideosDialog();
+    QCOMPARE(backend.tray(), tray);
+    QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
+    QCOMPARE(picker->openCount, opens);
+
+    backend.setCutMode(QStringLiteral("assemble"));
+    backend.setIntent(QStringLiteral("shorter"));
+    backend.setSceneTransition(QStringLiteral("off"));
+    QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
+    QCOMPARE(backend.intent(), QStringLiteral("A ride"));
+    QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
+
+    backend.dropSelect(1);
+    QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    backend.restoreSelect(1);
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("reason")).toString(),
+             QStringLiteral("story"));
+
+    emit picker->openSelected(videoUrl());
+    QVERIFY(backend.gathering());
+    QVERIFY(backend.source().isEmpty());
+
+    const QString saved = m_dir.filePath(QStringLiteral("saved-while-busy.botcut.json"));
+    backend.writeCutListFile(QUrl::fromLocalFile(saved));
+    QVERIFY(QFileInfo::exists(saved));
+    QCOMPARE(backend.tray(), tray);
+}
+
+void BackendTests::shotRowThumbArrives() {
+    const QString path = makeVideo(QStringLiteral("shot-thumb.mp4"), 3.0, false);
+    QVERIFY(!path.isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.addTrayFiles({path});
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.trayThumb(path).isEmpty(), 15000);
+    const QString thumb = backend.trayThumb(path);
+    QVERIFY(QFileInfo(thumb).isFile());
+    QVERIFY(QFileInfo(thumb).size() > 0);
+
+    const int revision = backend.trayThumbRevision();
+    backend.removeTray();
+    backend.addTrayFiles({path});
+    QCOMPARE(backend.trayThumb(path), thumb);
+    QCOMPARE(backend.trayThumbRevision(), revision);
+    QVERIFY(backend.m_trayThumbWorker == nullptr);
+}
+
 void BackendTests::speechWithoutKeyDoesNotStart() {
     EnvVarGuard guard("XAI_API_KEY");
     qunsetenv("XAI_API_KEY");
@@ -882,6 +989,7 @@ void BackendTests::sceneTransitionRoundTrips() {
 
 void BackendTests::cutStatusLines() {
     QCOMPARE(cutStatusFromLine(QStringLiteral("Reading files")), QStringLiteral("Reading files"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Reading pictures")), QStringLiteral("Reading pictures"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Transcribing 2/4 clip.MP4")),
              QStringLiteral("Transcribing 2/4 clip.MP4"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Choosing takes")), QStringLiteral("Choosing takes"));

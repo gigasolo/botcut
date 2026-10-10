@@ -213,7 +213,7 @@ QString cutStatusFromLine(const QString &line) {
     if (trimmed.isEmpty() || trimmed.size() > 200)
         return {};
     if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Reading pictures")
-        || trimmed == QLatin1String("Choosing takes"))
+        || trimmed == QLatin1String("Choosing takes") || trimmed == QLatin1String("Trying again"))
         return trimmed;
     static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));
     if (decided.match(trimmed).hasMatch())

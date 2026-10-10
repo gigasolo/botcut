@@ -9,10 +9,9 @@ import base64
 import json
 import os
 import re
-import time
 from pathlib import Path
 
-import requests
+from botcut.net import post
 
 UTTERANCE_GAP = 0.5
 MERGE_GAP = 1.0
@@ -69,9 +68,6 @@ KEEP_SCHEMA = {
     },
 }
 
-RETRY_STATUS = {429, 503}
-RETRY_DELAYS = (1.0, 2.0, 4.0)
-
 
 def utterances(words_by_clip: list[list[dict]]) -> list[dict]:
     found = []
@@ -114,23 +110,22 @@ def pick(utts: list[dict], intent: str = "") -> list[dict]:
         ],
         "response_format": KEEP_SCHEMA,
     }
-    url = llm_url()
-    for attempt in range(len(RETRY_DELAYS) + 1):
-        response = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=120,
-        )
-        if response.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS):
-            time.sleep(RETRY_DELAYS[attempt])
-            continue
-        if response.status_code != 200:
-            raise SystemExit(f"LLM HTTP {response.status_code}: {_safe_body(response.text, key)}")
+    response = post(
+        llm_url(),
+        key=key,
+        label="LLM",
+        read_timeout=120,
+        send=lambda: {
+            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "json": body,
+        },
+    )
+    try:
         content = response.json()["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         return [{"id": int(item["id"]), "reason": str(item["reason"])} for item in parsed["keep"]]
-    raise SystemExit("LLM request failed")
+    except (ValueError, KeyError, TypeError, IndexError):
+        raise SystemExit("LLM response was not a keep list")
 
 
 def segments(utts: list[dict], keep: list[dict], durations: list[float]) -> tuple[list[dict], list[int]]:
@@ -412,5 +407,3 @@ def _in_order(short: list[str], long: list[str]) -> bool:
     return index == len(short)
 
 
-def _safe_body(text: str, key: str) -> str:
-    return text.replace(key, "[redacted]")[:300]

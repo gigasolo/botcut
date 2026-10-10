@@ -132,7 +132,7 @@ def test_fake_pick_keeps_every_id_without_a_key(monkeypatch):
 
     monkeypatch.setenv("BOTCUT_FAKE", "1")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
     assert pick([{"id": 3, "text": "hello"}, {"id": 4, "text": "again"}]) == [
         {"id": 3, "reason": "fake"},
         {"id": 4, "reason": "fake"},
@@ -170,7 +170,7 @@ def test_a_still_is_sent_beside_its_line_and_the_key_stays_out(monkeypatch, tmp_
         seen["body"] = json
         return Response()
 
-    monkeypatch.setattr("botcut.pick.requests.post", post)
+    monkeypatch.setattr("botcut.net.requests.post", post)
     utt = {
         "id": 0,
         "clip": 0,
@@ -230,7 +230,7 @@ def test_pick_sends_low_effort_and_hides_the_key(monkeypatch):
         seen["auth"] = headers["Authorization"]
         return Response()
 
-    monkeypatch.setattr("botcut.pick.requests.post", post)
+    monkeypatch.setattr("botcut.net.requests.post", post)
     assert pick([{"id": 0, "clip": 0, "start": 0.0, "end": 1.0, "text": "hello"}]) == [
         {"id": 0, "reason": "ok"}
     ]

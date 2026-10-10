@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QHash>
 #include <QImage>
@@ -107,6 +108,7 @@ public:
     Q_INVOKABLE bool trayFileExists(const QString &path) const;
     Q_INVOKABLE QString trayFileSize(const QString &path) const;
     Q_INVOKABLE QString trayThumb(const QString &path) const;
+    Q_INVOKABLE bool trayThumbPending(const QString &path) const;
     int trayThumbRevision() const { return m_trayThumbRevision; }
     Q_INVOKABLE void moveTray(int delta);
     Q_INVOKABLE void removeTray();
@@ -166,8 +168,15 @@ private:
     void noteCutSaved(const QString &path);
     void startThumbs();
     void stopThumbs();
+    struct TrayThumbEntry {
+        qint64 size = -1;
+        qint64 mtimeMs = -1;
+        QString file;
+    };
+
     void scheduleTrayThumbs();
     void stopTrayThumbs();
+    static bool trayThumbFresh(const TrayThumbEntry &entry, const QFileInfo &info);
     void revealNextThumb();
     void wireFilePicker();
     void loadThemeAccent();
@@ -190,7 +199,7 @@ private:
     FilePicker *m_filePicker;
     ThumbWorker *m_thumbWorker = nullptr;
     TrayThumbWorker *m_trayThumbWorker = nullptr;
-    QHash<QString, QString> m_trayThumbs;
+    QHash<QString, TrayThumbEntry> m_trayThumbs;
     int m_trayThumbRevision = 0;
     friend class BackendTests;
     Timeline m_timeline;

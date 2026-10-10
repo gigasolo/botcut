@@ -46,7 +46,7 @@ def test_highlight_sends_low_effort(monkeypatch):
         seen["body"] = json
         return Response()
 
-    monkeypatch.setattr("botcut.short.requests.post", post)
+    monkeypatch.setattr("botcut.net.requests.post", post)
     choice = pick_highlight(
         [
             {"id": 1, "clip": 0, "start": 0.0, "end": 1.0, "text": "a"},
@@ -65,7 +65,7 @@ def test_fake_highlight_uses_the_first_three_ids(monkeypatch):
     def boom(*_args, **_kwargs):
         raise AssertionError("network")
 
-    monkeypatch.setattr("botcut.short.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
     choice = pick_highlight(
         [
             {"id": 4, "clip": 0, "start": 0.0, "end": 1.0, "text": "a"},
@@ -83,9 +83,9 @@ def test_fake_short_is_1080x1920(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setenv("BOTCUT_FAKE", "1")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setattr("botcut.stt.requests.post", boom)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
-    monkeypatch.setattr("botcut.short.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
 
     clips = []
     for name in ("a.mp4", "b.mp4"):

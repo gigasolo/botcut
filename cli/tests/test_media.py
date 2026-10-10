@@ -272,25 +272,28 @@ def test_render_percent_uses_kept_duration():
 def test_stt_posts_file_last_and_redacts_the_key(monkeypatch, tmp_path):
     flac = tmp_path / "take.flac"
     flac.write_bytes(b"not really flac")
-    seen = {}
+    seen = {"calls": 0}
 
     class Response:
         status_code = 400
         text = "refused token supersecret"
+        headers = {}
 
         def json(self):
             return {}
 
     def post(url, headers=None, files=None, timeout=None):
+        seen["calls"] += 1
         seen["url"] = url
         seen["names"] = [item[0] for item in files]
         seen["auth"] = headers["Authorization"]
         return Response()
 
     monkeypatch.setenv("XAI_API_KEY", "supersecret")
-    monkeypatch.setattr("botcut.stt.requests.post", post)
+    monkeypatch.setattr("botcut.net.requests.post", post)
     with pytest.raises(SystemExit) as exc:
         transcribe_xai(str(flac))
+    assert seen["calls"] == 1
     assert seen["url"] == "https://api.x.ai/v1/stt"
     assert seen["names"] == list(STT_FIELDS)
     assert seen["names"][-1] == "file"

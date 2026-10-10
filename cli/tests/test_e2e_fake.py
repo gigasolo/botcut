@@ -17,8 +17,8 @@ def test_fake_run_writes_a_playable_rough_cut(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setenv("BOTCUT_FAKE", "1")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setattr("botcut.stt.requests.post", boom)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
 
     clips = []
     for name in ("a.mp4", "b.mp4"):
@@ -119,8 +119,8 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
 
     monkeypatch.setenv("BOTCUT_FAKE", "1")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setattr("botcut.stt.requests.post", boom)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
 
     first = tmp_path / "a.mp4"
     second = tmp_path / "b.mp4"

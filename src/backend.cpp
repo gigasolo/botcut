@@ -1,6 +1,7 @@
 #include "backend.h"
 
 #include <QColor>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -1032,8 +1033,45 @@ QList<int> Backend::exportHeights(int width, int height) {
     return heights;
 }
 
+namespace {
+qint64 shotMtimeMs(const QFileInfo &info) {
+    return info.lastModified().toMSecsSinceEpoch();
+}
+
+QString shotThumbFile(const QFileInfo &info) {
+    const QString token = info.absoluteFilePath() + QLatin1Char('|') + QString::number(info.size())
+                          + QLatin1Char('|') + QString::number(shotMtimeMs(info));
+    const QByteArray hex = QCryptographicHash::hash(token.toUtf8(), QCryptographicHash::Sha1).toHex();
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                        + QStringLiteral("/shots");
+    return dir + QLatin1Char('/') + QString::fromLatin1(hex.left(20)) + QStringLiteral(".jpg");
+}
+
+}
+
+bool Backend::trayThumbFresh(const TrayThumbEntry &entry, const QFileInfo &info) {
+    if (entry.size != info.size() || entry.mtimeMs != shotMtimeMs(info))
+        return false;
+    if (entry.file.isEmpty())
+        return true;
+    const QFileInfo jpeg(entry.file);
+    return jpeg.isFile() && jpeg.size() > 0;
+}
+
 QString Backend::trayThumb(const QString &path) const {
-    return m_trayThumbs.value(QFileInfo(path).absoluteFilePath());
+    const QFileInfo info(path);
+    const auto it = m_trayThumbs.constFind(info.absoluteFilePath());
+    if (it == m_trayThumbs.cend() || !trayThumbFresh(*it, info) || it->file.isEmpty())
+        return {};
+    return it->file;
+}
+
+bool Backend::trayThumbPending(const QString &path) const {
+    const QFileInfo info(path);
+    if (!info.isFile())
+        return false;
+    const auto it = m_trayThumbs.constFind(info.absoluteFilePath());
+    return it == m_trayThumbs.cend() || !trayThumbFresh(*it, info);
 }
 
 void Backend::stopTrayThumbs() {
@@ -1050,36 +1088,44 @@ void Backend::stopTrayThumbs() {
 void Backend::scheduleTrayThumbs() {
     if (m_busy || m_trayThumbWorker)
         return;
+    bool adopted = false;
     for (const QString &path : m_tray) {
         const QFileInfo info(path);
         if (!info.isFile())
             continue;
         const QString abs = info.absoluteFilePath();
-        // An empty value means the grab was tried and missed. A short file
-        // with no frame at 1s stays a dark placeholder, and is not retried.
-        if (m_trayThumbs.contains(abs))
+        const auto known = m_trayThumbs.constFind(abs);
+        if (known != m_trayThumbs.cend() && trayThumbFresh(*known, info))
             continue;
+        const QString jpeg = shotThumbFile(info);
+        if (QFileInfo(jpeg).isFile() && QFileInfo(jpeg).size() > 0) {
+            m_trayThumbs.insert(abs, TrayThumbEntry{info.size(), shotMtimeMs(info), jpeg});
+            adopted = true;
+            continue;
+        }
+        if (adopted) {
+            ++m_trayThumbRevision;
+            emit trayThumbsChanged();
+        }
+        const qint64 size = info.size();
+        const qint64 mtime = shotMtimeMs(info);
         auto *worker = new TrayThumbWorker(abs, this);
         m_trayThumbWorker = worker;
         const QPointer<TrayThumbWorker> guard(worker);
         connect(worker, &TrayThumbWorker::grabbed, this,
-                [this, guard](const QString &shot, const QImage &image) {
+                [this, guard, jpeg, size, mtime](const QString &shot, const QImage &image) {
             if (!guard || guard != m_trayThumbWorker || image.isNull())
                 return;
-            const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
-                                + QStringLiteral("/shots");
-            QDir().mkpath(dir);
-            const QString file = dir + QLatin1Char('/')
-                                 + QString::number(qHash(shot), 16) + QStringLiteral(".jpg");
-            if (!image.save(file, "JPEG", 80)) {
-                m_trayThumbs.insert(shot, QString());
+            QDir().mkpath(QFileInfo(jpeg).absolutePath());
+            if (!image.save(jpeg, "JPEG", 80)) {
+                m_trayThumbs.insert(shot, TrayThumbEntry{size, mtime, {}});
                 return;
             }
-            m_trayThumbs.insert(shot, file);
+            m_trayThumbs.insert(shot, TrayThumbEntry{size, mtime, jpeg});
             ++m_trayThumbRevision;
             emit trayThumbsChanged();
         });
-        connect(worker, &TrayThumbWorker::finished, this, [this, guard, abs] {
+        connect(worker, &TrayThumbWorker::finished, this, [this, guard, abs, size, mtime] {
             // A stop() deletes the worker. A queued callback then sees a null
             // guard and leaves the path uncached, so the next idle pass retries.
             if (!guard)
@@ -1087,14 +1133,24 @@ void Backend::scheduleTrayThumbs() {
             const bool current = guard == m_trayThumbWorker;
             if (current)
                 m_trayThumbWorker = nullptr;
-            if (current && !m_trayThumbs.contains(abs))
-                m_trayThumbs.insert(abs, QString());
+            const auto known = m_trayThumbs.constFind(abs);
+            const bool stored = known != m_trayThumbs.cend() && known->size == size && known->mtimeMs == mtime;
+            if (current && !stored) {
+                // Remember the miss for this size and time only. It is not written to disk.
+                m_trayThumbs.insert(abs, TrayThumbEntry{size, mtime, {}});
+                ++m_trayThumbRevision;
+                emit trayThumbsChanged();
+            }
             guard->deleteLater();
             if (current)
                 scheduleTrayThumbs();
         });
         worker->start();
         return;
+    }
+    if (adopted) {
+        ++m_trayThumbRevision;
+        emit trayThumbsChanged();
     }
 }
 

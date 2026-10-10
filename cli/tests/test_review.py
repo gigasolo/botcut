@@ -76,8 +76,8 @@ def test_fake_review_builds_a_six_second_master(monkeypatch, tmp_path, capsys):
 
     monkeypatch.setenv("BOTCUT_FAKE", "1")
     monkeypatch.delenv("XAI_API_KEY", raising=False)
-    monkeypatch.setattr("botcut.stt.requests.post", boom)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
 
     from botcut.cli import run
 

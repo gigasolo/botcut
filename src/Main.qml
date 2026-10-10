@@ -1203,6 +1203,7 @@ ApplicationWindow {
                             clip: true
                             color: "#0e0e10"
                             Image {
+                                id: shotImage
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
@@ -1210,6 +1211,19 @@ ApplicationWindow {
                                 // so a grab that finishes later replaces the placeholder.
                                 source: backend.trayThumbRevision >= 0
                                         ? fileUrl(backend.trayThumb(modelData)) : ""
+                            }
+                            Rectangle {
+                                id: shotPulse
+                                anchors.fill: parent
+                                visible: (backend.trayThumbRevision >= 0 && backend.trayThumbPending(modelData))
+                                         || shotImage.status === Image.Loading
+                                color: win.accent
+                                SequentialAnimation on opacity {
+                                    running: shotPulse.visible
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.15; to: 0.45; duration: 900 }
+                                    NumberAnimation { from: 0.45; to: 0.15; duration: 900 }
+                                }
                             }
                             MouseArea {
                                 anchors.fill: parent

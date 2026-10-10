@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import time
-
-import requests
 
 from botcut.captions import subtitles_filter
-from botcut.pick import RETRY_DELAYS, RETRY_STATUS, _safe_body, chat_fields, llm_url
+from botcut.net import post
+from botcut.pick import chat_fields, llm_url
 
 HIGHLIGHT_SCHEMA = {
     "type": "json_schema",
@@ -54,25 +52,25 @@ def pick_highlight(utts: list[dict]) -> dict:
         ],
         "response_format": HIGHLIGHT_SCHEMA,
     }
-    for attempt in range(len(RETRY_DELAYS) + 1):
-        response = requests.post(
-            llm_url(),
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=120,
-        )
-        if response.status_code in RETRY_STATUS and attempt < len(RETRY_DELAYS):
-            time.sleep(RETRY_DELAYS[attempt])
-            continue
-        if response.status_code != 200:
-            raise SystemExit(f"LLM HTTP {response.status_code}: {_safe_body(response.text, key)}")
+    response = post(
+        llm_url(),
+        key=key,
+        label="LLM",
+        read_timeout=120,
+        send=lambda: {
+            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "json": body,
+        },
+    )
+    try:
         parsed = json.loads(response.json()["choices"][0]["message"]["content"])
         return {
             "start_id": int(parsed["start_id"]),
             "end_id": int(parsed["end_id"]),
             "title": str(parsed["title"]).strip(),
         }
-    raise SystemExit("LLM request failed")
+    except (ValueError, KeyError, TypeError, IndexError):
+        raise SystemExit("LLM response was not a highlight")
 
 
 def kept_on_cut(utts: list[dict], segments: list[dict]) -> list[dict]:

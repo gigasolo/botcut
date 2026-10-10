@@ -33,8 +33,8 @@ def test_assemble_keeps_every_file_in_order(monkeypatch, tmp_path, capsys):
 
     monkeypatch.delenv("XAI_API_KEY", raising=False)
     monkeypatch.delenv("BOTCUT_FAKE", raising=False)
-    monkeypatch.setattr("botcut.stt.requests.post", boom)
-    monkeypatch.setattr("botcut.pick.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
+    monkeypatch.setattr("botcut.net.requests.post", boom)
 
     first = tmp_path / "a.mp4"
     second = tmp_path / "b.mp4"

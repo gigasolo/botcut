@@ -146,6 +146,7 @@ public:
     Q_INVOKABLE bool trayFileExists(const QString &) const { return true; }
     Q_INVOKABLE QString trayFileSize(const QString &) const { return QStringLiteral("1 MB"); }
     Q_INVOKABLE QString trayThumb(const QString &) const { return {}; }
+    Q_INVOKABLE bool trayThumbPending(const QString &) const { return false; }
     Q_INVOKABLE void openCutListDialog() {}
     Q_INVOKABLE void saveCutListDialog() {}
     Q_INVOKABLE void setApiKey(const QString &) {}
@@ -294,6 +295,7 @@ private slots:
     void missingFileBlocksCut();
     void busyIgnoresTrayEdits();
     void shotRowThumbArrives();
+    void shotThumbReusedUntilTheClipChanges();
     void speechWithoutKeyDoesNotStart();
     void savedKeyLoadsAndEnvironmentKeyIsNotStored();
     void typedKeyStaysInTheChildEnvironment();
@@ -738,6 +740,38 @@ void BackendTests::shotRowThumbArrives() {
     QVERIFY(backend.m_trayThumbWorker == nullptr);
 }
 
+void BackendTests::shotThumbReusedUntilTheClipChanges() {
+    const QString path = makeVideo(QStringLiteral("shot-thumb-cache.mp4"), 3.0, false);
+    QVERIFY(!path.isEmpty());
+    {
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        backend.addTrayFiles({path});
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.trayThumb(path).isEmpty(), 15000);
+        QVERIFY(!backend.trayThumbPending(path));
+    }
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.addTrayFiles({path});
+    const QString cached = backend.trayThumb(path);
+    QVERIFY(!cached.isEmpty());
+    QVERIFY(QFileInfo(cached).isFile());
+    QVERIFY(backend.m_trayThumbWorker == nullptr);
+    QVERIFY(!backend.trayThumbPending(path));
+
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::ReadWrite));
+    const QDateTime later = QFileInfo(path).lastModified().addSecs(120);
+    QVERIFY(file.setFileTime(later, QFileDevice::FileModificationTime));
+    file.close();
+    backend.removeTray();
+    backend.addTrayFiles({path});
+    QVERIFY(backend.trayThumb(path).isEmpty());
+    QVERIFY(backend.trayThumbPending(path));
+    QVERIFY(backend.m_trayThumbWorker != nullptr);
+}
+
 void BackendTests::speechWithoutKeyDoesNotStart() {
     EnvVarGuard guard("XAI_API_KEY");
     qunsetenv("XAI_API_KEY");
@@ -990,6 +1024,7 @@ void BackendTests::sceneTransitionRoundTrips() {
 void BackendTests::cutStatusLines() {
     QCOMPARE(cutStatusFromLine(QStringLiteral("Reading files")), QStringLiteral("Reading files"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Reading pictures")), QStringLiteral("Reading pictures"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Trying again")), QStringLiteral("Trying again"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Transcribing 2/4 clip.MP4")),
              QStringLiteral("Transcribing 2/4 clip.MP4"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Choosing takes")), QStringLiteral("Choosing takes"));

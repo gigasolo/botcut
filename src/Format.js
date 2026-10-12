@@ -10,3 +10,13 @@ function fmt(sec) {
     var s = (cs - m * 6000) / 100;
     return (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s.toFixed(2);
 }
+
+// True once playback has reached the end of a line. A position still before
+// the line has not arrived there yet.
+function linePlayReachedEnd(position, start, end, playing) {
+    if (!playing || start < 0 || end < start)
+        return false;
+    if (position < start)
+        return false;
+    return position >= end;
+}

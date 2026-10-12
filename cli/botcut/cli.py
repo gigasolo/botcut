@@ -1,4 +1,4 @@
-"""botcut-cli run: transcribe, pick takes, write cuts.json, render a rough cut."""
+"""botcut-cli: transcribe, pick takes, revise a cut, make a card, render a rough cut."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
     burn_args,
     load_words_by_clip,
@@ -33,6 +34,7 @@ from botcut.pick import (
     utterances,
 )
 from botcut.review import build_master, keep_list, launch, offsets, source_clips
+from botcut.revise import revise
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
 
@@ -73,6 +75,19 @@ def main(argv: list[str] | None = None) -> None:
     review_p.add_argument("cuts", help="path to cuts.json")
     review_p.add_argument("--no-open", action="store_true", help="do not launch the BotCut app")
     review_p.add_argument("--rebuild", action="store_true", help="rebuild master.mp4 even if it is current")
+    revise_p = sub.add_parser("revise", help="revise a decided cut from a note")
+    revise_p.add_argument("cuts", help="path to cuts.json")
+    revise_p.add_argument("note", help="what to change")
+    revise_p.add_argument("--pace", choices=("open", "measured", "tight", "frenzied"), default="open")
+    revise_p.add_argument(
+        "--scene-transition",
+        choices=("dip", "off"),
+        default="dip",
+        help="current dip between files",
+    )
+    card_p = sub.add_parser("card", help="make a 3 second card from a sentence")
+    card_p.add_argument("--out", required=True, help="mp4 to write, named botcut-card-…")
+    card_p.add_argument("sentence", help="the sentence on the card")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -96,6 +111,15 @@ def main(argv: list[str] | None = None) -> None:
             make_short(args.cuts)
         elif args.cmd == "review":
             review(args.cuts, no_open=args.no_open, rebuild=args.rebuild)
+        elif args.cmd == "revise":
+            revise(
+                args.cuts,
+                args.note,
+                pace=args.pace,
+                dip=args.scene_transition != "off",
+            )
+        elif args.cmd == "card":
+            make_card(args.sentence, args.out)
     except BrokenPipeError:
         sys.exit(0)
 
@@ -148,9 +172,16 @@ def run(
     os.makedirs(work, exist_ok=True)
     words_by_clip = []
     silences_by_clip = []
+    speech = [clip for clip in clips if not is_card(clip["path"])]
+    speech_i = 0
     for index, clip in enumerate(clips):
         stem = Path(clip["path"]).stem
-        print(f"Transcribing {index + 1}/{len(clips)} {Path(clip['path']).name}", flush=True)
+        if is_card(clip["path"]):
+            words_by_clip.append([])
+            silences_by_clip.append([])
+            continue
+        speech_i += 1
+        print(f"Transcribing {speech_i}/{len(speech)} {Path(clip['path']).name}", flush=True)
         if fake:
             payload = transcribe_fake()
             cache = word_cache_candidates(work, index, stem, "fake")[0]
@@ -163,14 +194,19 @@ def run(
         silences_by_clip.append(_silences_for_clip(work, index, stem, flac, clip))
 
     utts = utterances(words_by_clip)
-    _attach_stills(utts, clips, os.path.join(work, "stills"))
-    print("Choosing takes", flush=True)
     movie = intent.strip() or DEFAULT_INTENT
-    chosen = pick(utts, movie)
+    if speech:
+        _attach_stills(utts, clips, os.path.join(work, "stills"))
+        print("Choosing takes", flush=True)
+        chosen = pick(utts, movie)
+    else:
+        chosen = []
     segs, unknown = segments(utts, chosen, [clip["duration"] for clip in clips])
     if snap_edges:
         segs = snap(segs, silences_by_clip)
     segs = tighten(segs, silences_by_clip, max_pause)
+    lines = decision_lines(utts, chosen)
+    lines, segs = merge_cards(lines, segs, clips, movie)
     for line in unknown_warnings(unknown):
         print(line)
     dropped = dropped_utterances(utts, chosen)
@@ -190,7 +226,7 @@ def run(
             for i, clip in enumerate(clips)
         ],
         "segments": segs,
-        "lines": decision_lines(utts, chosen),
+        "lines": lines,
         "dropped": [
             {
                 "id": utt["id"],
@@ -272,7 +308,8 @@ def render_saved(cuts: str, scene_transition: str = "dip") -> None:
         raise SystemExit("cuts.json has no clips")
     clips = [probe(row["path"]) for row in rows]
     lines = doc.get("lines") or []
-    if lines:
+    # A hand trim on Watch owns the segments. Rebuilding from lines would undo it.
+    if lines and not doc.get("trimmed"):
         tighten_doc = doc.get("tighten") or {}
         segs = _segments_for_lines(
             lines,

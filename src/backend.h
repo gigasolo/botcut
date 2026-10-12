@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QByteArray>
 #include <QFileInfo>
 #include <QFileSystemWatcher>
 #include <QHash>
@@ -38,15 +39,23 @@ class Backend : public QObject {
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY trayChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY cutModeChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY sceneTransitionChanged)
+    Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
+    Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
+    Q_PROPERTY(bool canRevert READ canRevert NOTIFY canRevertChanged)
     Q_PROPERTY(QVariantList selects READ selects NOTIFY selectsChanged)
     Q_PROPERTY(bool gathering READ gathering NOTIFY gatheringChanged)
     Q_PROPERTY(QUrl previewUrl READ previewUrl NOTIFY trayChanged)
     Q_PROPERTY(bool trayMissing READ trayMissing NOTIFY trayChanged)
     Q_PROPERTY(int trayThumbRevision READ trayThumbRevision NOTIFY trayThumbsChanged)
+    Q_PROPERTY(QVariantList recentLists READ recentLists NOTIFY recentsChanged)
+    Q_PROPERTY(QVariantList recentCuts READ recentCuts NOTIFY recentsChanged)
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY apiKeyChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY renderedUnsavedChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
+    // A plan cut's filmstrip is one block per cuts.json segment, not the baked file.
+    Q_PROPERTY(bool planCut READ planCut NOTIFY planChanged)
+    Q_PROPERTY(QObject *plan READ plan CONSTANT)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
     Q_PROPERTY(QObject *timeline READ timeline CONSTANT)
@@ -71,17 +80,25 @@ public:
     int trayIndex() const { return m_trayIndex; }
     QString cutMode() const { return m_cutMode; }
     QString sceneTransition() const { return m_sceneTransition; }
+    QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
+    QStringList reviseNotes() const { return m_reviseNotes; }
+    bool canRevert() const { return m_canRevert; }
     QVariantList selects() const { return m_selects; }
+    QVariantList recentLists() const;
+    QVariantList recentCuts() const;
     bool gathering() const { return m_gathering; }
     QUrl previewUrl() const;
     bool trayMissing() const;
     bool apiKeySet() const;
     bool renderedUnsaved() const { return m_renderedHere && !m_cutSaved; }
     bool roughCut() const;
+    bool planCut() const { return m_plan.active(); }
+    QObject *plan() { return &m_plan; }
     void setTrayIndex(int index);
     void setCutMode(const QString &mode);
     void setSceneTransition(const QString &value);
+    void setPace(const QString &pace);
     void setIntent(const QString &intent);
     QString themeAccent() const { return m_themeAccent; }
     QString themeAccentForeground() const;
@@ -114,13 +131,21 @@ public:
     Q_INVOKABLE void removeTray();
     Q_INVOKABLE void openCutListDialog();
     Q_INVOKABLE void saveCutListDialog();
+    Q_INVOKABLE void reopenList(const QString &path);
+    Q_INVOKABLE void watchRecent(const QString &path);
     Q_INVOKABLE void setApiKey(const QString &key);
     Q_INVOKABLE void startCut();
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void renderSelects();
+    // Re-encode a hand-trimmed plan from its cuts.json. An untouched plan copies instead.
+    Q_INVOKABLE void exportPlan();
     Q_INVOKABLE void writeCaptions();
     Q_INVOKABLE void makeShort();
+    Q_INVOKABLE bool sendRevise(const QString &note);
+    Q_INVOKABLE void revertRevise();
+    // `place` is "open" (front of the tray) or "close" (end). The sentence is the prompt.
+    Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence);
     // Exports the clips as they are when the dialog opens.
     Q_INVOKABLE void exportDialog();
 
@@ -150,8 +175,12 @@ signals:
     void trayThumbsChanged();
     void cutModeChanged();
     void sceneTransitionChanged();
+    void paceChanged();
     void intentChanged();
+    void reviseNotesChanged();
+    void canRevertChanged();
     void selectsChanged();
+    void recentsChanged();
     void gatheringChanged();
     void apiKeyChanged();
     void themeAccentChanged();
@@ -159,6 +188,7 @@ signals:
     void exportFailed(const QString &message);
     void renderedUnsavedChanged();
     void loadError(const QString &message);
+    void planChanged();
 
 private:
     void setBusy(bool busy);
@@ -184,13 +214,34 @@ private:
     void startCutProcess(const CutLaunch &launch);
     void readCutOutput();
     void cutProcessFinished(int code, QProcess::ExitStatus status);
-    void loadCutListFile(const QUrl &url);
+    bool loadCutListFile(const QUrl &url);
     void writeCutListFile(const QUrl &url);
-    bool writeCutsForRender();
+    void rememberList(const QString &path);
+    void forgetList(const QString &path);
+    void rememberCut(const QString &movie, const QString &listPath);
+    void forgetCut(const QString &movie);
+    void rememberFinishedCut(const QString &movie);
+    void rememberSavedCut(const QString &previous, const QString &saved);
+    QString listForCurrentTray();
+    void pointCutList(const QString &movie, const QString &listPath);
+    bool writeCutsForRender(bool includeIntent = false);
     QString cutsBesideMovie() const;
+    void adoptPlanCuts();
+    void loadPlanFilm();
+    bool writePlanSegments() const;
+    QString planCutsFor(const QString &movie) const;
+    double maxPause() const;
     void loadSelects(const QString &cutsPath);
     bool writeSelects(const QString &cutsPath) const;
     QString intentForCut() const;
+    void applyIntent(const QString &intent);
+    void applyPace(const QString &pace);
+    void applySceneTransition(const QString &value);
+    void clearReviseThread();
+    QString prepareReviseCuts();
+    bool syncLinesKeepingPause(const QString &cutsPath) const;
+    bool readReviseOutcome(const QString &cutsPath, QString *intent, QString *pace, bool *dip,
+                           QString *deliver) const;
     QUrl suggestedCutListUrl() const;
     Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, bool ownsKeys,
             QObject *parent);
@@ -203,6 +254,7 @@ private:
     int m_trayThumbRevision = 0;
     friend class BackendTests;
     Timeline m_timeline;
+    PlanFilm m_plan;
     edit::Clips m_exportDialogClips;
     ffmpeg::VideoInfo m_info;
     QString m_path;
@@ -221,18 +273,35 @@ private:
     QStringList m_tray;
     int m_trayIndex = -1;
     QString m_cutMode = QStringLiteral("speech");
+    QString m_listPath;
     QString m_sceneTransition = QStringLiteral("dip");
+    QString m_pace = QStringLiteral("open");
+    QString m_planCuts;
+    QString m_planMovie;
     QString m_intent;
+    QStringList m_reviseNotes;
+    QString m_reviseNote;
+    QByteArray m_reviseStamp;
+    bool m_canRevert = false;
+    QString m_undoIntent;
+    QString m_undoPace;
+    QString m_undoDip;
+    QVariantList m_undoSelects;
     QVariantList m_selects;
     bool m_gathering = true;
     QString m_apiKey;
     KeyStore *m_keys = nullptr;
     bool m_ownsKeys = false;
     QString m_cutOut;
+    QString m_cutOutRestore;
+    bool m_restoreCutOut = false;
+    QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short };
+    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Revise, Card };
     CutStage m_cutStage = CutStage::Idle;
+    QString m_cardPath;
+    QString m_cardPlace;
     void startBesideCut(CutStage stage, const QString &running,
                         CutLaunch (*make)(const QString &, const QString &, const QString &,
                                           const QString &));

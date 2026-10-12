@@ -1,11 +1,16 @@
 #include "cutjob.h"
 
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+
+#include <cerrno>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -32,6 +37,13 @@ QString sceneTransitionValue(const QString &value) {
     return value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
 }
 
+QString paceValue(const QString &pace) {
+    if (pace == QLatin1String("measured") || pace == QLatin1String("tight")
+        || pace == QLatin1String("frenzied"))
+        return pace;
+    return QStringLiteral("open");
+}
+
 }
 
 QString defaultCutIntent() {
@@ -41,7 +53,8 @@ QString defaultCutIntent() {
 
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
-                       const QString &intent, bool decide, const QString &sceneTransition) {
+                       const QString &intent, bool decide, const QString &sceneTransition,
+                       double maxPause) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -53,6 +66,7 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
     const QString movie = intent.trimmed().isEmpty() ? defaultCutIntent() : intent.trimmed();
     tail << QStringLiteral("--intent") << movie;
     tail << QStringLiteral("--scene-transition") << sceneTransitionValue(sceneTransition);
+    tail << QStringLiteral("--max-pause") << QString::number(maxPause);
     if (decide)
         tail << QStringLiteral("--decide");
     return launchTool(tail, botcutCli, uv, cliProject);
@@ -88,6 +102,92 @@ CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, cons
     if (cutsPath.isEmpty())
         return {QString(), {}, QStringLiteral("No cuts.json")};
     const QStringList tail{QStringLiteral("short"), cutsPath};
+    return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+CutLaunch cutReviseLaunch(const QString &cutsPath, const QString &note, const QString &botcutCli,
+                          const QString &uv, const QString &cliProject, const QString &pace,
+                          const QString &sceneTransition) {
+    if (cutsPath.isEmpty())
+        return {QString(), {}, QStringLiteral("No cuts.json")};
+    const QString trimmed = note.simplified();
+    if (trimmed.isEmpty())
+        return {QString(), {}, QStringLiteral("Say what to change")};
+    // `--` keeps a note such as --help from being parsed as an option.
+    const QStringList tail{QStringLiteral("revise"), cutsPath, QStringLiteral("--pace"),
+                           paceValue(pace), QStringLiteral("--scene-transition"),
+                           sceneTransitionValue(sceneTransition), QStringLiteral("--"), trimmed};
+    return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+QString cardDirectory() {
+    const QByteArray xdg = qgetenv("XDG_DATA_HOME");
+    const QString base = xdg.isEmpty()
+                             ? QDir::home().filePath(QStringLiteral(".local/share"))
+                             : QFileInfo(QString::fromLocal8Bit(xdg)).absoluteFilePath();
+    return QDir(base).filePath(QStringLiteral("botcut/cards"));
+}
+
+QString ensureCardDirectory(QString *canonical) {
+    const QString path = cardDirectory();
+    if (!QDir().mkpath(QFileInfo(path).dir().absolutePath()))
+        return QStringLiteral("No card directory");
+    const QByteArray encoded = QFile::encodeName(path);
+    if (::mkdir(encoded.constData(), 0700) != 0 && errno != EEXIST)
+        return QStringLiteral("No card directory");
+    const QFileInfo info(path);
+    if (info.isSymbolicLink() || !info.isDir())
+        return QStringLiteral("No card directory");
+    if (info.ownerId() != static_cast<uint>(::getuid()))
+        return QStringLiteral("No card directory");
+    const QFile::Permissions perms = info.permissions();
+    if (!perms.testFlag(QFileDevice::WriteOwner) || perms.testFlag(QFileDevice::WriteGroup)
+        || perms.testFlag(QFileDevice::WriteOther))
+        return QStringLiteral("No card directory");
+    const QString real = info.canonicalFilePath();
+    if (real.isEmpty())
+        return QStringLiteral("No card directory");
+    if (canonical != nullptr)
+        *canonical = real;
+    return {};
+}
+
+QString cardDestinationError(const QString &dest) {
+    static const QRegularExpression nameRe(
+        QStringLiteral("^botcut-card-[A-Za-z0-9][A-Za-z0-9_-]*\\.mp4$"));
+    const QFileInfo info(dest);
+    if (!nameRe.match(info.fileName()).hasMatch() || info.isSymbolicLink())
+        return QStringLiteral("No card file");
+    const QFileInfo root(cardDirectory());
+    if (root.isSymbolicLink() || !root.isDir() || root.ownerId() != static_cast<uint>(::getuid()))
+        return QStringLiteral("No card file");
+    const QFile::Permissions perms = root.permissions();
+    if (!perms.testFlag(QFileDevice::WriteOwner) || perms.testFlag(QFileDevice::WriteGroup)
+        || perms.testFlag(QFileDevice::WriteOther))
+        return QStringLiteral("No card file");
+    const QString rootReal = root.canonicalFilePath();
+    const QString parentReal = info.dir().canonicalPath();
+    if (rootReal.isEmpty() || parentReal.isEmpty() || parentReal != rootReal)
+        return QStringLiteral("No card file");
+    if (info.exists()) {
+        const QString real = info.canonicalFilePath();
+        if (real.isEmpty() || QFileInfo(real).dir().canonicalPath() != rootReal)
+            return QStringLiteral("No card file");
+    }
+    return {};
+}
+
+CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QString &botcutCli,
+                        const QString &uv, const QString &cliProject) {
+    const QString trimmed = sentence.simplified();
+    if (trimmed.isEmpty())
+        return {QString(), {}, QStringLiteral("Say what the card says")};
+    const QString problem = cardDestinationError(dest);
+    if (!problem.isEmpty())
+        return {QString(), {}, problem};
+    const QString absolute = QFileInfo(dest).absoluteFilePath();
+    const QStringList tail{QStringLiteral("card"), QStringLiteral("--out"), absolute,
+                           QStringLiteral("--"), trimmed};
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -213,7 +313,8 @@ QString cutStatusFromLine(const QString &line) {
     if (trimmed.isEmpty() || trimmed.size() > 200)
         return {};
     if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Reading pictures")
-        || trimmed == QLatin1String("Choosing takes") || trimmed == QLatin1String("Trying again"))
+        || trimmed == QLatin1String("Choosing takes") || trimmed == QLatin1String("Trying again")
+        || trimmed == QLatin1String("Revising"))
         return trimmed;
     static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));
     if (decided.match(trimmed).hasMatch())

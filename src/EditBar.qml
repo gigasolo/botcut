@@ -9,8 +9,11 @@ Item {
     id: root
     implicitHeight: 76
 
-    readonly property var timeline: backend.timeline
-    readonly property real durationSec: backend.duration
+    readonly property bool plan: backend.planCut
+    readonly property var timeline: plan ? backend.plan : backend.timeline
+    readonly property real durationSec: plan ? backend.plan.duration : backend.duration
+    enabled: !backend.busy
+    opacity: enabled ? 1 : 0.45
     readonly property var clips: timeline.clips
     property real playheadSec: 0
     property color accent: "#FFD60A"
@@ -33,7 +36,7 @@ Item {
     readonly property real windowLen: Math.max(windowEnd - windowStart, 0.001)
     readonly property color film: "#1c1c1e"
 
-    signal scrub(real seconds)
+    signal scrub(real seconds, int segment, real source)
 
     function xForTime(t) { return durationSec <= 0 ? 0 : ((t - windowStart) / windowLen) * width }
     function timeForX(x) {
@@ -50,7 +53,8 @@ Item {
         var newStart = Math.max(0, from - slack), newEnd = Math.min(durationSec, to + slack)
         if (zoomed && newStart === viewStartSec && newEnd === viewEndSec) zoomed = false
         else { viewStartSec = newStart; viewEndSec = newEnd; zoomed = true }
-        backend.requestThumbs(windowStart, windowEnd)
+        if (!plan)
+            backend.requestThumbs(windowStart, windowEnd)
     }
 
     Rectangle {
@@ -60,7 +64,7 @@ Item {
         Item {
             anchors.fill: parent
             Repeater {
-                model: backend.thumbCount
+                model: root.plan ? 0 : backend.thumbCount
                 Image {
                     // Whole-pixel edges, so neighbouring frames never leave a seam between them.
                     readonly property real slot: track.width / Math.max(backend.thumbCount, 1)
@@ -166,7 +170,7 @@ Item {
         readonly property bool dragging: root.trimming
         readonly property string hint: area.gapHovered >= 0 ? "Double-click to restore"
                                       : area.splitHovered >= 0 ? "Double-click to join"
-                                      : area.clipHovered >= 0 && !area.onHandle ? "Double-click to split" : ""
+                                      : area.clipHovered >= 0 && !area.onHandle && !root.plan ? "Double-click to split" : ""
         visible: root.enabled && (dragging || (area.mode === 0 && area.containsMouse && !area.removeHovered && hint !== ""))
         width: label.implicitWidth + 20; height: dragging ? 32 : 26
         radius: 7; color: "#2c2c2f"
@@ -197,6 +201,32 @@ Item {
         property int splitHovered: -1
         property bool onHandle: false
         property bool removeHovered: false
+        property real pressX: 0
+        property real planSpan: 0
+        property int edgeHold: 0
+        property real edgeExtra: 0
+        property bool planMoved: false
+
+        // The packed strip has no room past the outer frame, so holding that edge grows the source.
+        function applyPlanDrag(x) {
+            if (clipIndex < 0 || root.width <= 0)
+                return
+            var delta = ((x - pressX) / root.width) * planSpan + edgeHold * edgeExtra
+            root.timeline.moveEdgeBy(clipIndex, leftEdge, delta)
+            var sourceEdge = root.timeline.edgeTime(clipIndex, leftEdge)
+            activeTime = sourceEdge
+            planMoved = true
+            // The in-point's display time overlaps the previous block until the gesture packs.
+            seek(root.timeline.displayForSource(clipIndex, sourceEdge), clipIndex, sourceEdge)
+            if (!leftEdge && x >= root.width - 10)
+                edgeHold = 1
+            else if (leftEdge && x <= 10)
+                edgeHold = -1
+            else {
+                edgeHold = 0
+                edgeExtra = 0
+            }
+        }
 
         // The hovered clip's × sits in its top-right corner, inside the handle.
         function onRemove(x, y) {
@@ -220,7 +250,8 @@ Item {
                         best = { handle: true, clip: i + 1, left: true }
                     var edge = best.left ? root.clips[best.clip].start : root.clips[best.clip].end
                     var neighbour = best.left ? best.clip - 1 : best.clip + 1
-                    best.split = neighbour >= 0 && neighbour < root.clips.length
+                    // Plan blocks touch because they are different files. That join is not a split.
+                    best.split = !root.plan && neighbour >= 0 && neighbour < root.clips.length
                         && (best.left ? root.clips[neighbour].end === edge : root.clips[neighbour].start === edge)
                         ? Math.min(best.clip, neighbour) : -1
                     return best
@@ -241,7 +272,10 @@ Item {
             consider(dragStartPlayhead)
             return best
         }
-        function seek(t) { root.playheadSec = t; root.scrub(t) }
+        function seek(t, segment, source) {
+            root.playheadSec = t
+            root.scrub(t, segment === undefined ? -1 : segment, source === undefined ? -1 : source)
+        }
         function hover(x, y) {
             var hit = hitTest(x)
             onHandle = hit.handle
@@ -258,6 +292,10 @@ Item {
             if (mode === 0) { hover(mouse.x, mouse.y); return }
             if (mode === 2) { seek(t); return }
             if (mode !== 1) return
+            if (root.plan) {
+                applyPlanDrag(mouse.x)
+                return
+            }
             root.timeline.moveEdge(clipIndex, leftEdge, snap(t))
             activeTime = leftEdge ? root.clips[clipIndex].start : root.clips[clipIndex].end
             seek(activeTime)
@@ -269,25 +307,54 @@ Item {
             if (hit.handle) {
                 mode = 1; clipIndex = hit.clip; leftEdge = hit.left; dragStartPlayhead = root.playheadSec
                 activeTime = leftEdge ? root.clips[clipIndex].start : root.clips[clipIndex].end
+                if (root.plan) {
+                    pressX = mouse.x
+                    planSpan = root.windowLen
+                    edgeHold = 0
+                    edgeExtra = 0
+                    planMoved = false
+                    activeTime = root.timeline.edgeTime(clipIndex, leftEdge)
+                }
                 root.timeline.beginGesture()
             } else {
                 mode = 2; seek(root.timeForX(mouse.x))
             }
         }
         onReleased: {
+            var reseek = root.plan && mode === 1 && planMoved && clipIndex >= 0
+            var index = clipIndex
+            var left = leftEdge
             if (mode === 1) root.timeline.endGesture()
             if (mode === 3 && onRemove(mouseX, mouseY)) root.timeline.removeClip(clipHovered)
-            mode = 0; clipIndex = -1
+            edgeHold = 0
+            edgeExtra = 0
+            planMoved = false
+            mode = 0
+            clipIndex = -1
+            // Same path as the drag. The packed out-point is the next file's start, so the
+            // playhead parks inside this block and the picture stays on this source edge.
+            if (reseek)
+                seek(root.timeline.playheadForEdge(index, left), index, root.timeline.edgeTime(index, left))
             hover(mouseX, mouseY)
         }
         onDoubleClicked: mouse => {
             if (onRemove(mouse.x, mouse.y)) return
             var hit = hitTest(mouse.x)
-            if (hit.split >= 0) root.timeline.joinClips(hit.split)
-            else if (hit.clip >= 0 && !hit.handle) root.timeline.split(root.timeForX(mouse.x))
+            if (!root.plan && hit.split >= 0) root.timeline.joinClips(hit.split)
+            else if (!root.plan && hit.clip >= 0 && !hit.handle) root.timeline.split(root.timeForX(mouse.x))
             else if (hit.clip < 0) root.timeline.restoreGap(hit.gap)
             hover(mouse.x, mouse.y)
         }
         onExited: { clipHovered = -1; gapHovered = -1; splitHovered = -1; removeHovered = false }
+    }
+
+    Timer {
+        interval: 40
+        repeat: true
+        running: root.plan && area.mode === 1 && area.edgeHold !== 0
+        onTriggered: {
+            area.edgeExtra += 0.08
+            area.applyPlanDrag(area.mouseX)
+        }
     }
 }

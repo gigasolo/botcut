@@ -9,6 +9,8 @@ import re
 import subprocess
 import threading
 
+from botcut.card import is_card
+
 
 def grab_still(video: str, at: float, dest: str) -> bool:
     """One software-decoded JPEG from the middle of a line. A failure leaves the cut running."""
@@ -344,7 +346,12 @@ def render_args(
         raise SystemExit(f"Unknown encoder {encoder}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
+    # An open card is clips[0]. Its still is not the camera's size or rate.
     ref = clips[0]
+    for clip in clips:
+        if not is_card(str(clip.get("path") or "")):
+            ref = clip
+            break
     width, height, fps = int(ref["width"]), int(ref["height"]), float(ref["fps"])
     if width <= 0 or height <= 0 or fps <= 0:
         raise SystemExit(f"Clip has no video to render: {ref['path']}")

@@ -1,7 +1,10 @@
 #pragma once
 
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QObject>
 #include <QVariantList>
+#include <QVariantMap>
 
 #include "edit.h"
 
@@ -72,6 +75,99 @@ private:
     edit::Clips m_exported;
     QList<edit::Clips> m_undo;
     QList<edit::Clips> m_redo;
+    bool m_gesture = false;
+    bool m_gestureRecorded = false;
+};
+
+// One block per segment of a plan cut, in cuts.json order. Each block is a
+// range on its own file, not an edit::Range on the baked movie. A removed
+// block comes back from the ranges captured when Watch opened.
+class PlanFilm : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QVariantList clips READ clipList NOTIFY changed)
+    Q_PROPERTY(double duration READ duration NOTIFY changed)
+    Q_PROPERTY(double keptDuration READ keptDuration NOTIFY changed)
+    Q_PROPERTY(bool canUndo READ canUndo NOTIFY changed)
+    Q_PROPERTY(bool canRedo READ canRedo NOTIFY changed)
+    Q_PROPERTY(bool unexported READ unexported NOTIFY changed)
+
+public:
+    struct Segment {
+        int origin = 0;
+        int clip = 0;
+        QString path;
+        double fileDuration = 0;
+        double start = 0;
+        double end = 0;
+        QString reason;
+        QJsonObject raw;
+    };
+
+    explicit PlanFilm(QObject *parent = nullptr) : QObject(parent) {}
+
+    bool active() const { return m_active; }
+    // A drag does not relayout, so this stays at the packed length until the gesture ends.
+    double duration() const { return m_duration; }
+    double keptDuration() const;
+    bool canUndo() const { return !m_undo.isEmpty(); }
+    bool canRedo() const { return !m_redo.isEmpty(); }
+    bool unexported() const;
+    QVariantList clipList() const;
+    QJsonArray segmentsJson() const;
+    const QList<Segment> &segments() const { return m_current; }
+
+    void load(const QList<Segment> &segments);
+    void clear();
+
+    Q_INVOKABLE int clipAt(double t) const;
+    Q_INVOKABLE int gapAt(double t) const;
+    Q_INVOKABLE double playableFrom(double t) const;
+    Q_INVOKABLE double edgeFrom(double t, int direction) const;
+    // The source file and source time under a display time, or ok false in a gap.
+    Q_INVOKABLE QVariantMap sourceAt(double displayTime) const;
+    // One segment's own source, even when its display range overlaps a neighbor mid-drag.
+    Q_INVOKABLE QVariantMap sourceFor(int index, double sourceTime) const;
+    Q_INVOKABLE double displayForSource(int index, double sourceTime) const;
+    Q_INVOKABLE double edgeTime(int index, bool startEdge) const;
+    // Where a released handle parks. An out-point stays strictly inside its block.
+    Q_INVOKABLE double playheadForEdge(int index, bool startEdge) const;
+
+    Q_INVOKABLE void split(double) {}
+    Q_INVOKABLE void moveEdge(int index, bool startEdge, double t);
+    Q_INVOKABLE void moveEdgeBy(int index, bool startEdge, double delta);
+    Q_INVOKABLE void trimTo(double t, bool startEdge);
+    Q_INVOKABLE void removeClip(int index);
+    Q_INVOKABLE void removeOrRestoreAt(double t);
+    Q_INVOKABLE void restoreGap(int gap);
+    Q_INVOKABLE void beginGesture();
+    Q_INVOKABLE void endGesture();
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
+
+signals:
+    void changed();
+    // A gesture, remove, restore, undo, or redo has settled.
+    void committed();
+
+private:
+    struct View {
+        double start = 0;
+        double end = 0;
+    };
+
+    void takeUndo();
+    void relayout();
+    void applyEdge(int index, const Segment &updated);
+
+    bool m_active = false;
+    double m_duration = 0;
+    QList<Segment> m_captured;
+    QList<Segment> m_current;
+    QList<Segment> m_anchor;
+    QList<View> m_view;
+    QList<View> m_frozenView;
+    QList<QList<Segment>> m_undo;
+    QList<QList<Segment>> m_redo;
     bool m_gesture = false;
     bool m_gestureRecorded = false;
 };

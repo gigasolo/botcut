@@ -19,7 +19,8 @@ QString defaultCutIntent();
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent = QString(), bool decide = false,
-                       const QString &sceneTransition = QStringLiteral("dip"));
+                       const QString &sceneTransition = QStringLiteral("dip"),
+                       double maxPause = 0.8);
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
@@ -34,6 +35,24 @@ CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, c
 
 CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
                          const QString &cliProject);
+
+// Pace is a name. --max-pause is applied by the next Cut or Render, not here.
+CutLaunch cutReviseLaunch(const QString &cutsPath, const QString &note, const QString &botcutCli,
+                          const QString &uv, const QString &cliProject, const QString &pace,
+                          const QString &sceneTransition);
+
+// The sentence is positional. `--` keeps it from being read as an option.
+// The output name starts with botcut-card- so a later spoken cut can see it.
+CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QString &botcutCli,
+                        const QString &uv, const QString &cliProject);
+
+// Cards live under XDG data, not the temp dir, so a saved list can open them after a restart.
+// Empty means the directory is real, owned by this user, and not writable by anyone else.
+QString ensureCardDirectory(QString *canonical);
+
+// Empty when dest is one botcut-card-*.mp4 inside that directory. A symlink or any other
+// directory is refused before a process starts.
+QString cardDestinationError(const QString &dest);
 
 // Shot list on disk: version, mode, intent, absolute paths, and optional line
 // decisions. No API key. A list with no lines still opens.

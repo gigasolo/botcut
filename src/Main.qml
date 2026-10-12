@@ -21,6 +21,7 @@ ApplicationWindow {
     }
     readonly property bool hasVideo: backend.source.toString() !== ""
     readonly property bool gathering: backend.gathering
+    readonly property bool linesOpen: gathering && backend.selects.length > 0
     readonly property bool previewing: gathering && backend.previewUrl.toString() !== ""
     readonly property color accent: backend.themeAccent
     readonly property color accentForeground: backend.themeAccentForeground
@@ -35,17 +36,26 @@ ApplicationWindow {
     property int currentLine: -1
     property int linePlayStart: -1
     property int linePlayEnd: -1
+    // Shot preview only. Plan playback reuses the markers below and must not pause a shot.
+    property bool linePreview: false
+    // Plan playback reuses the line seek. These stay clear for an ordinary movie.
+    property bool planArmed: false
+    property bool planPlaying: false
+    property int planIndex: -1
+    property string planSource: ""
     readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
-    readonly property var timeline: backend.timeline
+    readonly property var timeline: backend.planCut ? backend.plan : backend.timeline
     // Quitting only warns about unexported cuts. Clips spanning the whole
     // video are never dirty — that's just the source.
     readonly property bool unexported: hasVideo && timeline.unexported
     // A rendered movie with no handle edits lives only in /tmp until it is saved.
     readonly property bool looseCut: backend.renderedUnsaved && !unexported
-    // Editing shortcuts go quiet while a dialog is up or a handle is dragged.
-    readonly property bool editing: hasVideo && !gathering && !settingsOpen && backend.duration > 0
+    // Editing shortcuts go quiet while a dialog is up, a handle is dragged, or a job is running.
+    readonly property bool editing: hasVideo && !gathering && !settingsOpen
+                                   && (backend.planCut ? backend.plan.duration : backend.duration) > 0
                                    && !quitConfirmVisible && !editBar.interacting
+                                   && !backend.busy
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -136,6 +146,25 @@ ApplicationWindow {
         var n = parseInt(match[1], 10);
         return n >= 0 && n <= 100 ? n : -1;
     }
+    function submitRevise() {
+        var note = reviseInput.text.replace(/\s+/g, " ").trim()
+        if (note === "")
+            return
+        if (backend.sendRevise(note))
+            reviseInput.text = ""
+    }
+    function makeOpenCard() {
+        var sentence = openCardInput.text.replace(/\s+/g, " ").trim()
+        if (sentence === "")
+            return
+        backend.makeCard("open", sentence)
+    }
+    function makeCloseCard() {
+        var sentence = closeCardInput.text.replace(/\s+/g, " ").trim()
+        if (sentence === "")
+            return
+        backend.makeCard("close", sentence)
+    }
     function playLine(line) {
         if (!gathering)
             return;
@@ -144,13 +173,56 @@ ApplicationWindow {
             return;
         linePlayStart = Math.max(0, Math.round(line.start * 1000));
         linePlayEnd = Math.max(linePlayStart, Math.round(line.end * 1000));
+        linePreview = true;
         if (backend.trayIndex !== clip)
             backend.trayIndex = clip;
         ensureAudioOutput();
-        player.primed = true;
-        player.priming = false;
-        player.position = linePlayStart;
-        player.play();
+        player.armLine();
+    }
+    // Load the source under a plan-filmstrip time and seek to that source range.
+    function armPlan(displayTime, play) {
+        if (!backend.planCut)
+            return;
+        showPlanHit(backend.plan.sourceAt(displayTime), play);
+    }
+    // The segment under a handle, while its display range overlaps a neighbor.
+    function armPlanIndex(index, sourceTime, play) {
+        if (!backend.planCut)
+            return;
+        showPlanHit(backend.plan.sourceFor(index, sourceTime), play);
+    }
+    function showPlanHit(hit, play) {
+        planPlaying = play;
+        planArmed = false;
+        linePreview = false;
+        if (!hit.ok) {
+            planPlaying = false;
+            planArmed = false;
+            linePlayStart = -1;
+            linePlayEnd = -1;
+            player.pause();
+            return;
+        }
+        linePlayStart = Math.max(0, Math.round(hit.source * 1000));
+        linePlayEnd = Math.max(linePlayStart, Math.round(hit.end * 1000));
+        planIndex = hit.index;
+        var url = fileUrl(hit.path);
+        ensureAudioOutput();
+        if (player.priming)
+            player.finishPriming();
+        if (planSource !== url) {
+            planSource = url;
+            player.armLine();
+            return;
+        }
+        if (play) {
+            if (player.playbackState !== MediaPlayer.PlayingState)
+                player.play();
+            player.position = linePlayStart;
+        } else {
+            player.pause();
+            player.position = linePlayStart;
+        }
     }
     function showNotice(text) {
         noticeText = text;
@@ -173,10 +245,20 @@ ApplicationWindow {
             backend.showMovie();
     }
     function exportVideo() {
-        if (!win.hasVideo || backend.duration <= 0 || backend.busy)
+        if (!win.hasVideo || backend.busy)
             return;
+        if (backend.planCut) {
+            if (backend.plan.duration <= 0)
+                return;
+        } else if (backend.duration <= 0) {
+            return;
+        }
         player.pause();
-        backend.exportDialog();
+        planPlaying = false;
+        if (backend.planCut && backend.plan.unexported)
+            backend.exportPlan();
+        else
+            backend.exportDialog();
     }
     function ensureAudioOutput() {
         if (audioOutput === null && (win.hasVideo || win.previewing))
@@ -210,6 +292,21 @@ ApplicationWindow {
                 player.play();
             return;
         }
+        if (backend.planCut) {
+            if (backend.plan.duration <= 0)
+                return;
+            ensureAudioOutput();
+            if (player.priming)
+                player.finishPriming();
+            if (player.playbackState === MediaPlayer.PlayingState) {
+                player.pause();
+                planPlaying = false;
+                return;
+            }
+            var planFrom = backend.plan.playableFrom(editBar.playheadSec);
+            armPlan(planFrom < 0 ? backend.plan.edgeFrom(0, -1) : planFrom, true);
+            return;
+        }
         if (!win.hasVideo || backend.duration <= 0)
             return;
         ensureAudioOutput();
@@ -226,6 +323,17 @@ ApplicationWindow {
         player.play();
     }
     function seekTo(seconds) {
+        if (backend.planCut) {
+            if (backend.plan.duration <= 0)
+                return;
+            if (player.priming)
+                player.finishPriming();
+            var planTime = Math.max(0, Math.min(seconds, backend.plan.duration));
+            editBar.playheadSec = planTime;
+            var keepPlaying = planPlaying && player.playbackState === MediaPlayer.PlayingState;
+            armPlan(planTime, keepPlaying);
+            return;
+        }
         if (!win.hasVideo || backend.duration <= 0)
             return;
         if (player.priming)
@@ -278,7 +386,8 @@ ApplicationWindow {
         sequence: "Space"
         context: Qt.ApplicationShortcut
         enabled: !win.quitConfirmVisible && !win.settingsOpen && (win.hasVideo || win.previewing)
-                 && !keyField.activeFocus && !intentField.activeFocus
+                 && !keyField.activeFocus && !intentField.activeFocus && !planIntent.activeFocus
+                 && !reviseInput.activeFocus
         onActivated: togglePlay()
     }
 
@@ -448,21 +557,62 @@ ApplicationWindow {
 
     MediaPlayer {
         id: player
-        source: win.gathering ? backend.previewUrl : backend.source
+        source: win.gathering ? backend.previewUrl : (win.planSource !== "" ? win.planSource : backend.source)
         videoOutput: videoOut
         audioOutput: win.audioOutput
 
         // Render the opening frame on load instead of showing black. Playback
         // starts muted and stops as soon as VideoOutput receives a frame.
+        // A line seek waits until this file is loaded, starts playback, then
+        // seeks. Seeking a paused FFmpeg player clears the picture and stalls.
         property bool primed: false
         property bool priming: false
+        property bool lineSeeked: false
+        property bool lineArmed: false
+        property int lineToken: 0
+
+        function mediaReady() {
+            return mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia;
+        }
+
+        function armLine() {
+            ++lineToken;
+            lineArmed = false;
+            lineSeeked = false;
+            priming = false;
+            primeFallback.stop();
+            playLoadedLine();
+        }
+
+        function playLoadedLine() {
+            if (win.linePlayStart < 0 || lineSeeked)
+                return;
+            priming = false;
+            primeFallback.stop();
+            if (!mediaReady())
+                return;
+            primed = true;
+            var token = lineToken;
+            if (playbackState !== MediaPlayer.PlayingState)
+                play();
+            if (playbackState === MediaPlayer.PlayingState)
+                seekPlayingLine(token);
+        }
+
+        function seekPlayingLine(token) {
+            if (lineSeeked || token !== lineToken || win.linePlayStart < 0 || !mediaReady())
+                return;
+            lineSeeked = true;
+            Qt.callLater(function() {
+                if (token !== lineToken || win.linePlayStart < 0 || !mediaReady())
+                    return;
+                position = win.linePlayStart;
+            });
+        }
 
         function startPriming() {
             if (win.linePlayStart >= 0) {
-                primed = true;
-                priming = false;
-                position = win.linePlayStart;
-                play();
+                playLoadedLine();
                 return;
             }
             if (primed || priming || source.toString() === "")
@@ -480,7 +630,8 @@ ApplicationWindow {
                 return;
             primeFallback.stop();
             pause();
-            position = 0;
+            if (win.linePlayStart < 0)
+                position = 0;
             priming = false;
         }
 
@@ -488,22 +639,83 @@ ApplicationWindow {
             primeFallback.stop();
             priming = false;
             primed = false;
+            lineSeeked = false;
+            lineArmed = false;
+            ++lineToken;
         }
         onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia)
+            if (mediaReady())
                 startPriming();
         }
+        onPlaybackStateChanged: {
+            if (playbackState === MediaPlayer.PlayingState)
+                seekPlayingLine(lineToken);
+        }
         onPositionChanged: {
-            if (win.gathering && win.linePlayEnd >= 0
-                    && playbackState === MediaPlayer.PlayingState && position >= win.linePlayEnd) {
-                pause();
-                win.linePlayStart = -1;
-                win.linePlayEnd = -1;
+            if (win.gathering && win.linePreview && win.linePlayStart >= 0
+                    && win.linePlayEnd >= win.linePlayStart) {
+                if (!lineArmed && position + 250 >= win.linePlayStart && position < win.linePlayEnd)
+                    lineArmed = true;
+                if (lineArmed && Format.linePlayReachedEnd(position, win.linePlayStart, win.linePlayEnd,
+                        playbackState === MediaPlayer.PlayingState)) {
+                    lineArmed = false;
+                    win.linePreview = false;
+                    pause();
+                    win.linePlayStart = -1;
+                    win.linePlayEnd = -1;
+                    return;
+                }
+            }
+            // The player is on one source file. Its position is not the filmstrip clock.
+            if (backend.planCut && !win.gathering) {
+                if (priming && position > 0) {
+                    finishPriming();
+                    return;
+                }
+                if (win.linePlayStart >= 0 && win.linePlayEnd >= win.linePlayStart) {
+                    if (!win.planArmed && position + 250 >= win.linePlayStart && position < win.linePlayEnd)
+                        win.planArmed = true;
+                    if (win.planPlaying && win.planArmed && Format.linePlayReachedEnd(position, win.linePlayStart,
+                            win.linePlayEnd, playbackState === MediaPlayer.PlayingState)) {
+                        // The shared display time is also the block that just finished.
+                        var nextIndex = win.planIndex + 1;
+                        win.planArmed = false;
+                        if (nextIndex < 0 || nextIndex >= backend.plan.clips.length) {
+                            pause();
+                            win.planPlaying = false;
+                            editBar.playheadSec = backend.plan.edgeFrom(backend.plan.duration, 1);
+                        } else {
+                            var sourceStart = backend.plan.edgeTime(nextIndex, true);
+                            editBar.playheadSec = backend.plan.displayForSource(nextIndex, sourceStart);
+                            win.armPlanIndex(nextIndex, sourceStart, true);
+                        }
+                        return;
+                    }
+                    if (!win.planPlaying && lineSeeked && playbackState === MediaPlayer.PlayingState
+                            && Math.abs(position - win.linePlayStart) < 400) {
+                        win.planArmed = true;
+                        pause();
+                    }
+                    if (!editBar.interacting && win.planIndex >= 0) {
+                        var shown = Math.max(win.linePlayStart, Math.min(position, win.linePlayEnd)) / 1000;
+                        var display = backend.plan.displayForSource(win.planIndex, shown);
+                        // A paused out-point maps to the next block's start. Keep this block.
+                        if (!win.planPlaying) {
+                            var blockEnd = backend.plan.displayForSource(
+                                    win.planIndex, backend.plan.edgeTime(win.planIndex, false));
+                            if (display >= blockEnd - 0.0005)
+                                display = backend.plan.playheadForEdge(win.planIndex, false);
+                        }
+                        editBar.playheadSec = display;
+                    }
+                }
                 return;
             }
             if (!win.gathering) {
                 win.linePlayStart = -1;
                 win.linePlayEnd = -1;
+                win.linePreview = false;
+                lineArmed = false;
             }
             if (priming && position > 0) {
                 finishPriming();
@@ -744,6 +956,61 @@ ApplicationWindow {
         }
     }
 
+    component RecentRow: Rectangle {
+        id: recentRow
+        implicitWidth: 176
+        implicitHeight: 28
+        radius: 6
+
+        property string text: ""
+        property string side: ""
+        signal clicked()
+        signal sideClicked()
+
+        color: recentHover.hovered && enabled ? "#2a2a2e" : "transparent"
+        opacity: enabled ? 1 : 0.45
+
+        HoverHandler {
+            id: recentHover
+            enabled: recentRow.enabled
+        }
+        Label {
+            anchors.left: parent.left
+            anchors.leftMargin: 16
+            anchors.right: recentSide.visible ? recentSide.left : parent.right
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            text: recentRow.text
+            color: "#b8b8bc"
+            font.pixelSize: 12
+            elide: Text.ElideRight
+        }
+        MouseArea {
+            anchors.fill: parent
+            enabled: recentRow.enabled
+            cursorShape: recentRow.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: recentRow.clicked()
+        }
+        Label {
+            id: recentSide
+            visible: recentRow.side !== ""
+            anchors.right: parent.right
+            anchors.rightMargin: 8
+            anchors.verticalCenter: parent.verticalCenter
+            text: recentRow.side
+            color: "#7a7a80"
+            font.pixelSize: 11
+        }
+        MouseArea {
+            anchors.fill: recentSide
+            anchors.margins: -6
+            visible: recentSide.visible
+            enabled: recentRow.enabled && recentSide.visible
+            cursorShape: Qt.PointingHandCursor
+            onClicked: recentRow.sideClicked()
+        }
+    }
+
     component QuietButton: Item {
         id: quiet
         implicitWidth: quietLabel.implicitWidth
@@ -907,7 +1174,86 @@ ApplicationWindow {
                 color: "#7a7a80"
                 font.pixelSize: 11
             }
-            Item { Layout.fillHeight: true }
+            Flickable {
+                id: recentScroll
+                visible: !win.sidebarCollapsed
+                         && (backend.recentLists.length > 0 || backend.recentCuts.length > 0)
+                implicitHeight: 0
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 0
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                contentWidth: width
+                contentHeight: recentCol.implicitHeight
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+
+                Column {
+                    id: recentCol
+                    width: recentScroll.width
+                    Label {
+                        visible: backend.recentLists.length > 0
+                        width: parent.width
+                        leftPadding: 16
+                        topPadding: 8
+                        bottomPadding: 2
+                        text: "Lists"
+                        color: "#7a7a80"
+                        font.pixelSize: 11
+                    }
+                    Repeater {
+                        model: backend.recentLists
+                        RecentRow {
+                            required property var modelData
+                            width: recentCol.width
+                            enabled: !backend.busy
+                            text: modelData.name
+                            onClicked: {
+                                win.settingsOpen = false
+                                win.settingsFromMovie = false
+                                win.helpVisible = false
+                                backend.reopenList(modelData.path)
+                            }
+                        }
+                    }
+                    Label {
+                        visible: backend.recentCuts.length > 0
+                        width: parent.width
+                        leftPadding: 16
+                        topPadding: 10
+                        bottomPadding: 2
+                        text: "Cuts"
+                        color: "#7a7a80"
+                        font.pixelSize: 11
+                    }
+                    Repeater {
+                        model: backend.recentCuts
+                        RecentRow {
+                            required property var modelData
+                            width: recentCol.width
+                            enabled: !backend.busy
+                            text: modelData.name
+                            side: modelData.list ? "List" : ""
+                            onClicked: {
+                                win.settingsOpen = false
+                                win.settingsFromMovie = false
+                                win.helpVisible = false
+                                backend.watchRecent(modelData.path)
+                            }
+                            onSideClicked: {
+                                win.settingsOpen = false
+                                win.settingsFromMovie = false
+                                win.helpVisible = false
+                                backend.reopenList(modelData.list)
+                            }
+                        }
+                    }
+                }
+            }
+            Item {
+                Layout.fillHeight: true
+                visible: !recentScroll.visible
+            }
             Rectangle {
                 Layout.fillWidth: true
                 Layout.preferredHeight: 1
@@ -1043,14 +1389,28 @@ ApplicationWindow {
                 }
             }
 
+            RowLayout {
+                visible: !win.gathering || backend.tray.length > 0
+                Layout.fillWidth: true
+                Layout.fillHeight: !win.gathering || backend.tray.length > 0
+                spacing: 12
+
+                ColumnLayout {
+                    Layout.fillWidth: !win.linesOpen
+                    Layout.preferredWidth: win.linesOpen ? 440 : 0
+                    Layout.maximumWidth: win.linesOpen ? 440 : 32768
+                    Layout.fillHeight: true
+                    spacing: 12
+
             Item {
                 id: screen
                 visible: !win.gathering || backend.tray.length > 0
                 Layout.fillWidth: true
-                Layout.fillHeight: !win.gathering
-                Layout.preferredHeight: win.gathering ? (backend.selects.length > 0 ? 120 : 200) : 0
-                Layout.maximumHeight: win.gathering ? (backend.selects.length > 0 ? 120 : 200) : 10000
-                Layout.minimumHeight: win.gathering && backend.tray.length > 0 ? 96 : 0
+                // Once lines are open the preview can shrink. It stays fixed before that.
+                Layout.fillHeight: !win.gathering || win.linesOpen
+                Layout.preferredHeight: win.gathering ? (win.linesOpen ? 240 : 200) : 0
+                Layout.maximumHeight: win.gathering ? (win.linesOpen ? 240 : 200) : 10000
+                Layout.minimumHeight: win.gathering && backend.tray.length > 0 ? (win.linesOpen ? 180 : 96) : 0
 
                 Rectangle {
                     anchors.centerIn: parent
@@ -1165,10 +1525,9 @@ ApplicationWindow {
                 id: trayList
                 visible: win.gathering && backend.tray.length > 0
                 Layout.fillWidth: true
-                Layout.fillHeight: backend.selects.length === 0
-                Layout.minimumHeight: 0
-                Layout.preferredHeight: backend.selects.length > 0 ? 116 : 200
-                Layout.maximumHeight: backend.selects.length > 0 ? 116 : 10000
+                Layout.fillHeight: true
+                Layout.minimumHeight: win.linesOpen ? 52 : 0
+                Layout.preferredHeight: win.linesOpen ? 52 : 200
                 clip: true
                 spacing: 6
                 boundsBehavior: Flickable.StopAtBounds
@@ -1287,11 +1646,208 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                visible: win.gathering && backend.selects.length > 0
+                id: planColumn
+                property bool openLine: false
+                property bool closeLine: false
+                visible: win.gathering && backend.cutMode === "speech" && backend.tray.length > 0
+                Layout.fillWidth: true
+                spacing: 8
+
+                Label {
+                    text: "This movie"
+                    color: "#f4f4f5"
+                    font.pixelSize: 13
+                    font.weight: Font.DemiBold
+                }
+                TextArea {
+                    id: planIntent
+                    enabled: !backend.busy
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    // One line at the floor, two at ease. This gives up height before the line rows do.
+                    Layout.minimumHeight: 32
+                    Layout.preferredHeight: 52
+                    Layout.maximumHeight: 52
+                    Layout.verticalStretchFactor: 4
+                    wrapMode: TextEdit.Wrap
+                    selectByMouse: true
+                    clip: true
+                    font.pixelSize: 13
+                    color: "#f4f4f5"
+                    Component.onCompleted: text = backend.intent
+                    onTextChanged: {
+                        if (backend.busy) {
+                            if (text !== backend.intent)
+                                text = backend.intent
+                            return
+                        }
+                        if (text !== backend.intent)
+                            backend.intent = text
+                    }
+                    onVisibleChanged: {
+                        if (!visible)
+                            focus = false
+                    }
+                    background: Rectangle {
+                        color: "#1c1c1e"
+                        radius: 8
+                        border.width: planIntent.activeFocus ? 1 : 0
+                        border.color: win.accent
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 14
+                    Repeater {
+                        model: ["Open", "Measured", "Tight", "Frenzied"]
+                        Label {
+                            required property string modelData
+                            text: modelData
+                            color: backend.pace === modelData.toLowerCase() ? win.accent : "#b8b8bc"
+                            font.pixelSize: 13
+                            opacity: enabled ? 1 : 0.45
+                            enabled: !backend.busy
+                            Layout.minimumWidth: implicitWidth
+                            Layout.maximumWidth: implicitWidth
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: parent.enabled
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: backend.pace = modelData.toLowerCase()
+                            }
+                        }
+                    }
+                    Item { Layout.fillWidth: true; Layout.minimumWidth: 8 }
+                    QuietButton {
+                        text: "Open card"
+                        enabled: !backend.busy
+                        Layout.minimumWidth: implicitWidth
+                        onClicked: {
+                            if (planColumn.openLine) {
+                                planColumn.openLine = false
+                                openCardInput.focus = false
+                                return
+                            }
+                            // Two editor rows push Dip to black under the Open list.
+                            planColumn.closeLine = false
+                            closeCardInput.focus = false
+                            openCardInput.text = backend.intent
+                            planColumn.openLine = true
+                            openCardInput.forceActiveFocus()
+                        }
+                    }
+                    QuietButton {
+                        text: "Close card"
+                        enabled: !backend.busy
+                        Layout.minimumWidth: implicitWidth
+                        onClicked: {
+                            if (planColumn.closeLine) {
+                                planColumn.closeLine = false
+                                closeCardInput.focus = false
+                                return
+                            }
+                            planColumn.openLine = false
+                            openCardInput.focus = false
+                            closeCardInput.text = backend.intent
+                            planColumn.closeLine = true
+                            closeCardInput.forceActiveFocus()
+                        }
+                    }
+                }
+                RowLayout {
+                    visible: planColumn.openLine
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 36
+                        Layout.maximumHeight: 36
+                        radius: 8
+                        color: "#1c1c1e"
+                        opacity: openCardInput.enabled ? 1 : 0.45
+                        border.width: openCardInput.activeFocus ? 1 : 0
+                        border.color: win.accent
+                        TextInput {
+                            id: openCardInput
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            verticalAlignment: Text.AlignVCenter
+                            color: "#f4f4f5"
+                            font.pixelSize: 13
+                            clip: true
+                            selectByMouse: true
+                            enabled: !backend.busy
+                            onAccepted: makeOpenCard()
+                        }
+                    }
+                    QuietButton {
+                        text: "Make card"
+                        enabled: !backend.busy && openCardInput.text.trim() !== ""
+                        Layout.minimumWidth: implicitWidth
+                        onClicked: makeOpenCard()
+                    }
+                }
+                RowLayout {
+                    visible: planColumn.closeLine
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 36
+                        Layout.maximumHeight: 36
+                        radius: 8
+                        color: "#1c1c1e"
+                        opacity: closeCardInput.enabled ? 1 : 0.45
+                        border.width: closeCardInput.activeFocus ? 1 : 0
+                        border.color: win.accent
+                        TextInput {
+                            id: closeCardInput
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            verticalAlignment: Text.AlignVCenter
+                            color: "#f4f4f5"
+                            font.pixelSize: 13
+                            clip: true
+                            selectByMouse: true
+                            enabled: !backend.busy
+                            onAccepted: makeCloseCard()
+                        }
+                    }
+                    QuietButton {
+                        text: "Make card"
+                        enabled: !backend.busy && closeCardInput.text.trim() !== ""
+                        Layout.minimumWidth: implicitWidth
+                        onClicked: makeCloseCard()
+                    }
+                }
+                CheckBox {
+                    Layout.fillWidth: true
+                    text: "Dip to black between files"
+                    font.pixelSize: 13
+                    padding: 0
+                    focusPolicy: Qt.NoFocus
+                    enabled: !backend.busy
+                    checked: backend.sceneTransition === "dip"
+                    onClicked: backend.sceneTransition = checked ? "dip" : "off"
+                }
+            }
+
+                }
+
+            ColumnLayout {
+                id: linesColumn
+                visible: win.linesOpen
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumWidth: 220
                 Layout.minimumHeight: 36
                 spacing: 6
+                onVisibleChanged: {
+                    if (!visible)
+                        reviseInput.focus = false
+                }
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -1314,6 +1870,72 @@ ApplicationWindow {
                         color: "#7a7a80"
                         font.pixelSize: 12
                         font.family: "monospace"
+                    }
+                }
+                ColumnLayout {
+                    visible: backend.reviseNotes.length > 0
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Repeater {
+                        model: backend.reviseNotes
+                        delegate: Label {
+                            required property string modelData
+                            Layout.fillWidth: true
+                            text: modelData
+                            color: "#7a7a80"
+                            font.pixelSize: 12
+                            elide: Text.ElideRight
+                        }
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 36
+                        Layout.maximumHeight: 36
+                        radius: 8
+                        color: "#1c1c1e"
+                        opacity: reviseInput.enabled ? 1 : 0.45
+                        border.width: reviseInput.activeFocus ? 1 : 0
+                        border.color: win.accent
+                        Label {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            visible: reviseInput.text === ""
+                            verticalAlignment: Text.AlignVCenter
+                            text: "Change this cut"
+                            color: "#7a7a80"
+                            font.pixelSize: 13
+                            elide: Text.ElideRight
+                        }
+                        TextInput {
+                            id: reviseInput
+                            z: 1
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            verticalAlignment: Text.AlignVCenter
+                            color: "#f4f4f5"
+                            font.pixelSize: 13
+                            clip: true
+                            selectByMouse: true
+                            enabled: !backend.busy
+                            onAccepted: submitRevise()
+                        }
+                    }
+                    QuietButton {
+                        text: "Send"
+                        enabled: !backend.busy && reviseInput.text.trim() !== ""
+                        onClicked: submitRevise()
+                    }
+                    QuietButton {
+                        text: "Revert"
+                        visible: backend.canRevert
+                        enabled: !backend.busy
+                        onClicked: backend.revertRevise()
                     }
                 }
                 Flickable {
@@ -1411,6 +2033,8 @@ ApplicationWindow {
                 }
             }
 
+            }
+
             RowLayout {
                 visible: win.hasVideo && !win.gathering
                 Layout.fillWidth: true
@@ -1430,8 +2054,13 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     accent: win.accent
                     accentForeground: win.accentForeground
-                    onScrub: (seconds) => {
+                    onScrub: (seconds, segment, source) => {
                         player.pause();
+                        if (backend.planCut && segment >= 0) {
+                            planPlaying = false;
+                            armPlanIndex(segment, source, false);
+                            return;
+                        }
                         seekTo(seconds);
                     }
                 }
@@ -1445,14 +2074,14 @@ ApplicationWindow {
                     objectName: "captionsButton"
                     visible: backend.roughCut
                     text: "Captions"
-                    enabled: !backend.busy
+                    enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
                     onClicked: backend.writeCaptions()
                 }
                 QuietButton {
                     objectName: "shortButton"
                     visible: backend.roughCut
                     text: "Short"
-                    enabled: !backend.busy
+                    enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
                     onClicked: backend.makeShort()
                 }
                 PillButton {
@@ -1667,6 +2296,8 @@ ApplicationWindow {
                     function onIntentChanged() {
                         if (intentField.text !== backend.intent)
                             intentField.text = backend.intent
+                        if (planIntent.text !== backend.intent)
+                            planIntent.text = backend.intent
                     }
                 }
                 Label {
@@ -1954,6 +2585,23 @@ ApplicationWindow {
             player.primed = false;
             editBar.zoomed = false;
             editBar.playheadSec = 0;
+            if (backend.planCut)
+                win.armPlan(0, false);
+            else {
+                win.planPlaying = false;
+                win.planArmed = false;
+                win.planIndex = -1;
+                win.planSource = "";
+                win.linePlayStart = -1;
+                win.linePlayEnd = -1;
+                win.linePreview = false;
+            }
+        }
+        function onGatheringChanged() {
+            if (backend.gathering || !backend.planCut || !win.hasVideo)
+                return;
+            // Back on Watch. The filmstrip time is the picture, not the head of the file.
+            win.armPlan(editBar.playheadSec, false);
         }
         function onExportDone(path) {
             win.showNotice("Saved " + path);
@@ -1963,6 +2611,19 @@ ApplicationWindow {
         }
         function onLoadError(message) {
             win.showNotice("Cannot open video: " + message);
+        }
+    }
+
+    Connections {
+        target: backend.planCut ? backend.plan : null
+        function onCommitted() {
+            if (!backend.planCut || editBar.interacting || win.gathering)
+                return;
+            var t = editBar.playheadSec;
+            if (backend.plan.duration > 0)
+                t = Math.max(0, Math.min(t, backend.plan.duration));
+            editBar.playheadSec = t;
+            win.armPlan(t, false);
         }
     }
 }

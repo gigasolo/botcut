@@ -15,6 +15,7 @@
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTextStream>
+#include <QUuid>
 
 #include <algorithm>
 #include <cstdio>
@@ -141,6 +142,10 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     if (!m_filePicker->parent())
         m_filePicker->setParent(this);
     wireFilePicker();
+    connect(&m_plan, &PlanFilm::committed, this, [this] {
+        if (!writePlanSegments())
+            setStatus(QStringLiteral("Could not save the cut"));
+    });
     m_thumbRevealTimer.setInterval(kThumbRevealMs);
     connect(&m_thumbRevealTimer, &QTimer::timeout, this, &Backend::revealNextThumb);
 
@@ -158,6 +163,9 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
         m_apiKey = m_keys->load();
     const QString stored = QSettings().value(QStringLiteral("sceneTransition"), QStringLiteral("dip")).toString();
     m_sceneTransition = stored == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
+    const QString pace = QSettings().value(QStringLiteral("pace"), QStringLiteral("open")).toString();
+    if (pace == QLatin1String("measured") || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
+        m_pace = pace;
 }
 
 Backend::~Backend() {
@@ -307,6 +315,8 @@ bool Backend::load(const QUrl &url) {
 
     const bool leaveGathering = m_gathering;
     m_gathering = false;
+    adoptPlanCuts();
+    loadPlanFilm();
     emit infoChanged();
     if (leaveGathering)
         emit gatheringChanged();
@@ -461,6 +471,10 @@ void Backend::setApiKey(const QString &key) {
 void Backend::setIntent(const QString &intent) {
     if (m_busy)
         return;
+    applyIntent(intent);
+}
+
+void Backend::applyIntent(const QString &intent) {
     if (intent == m_intent)
         return;
     m_intent = intent;
@@ -475,12 +489,55 @@ QString Backend::intentForCut() const {
 void Backend::setSceneTransition(const QString &value) {
     if (m_busy)
         return;
+    applySceneTransition(value);
+}
+
+void Backend::applySceneTransition(const QString &value) {
     const QString next = value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
     if (next == m_sceneTransition)
         return;
     m_sceneTransition = next;
     QSettings().setValue(QStringLiteral("sceneTransition"), next);
     emit sceneTransitionChanged();
+}
+
+void Backend::setPace(const QString &pace) {
+    if (m_busy)
+        return;
+    applyPace(pace);
+}
+
+void Backend::applyPace(const QString &pace) {
+    QString next = QStringLiteral("open");
+    if (pace == QLatin1String("measured") || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
+        next = pace;
+    if (next == m_pace)
+        return;
+    m_pace = next;
+    QSettings().setValue(QStringLiteral("pace"), next);
+    emit paceChanged();
+}
+
+void Backend::clearReviseThread() {
+    m_reviseNote.clear();
+    if (m_canRevert) {
+        m_canRevert = false;
+        emit canRevertChanged();
+    }
+    if (!m_reviseNotes.isEmpty()) {
+        m_reviseNotes.clear();
+        emit reviseNotesChanged();
+    }
+}
+
+double Backend::maxPause() const {
+    if (m_pace == QLatin1String("frenzied"))
+        return 0.1;
+    if (m_pace == QLatin1String("tight"))
+        return 0.28;
+    if (m_pace == QLatin1String("measured"))
+        return 0.4;
+    return 0.8;
 }
 
 void Backend::setCutMode(const QString &mode) {
@@ -602,13 +659,13 @@ QUrl Backend::suggestedCutListUrl() const {
     return QUrl::fromLocalFile(QDir(dir).filePath(QStringLiteral("cut.botcut.json")));
 }
 
-void Backend::loadCutListFile(const QUrl &url) {
+bool Backend::loadCutListFile(const QUrl &url) {
     if (m_busy)
-        return;
+        return false;
     QFile file(url.toLocalFile());
     if (!file.open(QIODevice::ReadOnly)) {
         setStatus(QStringLiteral("Could not open the list"));
-        return;
+        return false;
     }
     QString mode;
     QString error;
@@ -618,18 +675,22 @@ void Backend::loadCutListFile(const QUrl &url) {
     if (!parseCutList(file.readAll(), QFileInfo(file).absolutePath(), &mode, &files, &error, &intent,
                       &lines)) {
         setStatus(error);
-        return;
+        return false;
     }
     m_tray = files;
     m_trayIndex = 0;
     m_selects = lines;
     m_cutOut.clear();
+    clearReviseThread();
+    m_listPath = QFileInfo(file).absoluteFilePath();
     emit selectsChanged();
     emit trayChanged();
     setCutMode(mode);
     setIntent(intent);
     setStatus(QString());
+    rememberList(m_listPath);
     scheduleTrayThumbs();
+    return true;
 }
 
 void Backend::writeCutListFile(const QUrl &url) {
@@ -654,7 +715,224 @@ void Backend::writeCutListFile(const QUrl &url) {
         setStatus(QStringLiteral("Could not save the list"));
         return;
     }
+    m_listPath = QFileInfo(path).absoluteFilePath();
+    rememberList(m_listPath);
+    pointCutList(m_path, m_listPath);
     setStatus(QStringLiteral("Saved the list"));
+}
+
+namespace {
+constexpr int kRecentCap = 6;
+
+QString recentTitle(const QString &path) {
+    const QFileInfo info(path);
+    const QString name = info.fileName();
+    const QString suffix = QStringLiteral(".botcut.json");
+    if (name.endsWith(suffix, Qt::CaseInsensitive))
+        return name.chopped(suffix.size());
+    const QString base = info.completeBaseName();
+    return base.isEmpty() ? name : base;
+}
+
+QJsonArray readCutArray() {
+    const QString raw = QSettings().value(QStringLiteral("recentCuts")).toString();
+    const QJsonDocument doc = QJsonDocument::fromJson(raw.toUtf8());
+    return doc.isArray() ? doc.array() : QJsonArray();
+}
+
+void writeCutArray(const QJsonArray &cuts) {
+    QSettings().setValue(QStringLiteral("recentCuts"),
+                         QString::fromUtf8(QJsonDocument(cuts).toJson(QJsonDocument::Compact)));
+}
+}
+
+QVariantList Backend::recentLists() const {
+    QVariantList rows;
+    const QStringList paths = QSettings().value(QStringLiteral("recentLists")).toStringList();
+    for (const QString &path : paths) {
+        QVariantMap row;
+        row.insert(QStringLiteral("path"), path);
+        row.insert(QStringLiteral("name"), recentTitle(path));
+        rows.append(row);
+    }
+    return rows;
+}
+
+QVariantList Backend::recentCuts() const {
+    QVariantList rows;
+    const QJsonArray cuts = readCutArray();
+    for (const QJsonValue &value : cuts) {
+        const QJsonObject object = value.toObject();
+        const QString path = object.value(QStringLiteral("path")).toString();
+        if (path.isEmpty())
+            continue;
+        QVariantMap row;
+        row.insert(QStringLiteral("path"), path);
+        row.insert(QStringLiteral("name"), recentTitle(path));
+        row.insert(QStringLiteral("list"), object.value(QStringLiteral("list")).toString());
+        rows.append(row);
+    }
+    return rows;
+}
+
+void Backend::rememberList(const QString &path) {
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    if (abs.isEmpty())
+        return;
+    QStringList lists = QSettings().value(QStringLiteral("recentLists")).toStringList();
+    lists.removeAll(abs);
+    lists.prepend(abs);
+    while (lists.size() > kRecentCap)
+        lists.removeLast();
+    QSettings().setValue(QStringLiteral("recentLists"), lists);
+    emit recentsChanged();
+}
+
+void Backend::forgetList(const QString &path) {
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    QStringList lists = QSettings().value(QStringLiteral("recentLists")).toStringList();
+    if (!lists.removeAll(abs))
+        return;
+    QSettings().setValue(QStringLiteral("recentLists"), lists);
+    emit recentsChanged();
+}
+
+void Backend::rememberCut(const QString &movie, const QString &listPath) {
+    const QString abs = QFileInfo(movie).absoluteFilePath();
+    if (abs.isEmpty())
+        return;
+    QString cutsPath;
+    if (m_planMovie == abs && !m_planCuts.isEmpty())
+        cutsPath = m_planCuts;
+    const QJsonArray cuts = readCutArray();
+    if (cutsPath.isEmpty()) {
+        for (const QJsonValue &value : cuts) {
+            const QJsonObject object = value.toObject();
+            if (object.value(QStringLiteral("path")).toString() == abs) {
+                cutsPath = object.value(QStringLiteral("cuts")).toString();
+                break;
+            }
+        }
+    }
+    QJsonArray next;
+    QJsonObject row;
+    row.insert(QStringLiteral("path"), abs);
+    if (!listPath.isEmpty())
+        row.insert(QStringLiteral("list"), QFileInfo(listPath).absoluteFilePath());
+    if (!cutsPath.isEmpty())
+        row.insert(QStringLiteral("cuts"), cutsPath);
+    next.append(row);
+    for (const QJsonValue &value : cuts) {
+        if (value.toObject().value(QStringLiteral("path")).toString() == abs)
+            continue;
+        next.append(value);
+        if (next.size() >= kRecentCap)
+            break;
+    }
+    writeCutArray(next);
+    emit recentsChanged();
+}
+
+void Backend::forgetCut(const QString &movie) {
+    const QString abs = QFileInfo(movie).absoluteFilePath();
+    const QJsonArray cuts = readCutArray();
+    QJsonArray next;
+    bool removed = false;
+    for (const QJsonValue &value : cuts) {
+        if (value.toObject().value(QStringLiteral("path")).toString() == abs) {
+            removed = true;
+            continue;
+        }
+        next.append(value);
+    }
+    if (!removed)
+        return;
+    writeCutArray(next);
+    emit recentsChanged();
+}
+
+QString Backend::listForCurrentTray() {
+    if (!m_listPath.isEmpty() && QFileInfo(m_listPath).isFile())
+        return m_listPath;
+    if (m_tray.isEmpty())
+        return {};
+    const QString base = QFileInfo(m_tray.first()).completeBaseName();
+    const QString dir = QFileInfo(QSettings().fileName()).absolutePath() + QStringLiteral("/lists");
+    if (!QDir().mkpath(dir))
+        return {};
+    const QString stem = base.isEmpty() ? QStringLiteral("cut") : base;
+    QString path = QDir(dir).filePath(stem + QStringLiteral(".botcut.json"));
+    if (QFileInfo::exists(path)) {
+        path = QDir(dir).filePath(stem + QLatin1Char('-')
+                                  + QString::number(QDateTime::currentMSecsSinceEpoch())
+                                  + QStringLiteral(".botcut.json"));
+    }
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects);
+    if (bytes.isEmpty())
+        return {};
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(bytes) != bytes.size())
+        return {};
+    m_listPath = QFileInfo(path).absoluteFilePath();
+    rememberList(m_listPath);
+    return m_listPath;
+}
+
+void Backend::rememberFinishedCut(const QString &movie) {
+    rememberCut(movie, listForCurrentTray());
+}
+
+void Backend::rememberSavedCut(const QString &previous, const QString &saved) {
+    if (QFileInfo(previous).absoluteFilePath() != QFileInfo(saved).absoluteFilePath())
+        forgetCut(previous);
+    rememberFinishedCut(saved);
+}
+
+void Backend::pointCutList(const QString &movie, const QString &listPath) {
+    if (movie.isEmpty() || listPath.isEmpty())
+        return;
+    const QString abs = QFileInfo(movie).absoluteFilePath();
+    const QString list = QFileInfo(listPath).absoluteFilePath();
+    QJsonArray cuts = readCutArray();
+    bool changed = false;
+    for (int i = 0; i < cuts.size(); ++i) {
+        QJsonObject row = cuts.at(i).toObject();
+        if (row.value(QStringLiteral("path")).toString() != abs)
+            continue;
+        row.insert(QStringLiteral("list"), list);
+        cuts[i] = row;
+        changed = true;
+    }
+    if (!changed)
+        return;
+    writeCutArray(cuts);
+    emit recentsChanged();
+}
+
+void Backend::reopenList(const QString &path) {
+    if (m_busy)
+        return;
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    if (!QFileInfo(abs).isFile()) {
+        forgetList(abs);
+        setStatus(QStringLiteral("That list can't be found"));
+        return;
+    }
+    if (!loadCutListFile(QUrl::fromLocalFile(abs)))
+        return;
+    showShots();
+}
+
+void Backend::watchRecent(const QString &path) {
+    if (m_busy)
+        return;
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    if (!QFileInfo(abs).isFile()) {
+        forgetCut(abs);
+        setStatus(QStringLiteral("That movie can't be found"));
+        return;
+    }
+    load(QUrl::fromLocalFile(abs));
 }
 
 void Backend::startCut() {
@@ -668,23 +946,28 @@ void Backend::startCut() {
         setStatus(QStringLiteral("Set an xAI key for spoken cuts."));
         return;
     }
-    const QString cli = findTool(QStringLiteral("botcut-cli"));
-    const QString uv = findTool(QStringLiteral("uv"));
+    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
+    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
     const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
     const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    m_cutOut = QDir::temp().filePath(
+    const QString out = QDir::temp().filePath(
         QStringLiteral("botcut-cut-%1").arg(QDateTime::currentMSecsSinceEpoch()));
-    QDir().mkpath(m_cutOut);
-    m_selects.clear();
-    emit selectsChanged();
     const bool decide = m_cutMode == QLatin1String("speech");
-    const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, m_cutOut, cli,
-                                          projectOk ? uv : QString(), projectOk ? project : QString(),
-                                          intentForCut(), decide, m_sceneTransition);
+    const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, cli, projectOk ? uv : QString(),
+                                          projectOk ? project : QString(), intentForCut(), decide,
+                                          m_sceneTransition, maxPause());
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
     }
+    if (!QDir().mkpath(out)) {
+        setStatus(QStringLiteral("No output directory"));
+        return;
+    }
+    // start() returns while the process is still Starting. Keep the snapshot until started().
+    m_cutOutRestore = m_cutOut;
+    m_restoreCutOut = true;
+    m_cutOut = out;
     setBusy(true);
     setStatus(QStringLiteral("Cutting…"));
     m_cutStage = decide ? CutStage::Decide : CutStage::Run;
@@ -755,17 +1038,10 @@ void Backend::loadSelects(const QString &cutsPath) {
     emit selectsChanged();
 }
 
-bool Backend::writeSelects(const QString &cutsPath) const {
-    QFile file(cutsPath);
-    if (!file.open(QIODevice::ReadOnly))
-        return false;
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    file.close();
-    if (!doc.isObject())
-        return false;
-    QJsonObject root = doc.object();
+namespace {
+QJsonArray linesForSelects(const QVariantList &selects) {
     QJsonArray lines;
-    for (const QVariant &item : m_selects) {
+    for (const QVariant &item : selects) {
         const QVariantMap row = item.toMap();
         QJsonObject line;
         line.insert(QStringLiteral("id"), row.value(QStringLiteral("id")).toInt());
@@ -780,7 +1056,159 @@ bool Backend::writeSelects(const QString &cutsPath) const {
             line.insert(QStringLiteral("still"), still);
         lines.append(line);
     }
-    root.insert(QStringLiteral("lines"), lines);
+    return lines;
+}
+
+void shiftClipIndexes(QVariantList *rows) {
+    for (int i = 0; i < rows->size(); ++i) {
+        QVariantMap row = rows->at(i).toMap();
+        if (!row.contains(QStringLiteral("clip")))
+            continue;
+        row.insert(QStringLiteral("clip"), row.value(QStringLiteral("clip")).toInt() + 1);
+        (*rows)[i] = row;
+    }
+}
+
+void shiftJsonClips(QJsonArray *array) {
+    for (int i = 0; i < array->size(); ++i) {
+        if (!array->at(i).isObject())
+            continue;
+        QJsonObject object = array->at(i).toObject();
+        if (!object.contains(QStringLiteral("clip")))
+            continue;
+        object.insert(QStringLiteral("clip"), object.value(QStringLiteral("clip")).toInt() + 1);
+        (*array)[i] = object;
+    }
+}
+
+struct WorkShift {
+    QString from;
+    QString to;
+};
+
+void undoWorkShifts(const QList<WorkShift> &done) {
+    for (int i = done.size() - 1; i >= 0; --i)
+        QFile::rename(done.at(i).to, done.at(i).from);
+}
+
+// Captions and the next Render look up work/{index}-{stem}. Stills are named
+// by line id, so that directory stays put. Highest index first, or 0-foo
+// would land on the still-present 1-foo.
+bool shiftWorkCaches(const QString &workDir, QList<WorkShift> *done) {
+    QDir dir(workDir);
+    if (!dir.exists())
+        return true;
+    struct Move {
+        int index = 0;
+        WorkShift shift;
+    };
+    QList<Move> moves;
+    const QStringList names = dir.entryList(QDir::Files | QDir::NoDotAndDotDot);
+    for (const QString &name : names) {
+        if (name.isEmpty() || !name.at(0).isDigit())
+            continue;
+        int index = 0;
+        int pos = 0;
+        while (pos < name.size() && name.at(pos).isDigit()) {
+            index = index * 10 + name.at(pos).digitValue();
+            ++pos;
+        }
+        if (pos == 0 || pos >= name.size() || name.at(pos) != QLatin1Char('-'))
+            continue;
+        Move move;
+        move.index = index;
+        move.shift.from = dir.filePath(name);
+        move.shift.to = dir.filePath(QString::number(index + 1) + name.mid(pos));
+        moves.append(move);
+    }
+    std::sort(moves.begin(), moves.end(), [](const Move &a, const Move &b) { return a.index > b.index; });
+    for (const Move &move : moves) {
+        if (!QFile::rename(move.shift.from, move.shift.to)) {
+            undoWorkShifts(*done);
+            done->clear();
+            return false;
+        }
+        done->append(move.shift);
+    }
+    return true;
+}
+
+// The card is a tray file, not a line, until the next spoken cut. An open card
+// shifts every existing clip index so Play and Render stay on the same shots.
+bool noteCardOnCuts(const QString &cutsPath, const QString &cardPath, bool open) {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject root = doc.object();
+    if (!root.value(QStringLiteral("clips")).isArray())
+        return false;
+    QJsonArray clips = root.value(QStringLiteral("clips")).toArray();
+    QList<WorkShift> shifted;
+    if (open
+        && !shiftWorkCaches(QFileInfo(cutsPath).dir().filePath(QStringLiteral("work")), &shifted))
+        return false;
+    QJsonObject added;
+    added.insert(QStringLiteral("path"), cardPath);
+    if (open) {
+        QJsonArray next;
+        next.append(added);
+        for (const QJsonValue &value : clips)
+            next.append(value);
+        clips = next;
+        for (const char *key : {"lines", "segments", "dropped"}) {
+            const QString name = QString::fromLatin1(key);
+            if (!root.value(name).isArray())
+                continue;
+            QJsonArray rows = root.value(name).toArray();
+            shiftJsonClips(&rows);
+            root.insert(name, rows);
+        }
+    } else {
+        clips.append(added);
+    }
+    for (int i = 0; i < clips.size(); ++i) {
+        if (!clips.at(i).isObject())
+            continue;
+        QJsonObject object = clips.at(i).toObject();
+        object.insert(QStringLiteral("index"), i);
+        clips[i] = object;
+    }
+    root.insert(QStringLiteral("clips"), clips);
+    doc.setObject(root);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        undoWorkShifts(shifted);
+        return false;
+    }
+    const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
+    if (file.write(bytes) != bytes.size()) {
+        undoWorkShifts(shifted);
+        return false;
+    }
+    return true;
+}
+}
+
+bool Backend::writeSelects(const QString &cutsPath) const {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject root = doc.object();
+    QJsonObject tighten = root.value(QStringLiteral("tighten")).toObject();
+    if (!tighten.contains(QStringLiteral("snap")))
+        tighten.insert(QStringLiteral("snap"), true);
+    tighten.insert(QStringLiteral("max_pause"), maxPause());
+    root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+    root.insert(QStringLiteral("tighten"), tighten);
+    // A shots-screen Render still rebuilds segments from the lines.
+    root.remove(QStringLiteral("trimmed"));
     doc.setObject(root);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
@@ -788,7 +1216,7 @@ bool Backend::writeSelects(const QString &cutsPath) const {
     return file.write(bytes) == bytes.size();
 }
 
-bool Backend::writeCutsForRender() {
+bool Backend::writeCutsForRender(bool includeIntent) {
     const QString existing = m_cutOut.isEmpty()
                                  ? QString()
                                  : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
@@ -806,29 +1234,15 @@ bool Backend::writeCutsForRender() {
         clip.insert(QStringLiteral("path"), m_tray.at(i));
         clips.append(clip);
     }
-    QJsonArray lines;
-    for (const QVariant &item : m_selects) {
-        const QVariantMap row = item.toMap();
-        QJsonObject line;
-        line.insert(QStringLiteral("id"), row.value(QStringLiteral("id")).toInt());
-        line.insert(QStringLiteral("clip"), row.value(QStringLiteral("clip")).toInt());
-        line.insert(QStringLiteral("start"), row.value(QStringLiteral("start")).toDouble());
-        line.insert(QStringLiteral("end"), row.value(QStringLiteral("end")).toDouble());
-        line.insert(QStringLiteral("text"), row.value(QStringLiteral("text")).toString());
-        line.insert(QStringLiteral("keep"), row.value(QStringLiteral("keep")).toBool());
-        line.insert(QStringLiteral("reason"), row.value(QStringLiteral("reason")).toString());
-        const QString still = row.value(QStringLiteral("still")).toString();
-        if (!still.isEmpty())
-            line.insert(QStringLiteral("still"), still);
-        lines.append(line);
-    }
     QJsonObject tighten;
     tighten.insert(QStringLiteral("snap"), true);
-    tighten.insert(QStringLiteral("max_pause"), 0.8);
+    tighten.insert(QStringLiteral("max_pause"), maxPause());
     QJsonObject root;
     root.insert(QStringLiteral("clips"), clips);
-    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
     root.insert(QStringLiteral("tighten"), tighten);
+    if (includeIntent)
+        root.insert(QStringLiteral("intent"), intentForCut());
     QFile file(QDir(m_cutOut).filePath(QStringLiteral("cuts.json")));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
         return false;
@@ -836,18 +1250,150 @@ bool Backend::writeCutsForRender() {
     return file.write(bytes) == bytes.size();
 }
 
+QString Backend::planCutsFor(const QString &movie) const {
+    const QJsonArray cuts = readCutArray();
+    for (const QJsonValue &value : cuts) {
+        const QJsonObject object = value.toObject();
+        if (object.value(QStringLiteral("path")).toString() != movie)
+            continue;
+        return object.value(QStringLiteral("cuts")).toString();
+    }
+    return {};
+}
+
+void Backend::adoptPlanCuts() {
+    const QString abs = QFileInfo(m_path).absoluteFilePath();
+    if (QFileInfo(m_path).fileName() == QLatin1String("rough_cut.mp4")) {
+        const QString cuts = QFileInfo(m_path).dir().filePath(QStringLiteral("cuts.json"));
+        if (QFileInfo(cuts).isFile()) {
+            m_planCuts = QFileInfo(cuts).absoluteFilePath();
+            m_planMovie = abs;
+            return;
+        }
+    }
+    const QString remembered = planCutsFor(abs);
+    if (!remembered.isEmpty() && QFileInfo(remembered).isFile()) {
+        m_planCuts = QFileInfo(remembered).absoluteFilePath();
+        m_planMovie = abs;
+        return;
+    }
+    m_planCuts.clear();
+    m_planMovie.clear();
+}
+
 QString Backend::cutsBesideMovie() const {
     if (m_path.isEmpty())
         return {};
-    const QFileInfo info(m_path);
-    if (info.fileName() != QLatin1String("rough_cut.mp4"))
-        return {};
-    const QString cuts = info.dir().filePath(QStringLiteral("cuts.json"));
-    return QFileInfo::exists(cuts) && QFileInfo(cuts).isFile() ? cuts : QString();
+    const QString abs = QFileInfo(m_path).absoluteFilePath();
+    if (m_planMovie == abs && !m_planCuts.isEmpty() && QFileInfo(m_planCuts).isFile())
+        return m_planCuts;
+    if (QFileInfo(m_path).fileName() == QLatin1String("rough_cut.mp4")) {
+        const QString cuts = QFileInfo(m_path).dir().filePath(QStringLiteral("cuts.json"));
+        if (QFileInfo(cuts).isFile())
+            return QFileInfo(cuts).absoluteFilePath();
+    }
+    return {};
 }
 
 bool Backend::roughCut() const {
     return !cutsBesideMovie().isEmpty();
+}
+
+void Backend::loadPlanFilm() {
+    const QString cuts = cutsBesideMovie();
+    if (cuts.isEmpty()) {
+        m_plan.clear();
+        emit planChanged();
+        return;
+    }
+    QFile file(cuts);
+    if (!file.open(QIODevice::ReadOnly)) {
+        m_plan.clear();
+        emit planChanged();
+        return;
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject()) {
+        m_plan.clear();
+        emit planChanged();
+        return;
+    }
+    const QJsonObject root = doc.object();
+    QHash<int, QJsonObject> clipsByIndex;
+    for (const QJsonValue &value : root.value(QStringLiteral("clips")).toArray()) {
+        if (!value.isObject())
+            continue;
+        const QJsonObject clip = value.toObject();
+        clipsByIndex.insert(clip.value(QStringLiteral("index")).toInt(), clip);
+    }
+    const QString base = QFileInfo(cuts).absolutePath();
+    QList<PlanFilm::Segment> segments;
+    for (const QJsonValue &value : root.value(QStringLiteral("segments")).toArray()) {
+        if (!value.isObject())
+            continue;
+        const QJsonObject obj = value.toObject();
+        const int clipIndex = obj.value(QStringLiteral("clip")).toInt(-1);
+        if (!clipsByIndex.contains(clipIndex))
+            continue;
+        const QJsonObject clip = clipsByIndex.value(clipIndex);
+        QString path = clip.value(QStringLiteral("path")).toString();
+        if (path.isEmpty())
+            continue;
+        if (QFileInfo(path).isRelative())
+            path = QFileInfo(QDir(base).filePath(path)).absoluteFilePath();
+        const double start = obj.value(QStringLiteral("start")).toDouble();
+        const double end = obj.value(QStringLiteral("end")).toDouble();
+        if (start < 0.0 || end <= start)
+            continue;
+        double fileDuration = clip.value(QStringLiteral("duration")).toDouble();
+        if (fileDuration < end) {
+            const ffmpeg::VideoInfo probed = ffmpeg::probe(path);
+            if (probed.ok)
+                fileDuration = std::max(fileDuration, probed.duration);
+        }
+        if (fileDuration < end)
+            fileDuration = end;
+        PlanFilm::Segment seg;
+        seg.clip = clipIndex;
+        seg.path = path;
+        seg.fileDuration = fileDuration;
+        seg.start = start;
+        seg.end = end;
+        seg.reason = obj.value(QStringLiteral("reason")).toString();
+        seg.raw = obj;
+        segments.append(seg);
+    }
+    if (segments.isEmpty())
+        m_plan.clear();
+    else
+        m_plan.load(segments);
+    emit planChanged();
+}
+
+bool Backend::writePlanSegments() const {
+    if (!m_plan.active())
+        return false;
+    const QString cuts = cutsBesideMovie();
+    if (cuts.isEmpty())
+        return false;
+    QFile file(cuts);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject root = doc.object();
+    root.insert(QStringLiteral("segments"), m_plan.segmentsJson());
+    if (m_plan.unexported())
+        root.insert(QStringLiteral("trimmed"), true);
+    else
+        root.remove(QStringLiteral("trimmed"));
+    doc.setObject(root);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
+    return file.write(bytes) == bytes.size();
 }
 
 void Backend::startBesideCut(CutStage stage, const QString &running,
@@ -855,6 +1401,12 @@ void Backend::startBesideCut(CutStage stage, const QString &running,
                                                const QString &)) {
     if (m_busy)
         return;
+    // The cuts file already has the new ranges, but rough_cut.mp4 is still the
+    // previous bake until Export. Captions and Short would cut that file.
+    if (m_plan.active() && m_plan.unexported()) {
+        setStatus(QStringLiteral("Export the trim first"));
+        return;
+    }
     const QString cuts = cutsBesideMovie();
     if (cuts.isEmpty())
         return;
@@ -880,6 +1432,149 @@ void Backend::writeCaptions() {
 
 void Backend::makeShort() {
     startBesideCut(CutStage::Short, QStringLiteral("Cutting a short"), cutShortLaunch);
+}
+
+QString Backend::prepareReviseCuts() {
+    const QString existing = m_cutOut.isEmpty()
+                                 ? QString()
+                                 : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+    if (!existing.isEmpty() && QFileInfo::exists(existing)) {
+        if (!syncLinesKeepingPause(existing))
+            return {};
+        return existing;
+    }
+    // A new file has no earlier pause to keep, so the sentence goes in this same write.
+    if (!writeCutsForRender(true))
+        return {};
+    return QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+}
+
+bool Backend::syncLinesKeepingPause(const QString &cutsPath) const {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return false;
+    QJsonObject root = doc.object();
+    root.insert(QStringLiteral("intent"), intentForCut());
+    root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+    // Pace lands on the next Cut or Render. This write must leave tighten alone.
+    doc.setObject(root);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
+    return file.write(bytes) == bytes.size();
+}
+
+bool Backend::readReviseOutcome(const QString &cutsPath, QString *intent, QString *pace, bool *dip,
+                                QString *deliver) const {
+    QFile file(cutsPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+    const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    if (!doc.isObject())
+        return false;
+    const QJsonObject revise = doc.object().value(QStringLiteral("revise")).toObject();
+    if (!revise.contains(QStringLiteral("pace")) || !revise.contains(QStringLiteral("dip"))
+        || !revise.contains(QStringLiteral("deliver")))
+        return false;
+    const QString movie = doc.object().value(QStringLiteral("intent")).toString().trimmed();
+    if (movie.isEmpty())
+        return false;
+    *intent = movie;
+    *pace = revise.value(QStringLiteral("pace")).toString();
+    *dip = revise.value(QStringLiteral("dip")).toBool();
+    *deliver = revise.value(QStringLiteral("deliver")).toString();
+    return true;
+}
+
+bool Backend::sendRevise(const QString &note) {
+    if (m_busy)
+        return false;
+    const QString trimmed = note.simplified();
+    if (trimmed.isEmpty() || m_selects.isEmpty())
+        return false;
+    const QString cuts = prepareReviseCuts();
+    if (cuts.isEmpty()) {
+        setStatus(QStringLiteral("Could not save the selects"));
+        return false;
+    }
+    const QString cli = findTool(QStringLiteral("botcut-cli"));
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = cutReviseLaunch(cuts, trimmed, cli, projectOk ? uv : QString(),
+                                             projectOk ? project : QString(), m_pace, m_sceneTransition);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return false;
+    }
+    QFile stampFile(cuts);
+    if (!stampFile.open(QIODevice::ReadOnly)) {
+        setStatus(QStringLiteral("Could not save the selects"));
+        return false;
+    }
+    m_reviseStamp = stampFile.readAll();
+    m_reviseNote = trimmed;
+    setBusy(true);
+    setStatus(QStringLiteral("Revising"));
+    m_cutStage = CutStage::Revise;
+    startCutProcess(launch);
+    return true;
+}
+
+void Backend::revertRevise() {
+    if (m_busy || !m_canRevert)
+        return;
+    m_canRevert = false;
+    m_selects = m_undoSelects;
+    emit selectsChanged();
+    applyIntent(m_undoIntent);
+    applyPace(m_undoPace);
+    applySceneTransition(m_undoDip);
+    const QString cuts = m_cutOut.isEmpty()
+                             ? QString()
+                             : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+    if (!cuts.isEmpty() && QFileInfo::exists(cuts) && !syncLinesKeepingPause(cuts))
+        setStatus(QStringLiteral("Could not save the selects"));
+    emit canRevertChanged();
+}
+
+bool Backend::makeCard(const QString &place, const QString &sentence) {
+    if (m_busy)
+        return false;
+    if (place != QLatin1String("open") && place != QLatin1String("close"))
+        return false;
+    const QString trimmed = sentence.simplified();
+    if (trimmed.isEmpty())
+        return false;
+    QString dir;
+    const QString dirError = ensureCardDirectory(&dir);
+    if (!dirError.isEmpty()) {
+        setStatus(dirError);
+        return false;
+    }
+    const QString dest = QDir(dir).filePath(QStringLiteral("botcut-card-%1-%2.mp4")
+                                                .arg(QUuid::createUuid().toString(QUuid::WithoutBraces), place));
+    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
+    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = cutCardLaunch(dest, trimmed, cli, projectOk ? uv : QString(),
+                                           projectOk ? project : QString());
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return false;
+    }
+    m_cardPath = dest;
+    m_cardPlace = place;
+    setBusy(true);
+    setStatus(QStringLiteral("Making the card…"));
+    m_cutStage = CutStage::Card;
+    startCutProcess(launch);
+    return true;
 }
 
 void Backend::renderSelects() {
@@ -916,16 +1611,64 @@ void Backend::renderSelects() {
     startCutProcess(launch);
 }
 
+void Backend::exportPlan() {
+    if (m_busy || !m_plan.active() || !m_plan.unexported())
+        return;
+    if (!writePlanSegments()) {
+        setStatus(QStringLiteral("Could not save the cut"));
+        return;
+    }
+    const QString cuts = cutsBesideMovie();
+    if (cuts.isEmpty()) {
+        setStatus(QStringLiteral("Could not save the cut"));
+        return;
+    }
+    const QString outDir = QFileInfo(cuts).absolutePath();
+    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
+    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = m_launchProgram.isEmpty()
+                           && QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = cutRenderLaunch(outDir, cli, projectOk ? uv : QString(),
+                                             projectOk ? project : QString(), m_sceneTransition);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return;
+    }
+    m_cutOut = outDir;
+    setBusy(true);
+    setStatus(QStringLiteral("Rendering 0%"));
+    m_cutStage = CutStage::Render;
+    startCutProcess(launch);
+}
+
 void Backend::startCutProcess(const CutLaunch &launch) {
     if (m_cutProcess == nullptr) {
         m_cutProcess = new QProcess(this);
         m_cutProcess->setProcessChannelMode(QProcess::MergedChannels);
         connect(m_cutProcess, &QProcess::readyRead, this, &Backend::readCutOutput);
         connect(m_cutProcess, &QProcess::finished, this, &Backend::cutProcessFinished);
+        connect(m_cutProcess, &QProcess::started, this, [this] {
+            if (m_cutStage != CutStage::Decide && m_cutStage != CutStage::Run)
+                return;
+            // The revert snapshot is the only copy of the pre-revise lines.
+            m_restoreCutOut = false;
+            m_selects.clear();
+            emit selectsChanged();
+            clearReviseThread();
+        });
         connect(m_cutProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
             if (error != QProcess::FailedToStart)
                 return;
+            if (m_restoreCutOut) {
+                m_cutOut = m_cutOutRestore;
+                m_restoreCutOut = false;
+            }
             m_cutStage = CutStage::Idle;
+            m_reviseNote.clear();
+            m_reviseStamp.clear();
+            m_cardPath.clear();
+            m_cardPlace.clear();
             setBusy(false);
             setStatus(QStringLiteral("Could not start %1").arg(m_cutProcess->program()));
         });
@@ -950,7 +1693,8 @@ void Backend::readCutOutput() {
     while ((newline = m_cutLine.indexOf(QLatin1Char('\n'))) >= 0) {
         const QString status = cutStatusFromLine(m_cutLine.left(newline));
         m_cutLine.remove(0, newline + 1);
-        if (!status.isEmpty())
+        // A card stays on "Making the card…" until the process exits. Retries say "Trying again".
+        if (!status.isEmpty() && m_cutStage != CutStage::Card)
             setStatus(status);
     }
 }
@@ -959,7 +1703,7 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
     readCutOutput();
     if (!m_cutLine.isEmpty()) {
         const QString pending = cutStatusFromLine(m_cutLine);
-        if (!pending.isEmpty())
+        if (!pending.isEmpty() && m_cutStage != CutStage::Card)
             setStatus(pending);
         m_cutLine.clear();
     }
@@ -972,6 +1716,10 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
     };
     if (status != QProcess::NormalExit || code != 0) {
         m_cutStage = CutStage::Idle;
+        m_reviseNote.clear();
+        m_reviseStamp.clear();
+        m_cardPath.clear();
+        m_cardPlace.clear();
         setBusy(false);
         const QString tail = lastLine();
         setStatus(tail.isEmpty() ? QStringLiteral("Cut failed") : tail);
@@ -989,6 +1737,96 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         const QString cut = QDir(m_cutOut).filePath(QStringLiteral("rough_cut.mp4"));
         if (!QFileInfo::exists(cut) || !load(QUrl::fromLocalFile(cut)))
             setStatus(QStringLiteral("Could not open the cut"));
+        else
+            rememberFinishedCut(cut);
+        return;
+    }
+    if (m_cutStage == CutStage::Revise) {
+        m_cutStage = CutStage::Idle;
+        const QString cuts = QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+        QFile written(cuts);
+        const QByteArray now = written.open(QIODevice::ReadOnly) ? written.readAll() : QByteArray();
+        // Exit 0 is not a revise unless this run rewrote the file. A stale object must not apply.
+        const bool unchanged = now == m_reviseStamp;
+        m_reviseStamp.clear();
+        QString intent;
+        QString pace;
+        QString deliver;
+        bool dip = false;
+        if (unchanged || !readReviseOutcome(cuts, &intent, &pace, &dip, &deliver)) {
+            m_reviseNote.clear();
+            setBusy(false);
+            setStatus(QStringLiteral("Could not read the revise"));
+            return;
+        }
+        m_undoIntent = m_intent;
+        m_undoPace = m_pace;
+        m_undoDip = m_sceneTransition;
+        m_undoSelects = m_selects;
+        m_canRevert = true;
+        loadSelects(cuts);
+        applyIntent(intent);
+        if (pace == QLatin1String("open") || pace == QLatin1String("measured")
+            || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
+            applyPace(pace);
+        applySceneTransition(dip ? QStringLiteral("dip") : QStringLiteral("off"));
+        if (!m_reviseNote.isEmpty()) {
+            m_reviseNotes.append(m_reviseNote);
+            m_reviseNote.clear();
+            while (m_reviseNotes.size() > 3)
+                m_reviseNotes.removeFirst();
+            emit reviseNotesChanged();
+        }
+        emit canRevertChanged();
+        setBusy(false);
+        if (deliver == QLatin1String("render"))
+            setStatus(QStringLiteral("Ready to render"));
+        else if (deliver == QLatin1String("captions"))
+            setStatus(QStringLiteral("Ready for captions"));
+        else if (deliver == QLatin1String("short"))
+            setStatus(QStringLiteral("Ready for a short"));
+        return;
+    }
+    if (m_cutStage == CutStage::Card) {
+        const QString path = m_cardPath;
+        const QString place = m_cardPlace;
+        m_cardPath.clear();
+        m_cardPlace.clear();
+        m_cutStage = CutStage::Idle;
+        const QFileInfo info(path);
+        const QString abs = info.absoluteFilePath();
+        if (info.isSymbolicLink() || !info.isFile() || info.size() <= 0
+            || !cardDestinationError(abs).isEmpty()) {
+            setBusy(false);
+            setStatus(QStringLiteral("Could not make the card"));
+            return;
+        }
+        if (!m_tray.contains(abs)) {
+            const bool open = place != QLatin1String("close");
+            if (!open) {
+                m_tray.append(abs);
+                if (m_trayIndex < 0)
+                    m_trayIndex = 0;
+            } else {
+                m_tray.prepend(abs);
+                m_trayIndex = m_trayIndex < 0 ? 0 : m_trayIndex + 1;
+                shiftClipIndexes(&m_selects);
+                shiftClipIndexes(&m_undoSelects);
+                if (!m_selects.isEmpty())
+                    emit selectsChanged();
+            }
+            emit trayChanged();
+            const QString cuts = m_cutOut.isEmpty()
+                                     ? QString()
+                                     : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+            if (!cuts.isEmpty() && QFileInfo::exists(cuts) && !noteCardOnCuts(cuts, abs, open)) {
+                setBusy(false);
+                setStatus(QStringLiteral("Could not save the selects"));
+                return;
+            }
+        }
+        setBusy(false);
+        setStatus(QString());
         return;
     }
     if (m_cutStage == CutStage::Captions || m_cutStage == CutStage::Short) {
@@ -1277,6 +2115,7 @@ void Backend::copyCut(const QUrl &dst) {
         return;
     }
     if (QFileInfo(outPath).absoluteFilePath() == QFileInfo(m_path).absoluteFilePath()) {
+        rememberSavedCut(m_path, outPath);
         noteCutSaved(outPath);
         return;
     }
@@ -1301,6 +2140,8 @@ void Backend::copyCut(const QUrl &dst) {
             emit exportFailed(err.isEmpty() ? QStringLiteral("Could not save the movie.") : err);
             return;
         }
+        const QString source = m_path;
+        const QString plan = cutsBesideMovie();
         const QString captionNote = captionCopyError(m_path, outPath);
         if (!load(QUrl::fromLocalFile(outPath))) {
             setBusy(false);
@@ -1308,6 +2149,14 @@ void Backend::copyCut(const QUrl &dst) {
             emit exportFailed(QStringLiteral("Could not open the cut"));
             return;
         }
+        if (!plan.isEmpty()) {
+            m_planCuts = plan;
+            m_planMovie = QFileInfo(outPath).absoluteFilePath();
+            // load() cleared the film because the saved name is not rough_cut.mp4.
+            loadPlanFilm();
+            emit infoChanged();
+        }
+        rememberSavedCut(source, outPath);
         noteCutSaved(outPath);
         if (!captionNote.isEmpty())
             setStatus(captionNote);

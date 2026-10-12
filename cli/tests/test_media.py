@@ -36,6 +36,35 @@ def test_render_args_has_one_input_per_segment_and_concat():
     assert "fade=" not in graph
 
 
+def test_render_args_scales_a_leading_card_to_the_camera():
+    clips = [
+        {"path": "/tmp/botcut-card-1-open.mp4", "width": 160, "height": 90, "fps": 25.0},
+        {"path": "/tmp/talk.mp4", "width": 1920, "height": 1080, "fps": 30.0},
+    ]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 3.0, "reason": "card"},
+        {"clip": 1, "start": 0.0, "end": 1.0, "reason": "story"},
+    ]
+    graph = _graph(render_args(segs, clips, "/tmp/out.mp4"))
+    assert "scale=1920:1080:force_original_aspect_ratio=decrease" in graph
+    assert "fps=30" in graph
+    assert "scale=160:90" not in graph
+
+
+def test_render_args_uses_the_first_card_when_every_shot_is_a_card():
+    clips = [
+        {"path": "/tmp/botcut-card-a-open.mp4", "width": 160, "height": 90, "fps": 25.0},
+        {"path": "/tmp/botcut-card-b-close.mp4", "width": 1280, "height": 720, "fps": 30.0},
+    ]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 3.0, "reason": "card"},
+        {"clip": 1, "start": 0.0, "end": 3.0, "reason": "card"},
+    ]
+    graph = _graph(render_args(segs, clips, "/tmp/out.mp4"))
+    assert "scale=160:90:force_original_aspect_ratio=decrease" in graph
+    assert "fps=25" in graph
+
+
 def _graph(args):
     return args[args.index("-filter_complex") + 1]
 

@@ -1,8 +1,10 @@
 #include "timeline.h"
 
+#include <QHash>
 #include <QVariantMap>
 
 #include <algorithm>
+#include <cmath>
 
 QVariantList Timeline::clipList() const {
     QVariantList result;
@@ -211,4 +213,390 @@ void Timeline::redo() {
     m_undo.append(m_clips);
     m_clips = m_redo.takeLast();
     emit changed();
+}
+
+namespace {
+
+bool sameEdge(const PlanFilm::Segment &a, const PlanFilm::Segment &b) {
+    return a.origin == b.origin && a.start == b.start && a.end == b.end;
+}
+
+}
+
+double PlanFilm::keptDuration() const {
+    double total = 0;
+    for (const Segment &seg : m_current)
+        total += std::max(0.0, seg.end - seg.start);
+    return total;
+}
+
+bool PlanFilm::unexported() const {
+    if (!m_active)
+        return false;
+    if (m_current.size() != m_captured.size())
+        return true;
+    for (int i = 0; i < m_current.size(); ++i) {
+        if (!sameEdge(m_current.at(i), m_captured.at(i)))
+            return true;
+    }
+    return false;
+}
+
+QVariantList PlanFilm::clipList() const {
+    QVariantList result;
+    for (const View &view : m_view) {
+        result.append(QVariantMap{{QStringLiteral("start"), view.start},
+                                  {QStringLiteral("end"), view.end}});
+    }
+    return result;
+}
+
+QJsonArray PlanFilm::segmentsJson() const {
+    QJsonArray out;
+    for (const Segment &seg : m_current) {
+        QJsonObject obj = seg.raw;
+        obj.insert(QStringLiteral("clip"), seg.clip);
+        obj.insert(QStringLiteral("start"), seg.start);
+        obj.insert(QStringLiteral("end"), seg.end);
+        if (!seg.reason.isEmpty())
+            obj.insert(QStringLiteral("reason"), seg.reason);
+        out.append(obj);
+    }
+    return out;
+}
+
+void PlanFilm::load(const QList<Segment> &segments) {
+    m_gesture = false;
+    m_gestureRecorded = false;
+    m_undo.clear();
+    m_redo.clear();
+    m_anchor.clear();
+    m_frozenView.clear();
+    m_captured = segments;
+    for (int i = 0; i < m_captured.size(); ++i)
+        m_captured[i].origin = i;
+    m_current = m_captured;
+    m_active = !m_current.isEmpty();
+    relayout();
+    emit changed();
+}
+
+void PlanFilm::clear() {
+    if (!m_active && m_current.isEmpty() && m_duration == 0)
+        return;
+    m_active = false;
+    m_gesture = false;
+    m_gestureRecorded = false;
+    m_current.clear();
+    m_captured.clear();
+    m_view.clear();
+    m_anchor.clear();
+    m_frozenView.clear();
+    m_undo.clear();
+    m_redo.clear();
+    m_duration = 0;
+    emit changed();
+}
+
+void PlanFilm::takeUndo() {
+    if (!m_gesture || !m_gestureRecorded) {
+        m_undo.append(m_current);
+        m_redo.clear();
+        m_gestureRecorded = m_gesture;
+    }
+}
+
+void PlanFilm::relayout() {
+    m_view.clear();
+    m_view.reserve(m_current.size());
+    QHash<int, int> at;
+    for (int i = 0; i < m_current.size(); ++i)
+        at.insert(m_current.at(i).origin, i);
+    QList<View> placed;
+    placed.reserve(m_current.size());
+    for (int i = 0; i < m_current.size(); ++i)
+        placed.append(View{});
+    double cursor = 0;
+    for (int origin = 0; origin < m_captured.size(); ++origin) {
+        const auto found = at.constFind(origin);
+        if (found == at.cend()) {
+            cursor += std::max(0.0, m_captured.at(origin).end - m_captured.at(origin).start);
+            continue;
+        }
+        const int index = found.value();
+        const double len = std::max(0.0, m_current.at(index).end - m_current.at(index).start);
+        placed[index].start = cursor;
+        placed[index].end = cursor + len;
+        cursor += len;
+    }
+    // Segments are kept in captured order, so the placed list matches m_current.
+    m_view = placed;
+    m_duration = cursor;
+}
+
+void PlanFilm::applyEdge(int index, const Segment &updated) {
+    if (index < 0 || index >= m_current.size())
+        return;
+    if (sameEdge(updated, m_current.at(index)) && updated.clip == m_current.at(index).clip)
+        return;
+    takeUndo();
+    m_current[index] = updated;
+    if (m_gesture && index < m_frozenView.size() && index < m_view.size() && index < m_anchor.size()) {
+        const double len = std::max(0.0, updated.end - updated.start);
+        if (updated.start != m_anchor.at(index).start && updated.end == m_anchor.at(index).end) {
+            m_view[index].end = m_frozenView.at(index).end;
+            m_view[index].start = m_frozenView.at(index).end - len;
+        } else {
+            m_view[index].start = m_frozenView.at(index).start;
+            m_view[index].end = m_frozenView.at(index).start + len;
+        }
+    } else if (!m_gesture) {
+        relayout();
+    }
+    emit changed();
+    if (!m_gesture)
+        emit committed();
+}
+
+int PlanFilm::clipAt(double t) const {
+    for (int i = 0; i < m_view.size(); ++i) {
+        if (t >= m_view.at(i).start && t < m_view.at(i).end)
+            return i;
+    }
+    return -1;
+}
+
+int PlanFilm::gapAt(double t) const {
+    int n = 0;
+    while (n < m_view.size() && m_view.at(n).end <= t)
+        ++n;
+    return n;
+}
+
+double PlanFilm::playableFrom(double t) const {
+    for (const View &view : m_view) {
+        if (t < view.end - 0.03)
+            return std::max(t, view.start);
+    }
+    return -1;
+}
+
+double PlanFilm::edgeFrom(double t, int direction) const {
+    if (m_view.isEmpty())
+        return 0;
+    double target = direction > 0 ? m_view.last().end : m_view.first().start;
+    for (const View &view : m_view) {
+        for (const double edge : {view.start, view.end}) {
+            if (direction > 0 && edge > t + 0.01)
+                return edge;
+            if (direction < 0 && edge < t - 0.01)
+                target = edge;
+        }
+    }
+    return target;
+}
+
+QVariantMap PlanFilm::sourceFor(int index, double sourceTime) const {
+    if (index < 0 || index >= m_current.size() || index >= m_view.size())
+        return {{QStringLiteral("ok"), false}};
+    const Segment &seg = m_current.at(index);
+    return {{QStringLiteral("ok"), true},
+            {QStringLiteral("path"), seg.path},
+            {QStringLiteral("source"), std::clamp(sourceTime, seg.start, seg.end)},
+            {QStringLiteral("end"), seg.end},
+            {QStringLiteral("index"), index}};
+}
+
+QVariantMap PlanFilm::sourceAt(double displayTime) const {
+    // Half-open, so a shared boundary is the next block. The end window is only
+    // for a scrub of the true end, which no block contains.
+    int index = clipAt(displayTime);
+    if (index < 0) {
+        for (int i = 0; i < m_view.size(); ++i) {
+            const double end = m_view.at(i).end;
+            if (displayTime >= m_view.at(i).start && std::abs(displayTime - end) <= 0.001) {
+                index = i;
+                break;
+            }
+        }
+    }
+    if (index < 0 || index >= m_view.size() || index >= m_current.size())
+        return {{QStringLiteral("ok"), false}};
+    const double source = m_current.at(index).start + (displayTime - m_view.at(index).start);
+    return sourceFor(index, source);
+}
+
+double PlanFilm::displayForSource(int index, double sourceTime) const {
+    if (index < 0 || index >= m_current.size() || index >= m_view.size())
+        return 0;
+    return m_view.at(index).start + (sourceTime - m_current.at(index).start);
+}
+
+double PlanFilm::edgeTime(int index, bool startEdge) const {
+    if (index < 0 || index >= m_current.size())
+        return 0;
+    return startEdge ? m_current.at(index).start : m_current.at(index).end;
+}
+
+double PlanFilm::playheadForEdge(int index, bool startEdge) const {
+    if (index < 0 || index >= m_current.size() || index >= m_view.size())
+        return 0;
+    const double display = displayForSource(index, startEdge ? m_current.at(index).start
+                                                              : m_current.at(index).end);
+    if (startEdge)
+        return display;
+    // The packed out-point is the next block's start. Park strictly inside this one.
+    const double inside = display - 0.001;
+    return inside > m_view.at(index).start ? inside : m_view.at(index).start;
+}
+
+void PlanFilm::moveEdge(int index, bool startEdge, double t) {
+    if (index < 0 || index >= m_current.size() || index >= m_view.size())
+        return;
+    const View view = (m_gesture && index < m_frozenView.size()) ? m_frozenView.at(index) : m_view.at(index);
+    const Segment base = (m_gesture && index < m_anchor.size()) ? m_anchor.at(index) : m_current.at(index);
+    const double room = std::max(edit::minimumClip, base.fileDuration);
+    if (startEdge) {
+        double length = std::clamp(view.end - t, edit::minimumClip, room);
+        double start = base.end - length;
+        if (start < 0)
+            start = 0;
+        if (base.end - start < edit::minimumClip)
+            return;
+        moveEdgeBy(index, true, start - base.start);
+    } else {
+        double length = std::clamp(t - view.start, edit::minimumClip, room);
+        double end = base.start + length;
+        if (end > base.fileDuration)
+            end = base.fileDuration;
+        if (end - base.start < edit::minimumClip)
+            return;
+        moveEdgeBy(index, false, end - base.end);
+    }
+}
+
+void PlanFilm::moveEdgeBy(int index, bool startEdge, double delta) {
+    if (!m_active || index < 0 || index >= m_current.size())
+        return;
+    const Segment base = (m_gesture && index < m_anchor.size()) ? m_anchor.at(index) : m_current.at(index);
+    Segment updated = m_current.at(index);
+    if (startEdge) {
+        const double limit = base.end - edit::minimumClip;
+        if (limit < 0)
+            return;
+        const double start = std::clamp(base.start + delta, 0.0, limit);
+        if (base.end - start < edit::minimumClip)
+            return;
+        updated.start = start;
+        updated.end = base.end;
+    } else {
+        const double ceiling = std::max(base.fileDuration, base.start + edit::minimumClip);
+        const double floor = base.start + edit::minimumClip;
+        if (ceiling < floor)
+            return;
+        const double end = std::clamp(base.end + delta, floor, ceiling);
+        if (end - base.start < edit::minimumClip)
+            return;
+        updated.start = base.start;
+        updated.end = end;
+    }
+    applyEdge(index, updated);
+}
+
+void PlanFilm::trimTo(double t, bool startEdge) {
+    const int index = clipAt(t);
+    if (index < 0)
+        return;
+    moveEdge(index, startEdge, t);
+}
+
+void PlanFilm::removeClip(int index) {
+    if (m_gesture || index < 0 || index >= m_current.size() || m_current.size() < 2)
+        return;
+    takeUndo();
+    m_current.removeAt(index);
+    relayout();
+    emit changed();
+    emit committed();
+}
+
+void PlanFilm::removeOrRestoreAt(double t) {
+    const int index = clipAt(t);
+    if (index >= 0)
+        removeClip(index);
+    else
+        restoreGap(gapAt(t));
+}
+
+void PlanFilm::restoreGap(int gap) {
+    if (m_gesture || gap < 0 || m_captured.isEmpty() || m_current.isEmpty())
+        return;
+    QList<int> have;
+    have.reserve(m_current.size());
+    for (const Segment &seg : m_current)
+        have.append(seg.origin);
+    if (gap > have.size())
+        return;
+    const int before = gap == 0 ? -1 : have.at(gap - 1);
+    const int after = gap >= have.size() ? m_captured.size() : have.at(gap);
+    QList<Segment> next = m_current;
+    int insertAt = gap;
+    bool any = false;
+    for (int origin = 0; origin < m_captured.size(); ++origin) {
+        if (have.contains(origin) || origin <= before || origin >= after)
+            continue;
+        next.insert(insertAt, m_captured.at(origin));
+        ++insertAt;
+        any = true;
+    }
+    if (!any)
+        return;
+    takeUndo();
+    m_current = next;
+    relayout();
+    emit changed();
+    emit committed();
+}
+
+void PlanFilm::beginGesture() {
+    if (m_current.isEmpty())
+        return;
+    m_gesture = true;
+    m_gestureRecorded = false;
+    m_anchor = m_current;
+    m_frozenView = m_view;
+}
+
+void PlanFilm::endGesture() {
+    if (!m_gesture)
+        return;
+    const bool edited = m_gestureRecorded;
+    m_gesture = false;
+    m_gestureRecorded = false;
+    m_anchor.clear();
+    m_frozenView.clear();
+    relayout();
+    emit changed();
+    if (edited)
+        emit committed();
+}
+
+void PlanFilm::undo() {
+    if (m_gesture || m_undo.isEmpty())
+        return;
+    m_redo.append(m_current);
+    m_current = m_undo.takeLast();
+    relayout();
+    emit changed();
+    emit committed();
+}
+
+void PlanFilm::redo() {
+    if (m_gesture || m_redo.isEmpty())
+        return;
+    m_undo.append(m_current);
+    m_current = m_redo.takeLast();
+    relayout();
+    emit changed();
+    emit committed();
 }

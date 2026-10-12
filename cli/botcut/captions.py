@@ -7,6 +7,8 @@ import os
 import subprocess
 from pathlib import Path
 
+from botcut.card import is_card
+
 
 FORCE_STYLE = "FontName=Inter,FontSize=18,Bold=1,Outline=2,Shadow=0,Alignment=2,MarginV=40"
 MAX_CHARS = 32
@@ -42,6 +44,10 @@ def load_words_by_clip(doc: dict, out_dir: str) -> list[list[dict]]:
         candidates = word_cache_candidates(work, index, stem, backend)
         found = next((path for path in candidates if os.path.isfile(path)), None)
         if found is None:
+            # A card has no transcript. Captions skip it instead of failing the movie.
+            if is_card(str(clip.get("path") or "")):
+                by_index[index] = []
+                continue
             raise SystemExit(f"No word cache: {candidates[0]}")
         by_index[index] = read_words(found)
     last = max(by_index)

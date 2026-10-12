@@ -105,6 +105,8 @@ Under the preview, **Add videos** is a dashed row.
 
 Then the shot list, which takes the leftover height and scrolls. Each row is 52 px: the file name, the file size, **Remove**, and, on hover or on the current row, **Up** and **Down**. The selected row is `#2a2a2e`. The first Up and the last Down are disabled. Clicking the name selects that shot and shows it in the preview. There is no per-file duration.
 
+While Spoken cuts is on, the column under the shot list holds **This movie**, four pace choices (**Open**, **Measured**, **Tight**, **Frenzied**), and **Dip to black between files**. Open leaves the longer pauses. Frenzied splits the shorter ones. The same sentence and the same dip are in Settings, and editing either one updates the other. **Open card** and **Close card** sit on that same row, beside the pace. Each opens one line, filled with the movie sentence, and **Make card**. That line stays hidden until then. Make card adds a shot at the front of the tray, or at the end for a close card. It is a shot the person can reorder or remove. It is not painted onto a camera file. While the card is being made, the footer reads "Making the card…".
+
 No Lines block yet.
 
 The quiet row still holds **Open list**, **Save list**, and **Trim one file**. The footer bar says "4 shots" on the left and a filled **Cut** on the right.
@@ -113,9 +115,13 @@ A missing file turns that row red and says "file not found". Cut is then disable
 
 ## Screen: Shots, after a decide
 
-The preview drops to at most 120 px. The shot list stays above and gets shorter, so a file can still be removed or reordered. Lines are the tall list. The heading is "Lines" plus "kept (N of M)", and the kept duration when the line times are known. A resting row is the accent time and the words. On hover, or on the current row, the row also shows the reason, **Play**, and **Drop** or **Restore**. A dropped line's words are `#e07a7a`. Play previews that line in the small frame and pauses at the end. It does not open the trimmer.
+The picture sits on the left, 16:9 and about 240 px tall, with Add videos, the shot list, and the plan under it, so a file can still be removed or reordered. Lines scroll the full height on the right. The heading is "Lines" plus "kept (N of M)", and the kept duration when the line times are known. A resting row is the accent time and the words. On hover, or on the current row, the row also shows the reason, **Play**, and **Drop** or **Restore**. A dropped line's words are `#e07a7a`. Play seeks that shot to the line once the file is ready, then pauses at the end. It does not open the trimmer.
 
-The footer bar says "3 lines kept", or the job status while one is running. **Cut** reads **Cut again** and is not filled. **Render** is filled. While work is running, both read **Cutting…** and are disabled. A Rendering or Opening percent draws a thin accent bar on the footer. The status is one line at a time, for example:
+Under the heading, one field reads "Change this cut", with **Send**. Before any note, that is the whole thread, so the lines keep their height. After a note, the last few notes sit in a short quiet list above the field, and **Revert** appears. Send does not encode. The footer can then read "Ready to render", "Ready for captions", or "Ready for a short". **Render**, **Captions**, and **Short** stay the buttons that encode.
+
+With four shots and eight lines, the movie sentence, the pace, Dip to black, Open card, Close card, Change this cut, Lines, Render, and the footer stay fully on screen. If the column is tight, the movie sentence shrinks before a line row does. Cut and Render stay inside the window.
+
+The footer bar says "3 lines kept", or the job status while one is running. **Cut** reads **Cut again** and is not filled. **Render** is filled. While work is running, both read **Cutting…** and are disabled. One job runs at a time. Send, Revert, the card buttons, the pace, and the trim handles are disabled too, the same as the tray. A Rendering or Opening percent draws a thin accent bar on the footer. The status is one line at a time, for example:
 
 - Reading files
 - Transcribing 2/4 DJI_20261008_091418.MP4
@@ -137,11 +143,13 @@ Under the picture, one bar:
 - The time, `0:12  /  2:46`.
 - **Captions**, **Short**, and **Save**.
 
-Captions and Short appear only while the open file is `rough_cut.mp4` with a `cuts.json` beside it. After a hand trim, or after Save has moved playback to the saved movie, those two buttons are gone and the last button reads **Export**. Settings and Shots are in the sidebar, not on this bar.
+**Captions** and **Short** use the `cuts.json` from this cut. They stay after **Save** copies the movie. Opening a different video clears them. A hand-trim export is a new file, and that file does not carry those two buttons. Once the timeline has been trimmed, the last button reads **Export**. Settings and Shots are in the sidebar, not on this bar.
 
 Under the bar, a monospace line. An unedited rough cut that is still only a temp file reads "Not yet saved". A hand trim reads "Trimmed by hand · not yet exported". During save, captions, or a short, that line is replaced by the status. A notice uses the accent for about five seconds.
 
 **Save** copies the movie. **Export** re-encodes a hand trim. Both are disabled while busy.
+
+When the open movie is this cut's plan, the filmstrip is one block per kept range, in order. A handle changes that range inside its own file. Removing a block drops it. Double-clicking a gap puts back the range from when Watch opened. Undo is one gesture. Playback loads the source under the playhead and does not trim the baked file. An untouched plan still **Save**s by copying the movie. Once a handle has moved, the last button reads **Export** and re-encodes. **Captions** and **Short** stay disabled until that export. A movie that is not a plan cut still trims as one timeline.
 
 ## Screen: Settings
 
@@ -197,14 +205,14 @@ Hand trim that has not been exported. Title "Unexported edit". Body: "Your edit 
 Generate these as separate desktop frames, in this order. Keep the chrome identical across them.
 
 1. Shots, empty.
-2. Shots, four files, Cut filled.
+2. Shots, four files, Cut filled, with This movie, the pace, Open card, Close card, and Dip to black.
 3. Shots, one file missing, Cut disabled.
 4. Shots, drag hovering, accent frame.
-5. Shots, four lines, Render filled, Cut again.
+5. Shots, four lines, Render filled, Cut again, plan still under the shot list, Change this cut under Lines.
 6. Shots, rendering, status "Rendering 42%", buttons disabled and reading Cutting….
 7. Watch, rough cut, Captions and Short visible, Save.
 8. Watch, zoomed filmstrip, time line with "zoomed".
-9. Watch, after a hand trim, Export, no Captions or Short.
+9. Watch, after a hand trim of the rough cut, Captions and Short still visible, Export.
 10. Settings, Spoken cuts on, key not set in accent.
 11. Settings, Spoken cuts off, the one-line explanation, key row secondary.
 12. Settings opened from Watch, with Back to Watch beside Done.

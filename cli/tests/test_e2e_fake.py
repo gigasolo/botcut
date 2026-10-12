@@ -165,3 +165,50 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
         check=True,
     )
     assert float(probe.stdout.strip()) > 3.0
+
+
+def test_trimmed_plan_keeps_hand_segments(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_probe(path):
+        return {"path": path, "duration": 8.0, "width": 320, "height": 180, "audio": False}
+
+    def fake_render(segments, clips, dst, *_args, **_kwargs):
+        seen["segments"] = segments
+        seen["clips"] = clips
+        seen["dst"] = dst
+
+    monkeypatch.setattr("botcut.cli.probe", fake_probe)
+    monkeypatch.setattr("botcut.cli.render_with_progress", fake_render)
+
+    out = tmp_path / "out"
+    out.mkdir()
+    hand = [{"clip": 0, "start": 0.4, "end": 1.5, "reason": "story", "note": "keep"}]
+    doc = {
+        "version": 1,
+        "mode": "speech",
+        "intent": "A quiet ride",
+        "clips": [{"index": 0, "path": "/tmp/a.mp4", "duration": 8.0}],
+        "lines": [
+            {
+                "id": 1,
+                "clip": 0,
+                "start": 1.0,
+                "end": 2.0,
+                "text": "hello",
+                "keep": True,
+                "reason": "story",
+            }
+        ],
+        "tighten": {"snap": True, "max_pause": 0.8},
+        "segments": hand,
+        "trimmed": True,
+        "dropped": [],
+    }
+    (out / "cuts.json").write_text(json.dumps(doc))
+    render_saved(str(out))
+    assert seen["segments"] == hand
+    written = json.loads((out / "cuts.json").read_text())
+    assert written["segments"] == hand
+    assert written["trimmed"] is True
+    assert written["lines"][0]["text"] == "hello"

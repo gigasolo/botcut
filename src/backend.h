@@ -180,6 +180,8 @@ public:
     Q_INVOKABLE void requestThumbs(double start, double end);
     Q_INVOKABLE void showShots();
     Q_INVOKABLE void showMovie();
+    // Back to the home of the plan. Clears the window, never the files on disk.
+    Q_INVOKABLE void closeProject();
 
 signals:
     void infoChanged();

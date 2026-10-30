@@ -210,6 +210,39 @@ Item {
             Layout.fillWidth: true
             Layout.preferredHeight: 36
             spacing: 16
+            // The way back to the home of the plan. Only the window closes, not the files.
+            Item {
+                id: homeLink
+                objectName: "listsHome"
+                visible: backend.tray.length > 0 || host.hasVideo
+                enabled: !backend.busy
+                width: homeText.implicitWidth + 4
+                height: 36
+                opacity: enabled ? 0.62 : 0.38
+                Label {
+                    id: homeText
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 6
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: qsTr("Lists")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: homeLink.enabled
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: host.closeProject()
+                }
+            }
+            Rectangle {
+                visible: homeLink.visible
+                width: 1
+                height: 16
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 8
+                color: theme.raised
+            }
             StepTab {
                 objectName: "shotsStep"
                 label: backend.tray.length > 0 ? qsTr("Shots %1").arg(backend.tray.length) : qsTr("Shots")
@@ -451,34 +484,30 @@ Item {
                     delegate: ShotRow {}
                 }
 
-                Column {
+                // This list's own actions, under its shots.
+                Row {
                     Layout.fillWidth: true
                     spacing: 4
-                    Row {
-                        spacing: 8
-                        ActionButton {
-                            text: qsTr("Add shots…")
-                            enabled: !backend.busy
-                            onClicked: backend.addVideosDialog()
-                        }
-                        ActionButton {
-                            text: qsTr("Add a title card…")
-                            enabled: !backend.busy
-                            onClicked: host.openTitleCard()
-                        }
+                    ActionButton {
+                        leftPadding: 10
+                        rightPadding: 10
+                        text: qsTr("Add shots…")
+                        enabled: !backend.busy
+                        onClicked: backend.addVideosDialog()
                     }
-                    Row {
-                        spacing: 8
-                        ActionButton {
-                            text: qsTr("Open a saved list…")
-                            enabled: !backend.busy
-                            onClicked: backend.openCutListDialog()
-                        }
-                        ActionButton {
-                            text: qsTr("Save list…")
-                            enabled: backend.tray.length > 0
-                            onClicked: backend.saveCutListDialog()
-                        }
+                    ActionButton {
+                        leftPadding: 10
+                        rightPadding: 10
+                        text: qsTr("Add a title card…")
+                        enabled: !backend.busy
+                        onClicked: host.openTitleCard()
+                    }
+                    ActionButton {
+                        leftPadding: 10
+                        rightPadding: 10
+                        text: qsTr("Save list…")
+                        enabled: backend.tray.length > 0
+                        onClicked: backend.saveCutListDialog()
                     }
                 }
             }
@@ -489,15 +518,83 @@ Item {
                 Layout.fillHeight: true
                 spacing: 8
 
+                ListView {
+                    id: lineList
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    spacing: 4
+                    model: backend.selects
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+                    delegate: LineRow {
+                        timeText: root.clockOf(modelData)
+                        reasonText: root.reasonText(modelData.reason)
+                        coverText: root.coverText(modelData)
+                        selected: host.viewStep === "lines" && index === host.currentLine
+                        marked: host.viewStep === "movie" && index === root.playheadIndex
+                        onPicked: host.currentLine = index
+                        onPlayRequested: host.playLine(modelData)
+                    }
+                }
+
+                // A chat with the cut: the last note above, the field at the bottom.
                 Item {
                     id: reviseBlock
                     visible: host.viewStep === "lines"
                     Layout.fillWidth: true
                     Layout.preferredHeight: visible ? reviseCol.implicitHeight : 0
+                    Rectangle {
+                        width: parent.width
+                        height: 1
+                        color: theme.raised
+                    }
                     Column {
                         id: reviseCol
                         width: parent.width
+                        topPadding: 9
                         spacing: 8
+                        Row {
+                            width: parent.width
+                            spacing: 12
+                            visible: root.lastNote !== "" || backend.canRevert
+                            Rectangle {
+                                visible: root.lastNote !== ""
+                                width: Math.min(noteText.implicitWidth + 16,
+                                                Math.max(0, parent.width - (undoChange.visible ? undoChange.width + 12 : 0)))
+                                height: noteText.implicitHeight + 8
+                                radius: theme.radius
+                                color: theme.surface
+                                Label {
+                                    id: noteText
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    verticalAlignment: Text.AlignVCenter
+                                    text: root.lastNote
+                                    color: theme.foreground
+                                    opacity: 0.62
+                                    font.pixelSize: 12
+                                    elide: Text.ElideRight
+                                }
+                            }
+                            Label {
+                                id: undoChange
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: backend.canRevert
+                                text: qsTr("Undo this change")
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                enabled: !backend.busy
+                                opacity: enabled ? 1 : 0.45
+                                MouseArea {
+                                    anchors.fill: parent
+                                    enabled: parent.enabled
+                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: backend.revertRevise()
+                                }
+                            }
+                        }
                         Item {
                             id: reviseRow
                             width: parent.width
@@ -551,55 +648,6 @@ Item {
                                 elide: Text.ElideRight
                             }
                         }
-                        Row {
-                            width: parent.width
-                            spacing: 12
-                            visible: root.lastNote !== "" || backend.canRevert
-                            Label {
-                                visible: root.lastNote !== ""
-                                width: Math.min(implicitWidth, Math.max(0, parent.width - undoChange.width - 12))
-                                text: root.lastNote
-                                color: theme.foreground
-                                opacity: 0.62
-                                font.pixelSize: 12
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                id: undoChange
-                                visible: backend.canRevert
-                                text: qsTr("Undo this change")
-                                color: theme.foreground
-                                font.pixelSize: 13
-                                enabled: !backend.busy
-                                opacity: enabled ? 1 : 0.45
-                                MouseArea {
-                                    anchors.fill: parent
-                                    enabled: parent.enabled
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: backend.revertRevise()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                ListView {
-                    id: lineList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    spacing: 4
-                    model: backend.selects
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
-                    delegate: LineRow {
-                        timeText: root.clockOf(modelData)
-                        reasonText: root.reasonText(modelData.reason)
-                        coverText: root.coverText(modelData)
-                        selected: host.viewStep === "lines" && index === host.currentLine
-                        marked: host.viewStep === "movie" && index === root.playheadIndex
-                        onPicked: host.currentLine = index
-                        onPlayRequested: host.playLine(modelData)
                     }
                 }
             }
@@ -611,51 +659,6 @@ Item {
                 color: theme.foreground
                 font.pixelSize: 13
                 wrapMode: Text.WordWrap
-            }
-        }
-
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.preferredHeight: 36
-            Item {
-                objectName: "settingsButton"
-                Layout.preferredWidth: settingsText.implicitWidth + 8
-                Layout.fillHeight: true
-                Label {
-                    id: settingsText
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: qsTr("Settings")
-                    color: theme.foreground
-                    opacity: 0.62
-                    font.pixelSize: 13
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: {
-                        if (host.settingsOpen)
-                            host.closeSettings()
-                        else
-                            host.openSettings()
-                    }
-                }
-            }
-            Item { Layout.fillWidth: true }
-            Item {
-                Layout.preferredWidth: 32
-                Layout.fillHeight: true
-                Label {
-                    anchors.centerIn: parent
-                    text: "?"
-                    color: theme.foreground
-                    opacity: 0.62
-                    font.pixelSize: 16
-                }
-                MouseArea {
-                    anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: host.helpVisible = !host.helpVisible
-                }
             }
         }
     }

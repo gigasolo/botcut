@@ -389,6 +389,55 @@ void Backend::showMovie() {
     emit gatheringChanged();
 }
 
+void Backend::closeProject() {
+    if (m_busy)
+        return;
+    const bool wasUnsaved = renderedUnsaved();
+    m_tray.clear();
+    m_trayIndex = -1;
+    m_selects.clear();
+    m_undoSelects.clear();
+    m_covers.clear();
+    m_undoCovers.clear();
+    m_cutClips.clear();
+    m_cutOut.clear();
+    m_listPath.clear();
+    clearReviseThread();
+
+    stopThumbs();
+    m_info = ffmpeg::VideoInfo();
+    m_path.clear();
+    m_source = QUrl();
+    m_timeline.reset(0.0);
+    m_planCuts.clear();
+    m_planMovie.clear();
+    m_plan.clear();
+    m_renderedHere = false;
+    m_cutSaved = false;
+    m_fullThumbs.clear();
+    m_fullThumbsComplete = false;
+    m_thumbCount = 0;
+    m_thumbAvailableCount = 0;
+    m_thumbReadyCount = 0;
+    ++m_thumbRevision;
+    m_provider->setImages(QVector<QImage>());
+
+    const bool leaveMovie = !m_gathering;
+    m_gathering = true;
+    emit selectsChanged();
+    emit coversChanged();
+    emit cutClipsChanged();
+    emit trayChanged();
+    emit thumbsChanged();
+    emit planChanged();
+    emit infoChanged();
+    if (wasUnsaved)
+        emit renderedUnsavedChanged();
+    if (leaveMovie)
+        emit gatheringChanged();
+    setStatus(QString());
+}
+
 bool Backend::parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
                             edit::Clips *clips, QString *error) {
     const QJsonDocument doc = QJsonDocument::fromJson(json);

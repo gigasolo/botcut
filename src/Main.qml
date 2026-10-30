@@ -299,6 +299,16 @@ ApplicationWindow {
         if (returnToMovie)
             backend.showMovie();
     }
+    // Back to the recent lists. The files on disk stay where they are.
+    function closeProject() {
+        if (backend.busy)
+            return;
+        movie.player.stop();
+        planPlaying = false;
+        shotsPinned = false;
+        currentLine = -1;
+        backend.closeProject();
+    }
     function openTitleCard() {
         titleCardOpen = true;
     }
@@ -829,104 +839,122 @@ ApplicationWindow {
                     color: theme.raised
                 }
 
-                Item {
+                // The picture, and under it the filmstrip that trims it.
+                ColumnLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-
-                    Rectangle {
-                        anchors.fill: parent
-                        anchors.margins: 12
-                        radius: theme.radius
-                        color: "black"
-                        clip: true
-
-                        VideoOutput {
-                            id: videoOut
-                            anchors.fill: parent
-                        }
-                        Connections {
-                            target: videoOut.videoSink
-                            function onVideoFrameChanged(frame) {
-                                movie.player.finishPriming();
-                            }
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            z: 1
-                            enabled: win.hasVideo || win.previewing
-                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: togglePlay()
-                        }
-                        PlayButton {
-                            visible: win.gathering && win.previewing && !win.hasVideo
-                            z: 2
-                            anchors.left: parent.left
-                            anchors.bottom: parent.bottom
-                            anchors.margins: 12
-                            playing: movie.player.playbackState === MediaPlayer.PlayingState
-                                     && !movie.player.priming
-                            onClicked: togglePlay()
-                        }
-                        Column {
-                            visible: win.gathering && backend.tray.length === 0
-                            z: 2
-                            anchors.centerIn: parent
-                            width: Math.min(440, parent.width - 48)
-                            spacing: 8
-                            Label {
-                                width: parent.width
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.WordWrap
-                                text: qsTr("Drop the shots for this movie here.")
-                                color: theme.foreground
-                                font.pixelSize: 16
-                            }
-                            Label {
-                                width: parent.width
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.WordWrap
-                                text: qsTr("MP4, MOV, or MKV, straight from your phone or camera.")
-                                color: theme.foreground
-                                opacity: 0.62
-                                font.pixelSize: 13
-                            }
-                            ActionButton {
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                text: qsTr("Trim one file instead…")
-                                enabled: !backend.busy
-                                onClicked: openVideo()
-                            }
-                        }
-                    }
-                }
-            }
-
-            Column {
-                visible: win.hasVideo && !win.gathering
-                Layout.fillWidth: true
-                width: parent.width
-                spacing: 4
-
-                RowLayout {
-                    width: parent.width
-                    height: 76
-                    spacing: 12
+                    spacing: 0
 
                     Item {
-                        Layout.preferredWidth: 12
+                        Layout.fillWidth: true
                         Layout.fillHeight: true
+
+                        Rectangle {
+                            anchors.fill: parent
+                            anchors.margins: 12
+                            radius: theme.radius
+                            color: "black"
+                            clip: true
+
+                            VideoOutput {
+                                id: videoOut
+                                anchors.fill: parent
+                            }
+                            Connections {
+                                target: videoOut.videoSink
+                                function onVideoFrameChanged(frame) {
+                                    movie.player.finishPriming();
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                z: 1
+                                enabled: win.hasVideo || win.previewing
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: togglePlay()
+                            }
+                            PlayButton {
+                                visible: win.gathering && win.previewing && !win.hasVideo
+                                z: 2
+                                anchors.left: parent.left
+                                anchors.bottom: parent.bottom
+                                anchors.margins: 12
+                                playing: movie.player.playbackState === MediaPlayer.PlayingState
+                                         && !movie.player.priming
+                                onClicked: togglePlay()
+                            }
+                            Column {
+                                visible: win.gathering && backend.tray.length === 0
+                                z: 2
+                                anchors.centerIn: parent
+                                width: Math.min(440, parent.width - 48)
+                                spacing: 8
+                                Label {
+                                    width: parent.width
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    text: qsTr("Drop the shots for this movie here.")
+                                    color: theme.foreground
+                                    font.pixelSize: 16
+                                }
+                                Label {
+                                    width: parent.width
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    text: qsTr("MP4, MOV, or MKV, straight from your phone or camera.")
+                                    color: theme.foreground
+                                    opacity: 0.62
+                                    font.pixelSize: 13
+                                }
+                                ActionButton {
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    text: qsTr("Trim one file instead…")
+                                    enabled: !backend.busy
+                                    onClicked: openVideo()
+                                }
+                            }
+                            // Over the picture, in the window only. Export never sees it.
+                            Row {
+                                visible: win.hasVideo && !win.gathering
+                                z: 2
+                                anchors.left: parent.left
+                                anchors.bottom: parent.bottom
+                                anchors.margins: 12
+                                spacing: 8
+                                PlayButton {
+                                    playing: movie.player.playbackState === MediaPlayer.PlayingState
+                                             && !movie.player.priming
+                                    enabled: backend.duration > 0
+                                    onClicked: togglePlay()
+                                }
+                                Rectangle {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: movieClock.implicitWidth + 16
+                                    height: 28
+                                    radius: theme.radius
+                                    color: theme.raised
+                                    Label {
+                                        id: movieClock
+                                        anchors.centerIn: parent
+                                        text: lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
+                                        color: theme.foreground
+                                        font.pixelSize: 13
+                                        font.family: "monospace"
+                                    }
+                                }
+                            }
+                        }
                     }
-                    PlayButton {
-                        playing: movie.player.playbackState === MediaPlayer.PlayingState
-                                 && !movie.player.priming
-                        enabled: backend.duration > 0
-                        onClicked: togglePlay()
-                    }
+
                     EditBar {
                         id: editBar
                         objectName: "editBar"
+                        visible: win.hasVideo && !win.gathering
                         Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignVCenter
+                        Layout.preferredHeight: implicitHeight
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: editBar.zoomed ? 4 : 12
                         onScrub: (seconds, segment, source) => {
                             movie.player.pause();
                             if (backend.planCut && segment >= 0) {
@@ -937,28 +965,19 @@ ApplicationWindow {
                             seekTo(seconds);
                         }
                     }
+
                     Label {
-                        text: lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
+                        visible: editBar.visible && editBar.zoomed
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: 8
+                        text: qsTr("Zoomed to one shot. Z zooms out.")
                         color: theme.foreground
                         opacity: 0.62
                         font.pixelSize: 13
-                        font.family: "monospace"
+                        elide: Text.ElideRight
                     }
-                    Item {
-                        Layout.preferredWidth: 16
-                        Layout.fillHeight: true
-                    }
-                }
-
-                Label {
-                    visible: editBar.zoomed
-                    width: parent.width
-                    leftPadding: 16
-                    rightPadding: 16
-                    text: qsTr("Zoomed to one shot. Z zooms out.")
-                    color: theme.foreground
-                    opacity: 0.62
-                    font.pixelSize: 13
                 }
             }
 

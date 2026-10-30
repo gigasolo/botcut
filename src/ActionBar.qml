@@ -60,6 +60,48 @@ Rectangle {
             verticalAlignment: Text.AlignVCenter
         }
 
+        Item {
+            objectName: "settingsButton"
+            Layout.preferredWidth: settingsText.implicitWidth + 16
+            Layout.minimumWidth: Layout.preferredWidth
+            Layout.fillHeight: true
+            Label {
+                id: settingsText
+                anchors.centerIn: parent
+                text: qsTr("Settings")
+                color: theme.foreground
+                opacity: 0.62
+                font.pixelSize: 13
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    if (host.settingsOpen)
+                        host.closeSettings()
+                    else
+                        host.openSettings()
+                }
+            }
+        }
+        Item {
+            Layout.preferredWidth: 32
+            Layout.minimumWidth: 32
+            Layout.fillHeight: true
+            Label {
+                anchors.centerIn: parent
+                text: "?"
+                color: theme.foreground
+                opacity: 0.62
+                font.pixelSize: 16
+            }
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: host.helpVisible = !host.helpVisible
+            }
+        }
+
         ActionButton {
             text: qsTr("Open a saved list…")
             visible: !bar.running && bar.step === "empty"

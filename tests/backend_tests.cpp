@@ -242,6 +242,15 @@ public:
     }
     Q_INVOKABLE void showShots() {}
     Q_INVOKABLE void showMovie() {}
+    Q_INVOKABLE void closeProject() {
+        if (m_busy)
+            return;
+        ++closeCount;
+        m_tray.clear();
+        m_selects.clear();
+        m_source = QUrl();
+        emit infoChanged();
+    }
 
     void announceInfo() {
         timeline.reset(m_duration);
@@ -257,6 +266,7 @@ public:
     QString m_cutMode = QStringLiteral("speech");
     int openCount = 0;
     int exportCount = 0;
+    int closeCount = 0;
     int thumbRequestCount = 0;
     double lastThumbStart = 0;
     double lastThumbEnd = 0;
@@ -403,6 +413,7 @@ private slots:
     void savedKeyLoadsAndEnvironmentKeyIsNotStored();
     void typedKeyStaysInTheChildEnvironment();
     void gatherLabelsFit();
+    void closeProjectKeepsTheFiles();
     void linePlayReachedEnd();
     void cutLaunchUsesTheCliOrUv();
     void sceneTransitionRoundTrips();
@@ -1202,12 +1213,15 @@ void BackendTests::gatherLabelsFit() {
     const QString paceLabel = QStringLiteral("Open \u00B7 keeps long pauses");
     QQuickItem *pace = visibleItemWithText(window, paceLabel);
     QVERIFY2(fullyInside(pace, paceLabel).isEmpty(), qPrintable(fullyInside(pace, paceLabel)));
-    for (const QString &label : {QStringLiteral("Open a saved list\u2026"), QStringLiteral("Save list\u2026"),
-                                 QStringLiteral("Add a title card\u2026")}) {
+    for (const QString &label : {QStringLiteral("Save list\u2026"), QStringLiteral("Add a title card\u2026"),
+                                 QStringLiteral("Add shots\u2026"), QStringLiteral("Lists")}) {
         QVERIFY2(fullyInside(visibleItemWithText(window, label), label).isEmpty(),
                  qPrintable(fullyInside(visibleItemWithText(window, label), label)));
         QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
     }
+    // An open list shows its own actions. Opening another list starts from the home.
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Open a saved list\u2026")));
+    QVERIFY(window->findChild<QQuickItem *>(QStringLiteral("settingsButton"))->isVisible());
 
     QQuickItem *addCard = visibleItemWithText(window, QStringLiteral("Add a title card\u2026"));
     QVERIFY(addCard);
@@ -1288,6 +1302,80 @@ void BackendTests::gatherLabelsFit() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(pace));
     QCOMPARE(backend.pace(), paceBefore);
     QCOMPARE(backend.pace(), QStringLiteral("open"));
+
+    QQuickItem *home = window->findChild<QQuickItem *>(QStringLiteral("listsHome"));
+    QVERIFY(home);
+    QVERIFY(home->isVisible());
+    QVERIFY(!home->isEnabled());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(home));
+    QCOMPARE(backend.closeCount, 0);
+
+    backend.setBusy(false);
+    QTest::qWait(50);
+    QVERIFY(home->isEnabled());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(home));
+    QTest::qWait(50);
+    QCOMPARE(backend.closeCount, 1);
+    QVERIFY(backend.tray().isEmpty());
+    QVERIFY(!home->isVisible());
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Pick up where you left off")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Change this cut")));
+    for (const QString &label : {QStringLiteral("Open a saved list…"), QStringLiteral("Add shots…")}) {
+        QVERIFY2(fullyInside(visibleItemWithText(window, label), label).isEmpty(),
+                 qPrintable(fullyInside(visibleItemWithText(window, label), label)));
+        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
+    }
+    QVERIFY(settings->isVisible());
+    QVERIFY2(fullyInside(settings, QStringLiteral("Settings")).isEmpty(),
+             qPrintable(fullyInside(settings, QStringLiteral("Settings"))));
+}
+
+void BackendTests::closeProjectKeepsTheFiles() {
+    const QString movie = makeVideo(QStringLiteral("close-project.mp4"), 2.0, false);
+    QVERIFY(!movie.isEmpty());
+    const QString cuts = m_dir.filePath(QStringLiteral("close-project-cuts.json"));
+    {
+        QFile file(cuts);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("{}");
+    }
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.addTrayFiles({movie});
+    const QString list = m_dir.filePath(QStringLiteral("close-project.botcut.json"));
+    backend.writeCutListFile(QUrl::fromLocalFile(list));
+    QVERIFY(QFileInfo(list).isFile());
+    QVERIFY(backend.load(QUrl::fromLocalFile(movie)));
+    QVERIFY(!backend.gathering());
+    const int lists = backend.recentLists().size();
+    QVERIFY(lists > 0);
+
+    backend.m_busy = true;
+    backend.closeProject();
+    QVERIFY(!backend.gathering());
+    QCOMPARE(backend.tray().size(), 1);
+    backend.m_busy = false;
+
+    QSignalSpy gathering(&backend, &Backend::gatheringChanged);
+    QSignalSpy tray(&backend, &Backend::trayChanged);
+    backend.closeProject();
+    QVERIFY(backend.gathering());
+    QCOMPARE(gathering.count(), 1);
+    QVERIFY(tray.count() > 0);
+    QVERIFY(backend.tray().isEmpty());
+    QCOMPARE(backend.trayIndex(), -1);
+    QVERIFY(backend.selects().isEmpty());
+    QVERIFY(backend.source().isEmpty());
+    QCOMPARE(backend.duration(), 0.0);
+    QVERIFY(!backend.planCut());
+    QVERIFY(!backend.renderedUnsaved());
+    QCOMPARE(backend.step(), QStringLiteral("empty"));
+    QVERIFY(!backend.busy());
+    QCOMPARE(backend.recentLists().size(), lists);
+    QVERIFY(QFileInfo(movie).isFile());
+    QVERIFY(QFileInfo(list).isFile());
+    QVERIFY(QFileInfo(cuts).isFile());
 }
 
 void BackendTests::linePlayReachedEnd() {

@@ -40,7 +40,7 @@ Rectangle {
         anchors.top: parent.top
         width: parent.width
         height: 1
-        color: "#2c2c2f"
+        color: theme.raised
     }
 
     RowLayout {

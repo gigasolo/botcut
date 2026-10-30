@@ -14,7 +14,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: theme.radius
-        color: "#2c2c2f"
+        color: theme.raised
     }
 
     Shape {

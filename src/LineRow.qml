@@ -17,7 +17,7 @@ Rectangle {
     width: ListView.view ? ListView.view.width : implicitWidth
     height: body.implicitHeight + 16
     radius: theme.radius
-    color: selected || marked ? "#2a2a2e" : "transparent"
+    color: selected || marked ? theme.selected : "transparent"
     opacity: modelData && modelData.keep === false ? 0.45 : 1
 
     Rectangle {

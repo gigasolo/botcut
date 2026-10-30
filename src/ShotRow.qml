@@ -9,7 +9,7 @@ Rectangle {
     width: ListView.view ? ListView.view.width : implicitWidth
     height: body.implicitHeight + 16
     radius: theme.radius
-    color: selected ? "#2a2a2e" : "transparent"
+    color: selected ? theme.selected : "transparent"
 
     readonly property bool selected: index === backend.trayIndex
     readonly property bool exists: backend.trayFileExists(modelData)
@@ -58,7 +58,7 @@ Rectangle {
                 Layout.alignment: Qt.AlignVCenter
                 radius: 4
                 clip: true
-                color: "#0e0e10"
+                color: theme.background
                 Image {
                     id: shotImage
                     anchors.fill: parent

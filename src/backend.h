@@ -2,7 +2,6 @@
 
 #include <QByteArray>
 #include <QFileInfo>
-#include <QFileSystemWatcher>
 #include <QHash>
 #include <QImage>
 #include <QObject>
@@ -66,8 +65,6 @@ class Backend : public QObject {
     // A plan cut's filmstrip is one block per cuts.json segment, not the baked file.
     Q_PROPERTY(bool planCut READ planCut NOTIFY planChanged)
     Q_PROPERTY(QObject *plan READ plan CONSTANT)
-    Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
-    Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
     Q_PROPERTY(QObject *timeline READ timeline CONSTANT)
 
 public:
@@ -123,16 +120,7 @@ public:
     void setBrollMix(bool value);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
-    QString themeAccent() const { return m_themeAccent; }
-    QString themeAccentForeground() const;
     Timeline *timeline() { return &m_timeline; }
-
-    // The accent from an omarchy colors.toml, or the fallback when the file is
-    // missing or holds no usable accent — which is what keeps omacut working on
-    // distros without omarchy themes.
-    static QString accentFromColorsFile(const QString &path, const QString &fallback);
-    // "black" or "white", whichever stays legible on the given color.
-    static QString foregroundFor(const QString &color);
 
     // Load a video (probes it, then kicks off thumbnail generation).
     Q_INVOKABLE bool load(const QUrl &url);
@@ -216,7 +204,6 @@ signals:
     void recentsChanged();
     void gatheringChanged();
     void apiKeyChanged();
-    void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void renderedUnsavedChanged();
@@ -245,8 +232,6 @@ private:
     static bool trayThumbFresh(const TrayThumbEntry &entry, const QFileInfo &info);
     void revealNextThumb();
     void wireFilePicker();
-    void loadThemeAccent();
-    void watchTheme();
     void startCutProcess(const CutLaunch &launch);
     void readCutOutput();
     void cutProcessFinished(int code, QProcess::ExitStatus status);
@@ -356,7 +341,5 @@ private:
     QProcess *m_cutProcess = nullptr;
     QString m_cutLog;
     QString m_cutLine;
-    QString m_themeAccent;
     QTimer m_thumbRevealTimer;
-    QFileSystemWatcher m_themeWatcher;
 };

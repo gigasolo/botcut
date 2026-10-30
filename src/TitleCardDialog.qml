@@ -30,7 +30,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#99000000"
+        color: theme.scrim
     }
     MouseArea { anchors.fill: parent }
 
@@ -39,8 +39,8 @@ Item {
         width: Math.min(480, parent.width - 48)
         height: column.implicitHeight + 48
         radius: theme.radius
-        color: "#1c1c1e"
-        border.color: "#39393e"
+        color: theme.surface
+        border.color: theme.line
 
         MouseArea { anchors.fill: parent }
 
@@ -61,7 +61,7 @@ Item {
                 width: parent.width
                 height: 36
                 radius: theme.radius
-                color: "#0e0e10"
+                color: theme.background
                 border.width: field.activeFocus ? 1 : 0
                 border.color: theme.accent
                 opacity: field.enabled ? 1 : 0.45

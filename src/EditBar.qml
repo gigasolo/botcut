@@ -16,8 +16,8 @@ Item {
     opacity: enabled ? 1 : 0.45
     readonly property var clips: timeline.clips
     property real playheadSec: 0
-    property color accent: "#FFD60A"
-    property color accentForeground: "black"
+    property color accent: theme.accent
+    property color accentForeground: theme.accentForeground
     property bool zoomed: false
     // Frozen at zoom time, so dragging a handle doesn't rescale the view under it.
     property real viewStartSec: 0
@@ -34,7 +34,7 @@ Item {
     readonly property real windowStart: zoomed ? viewStartSec : 0
     readonly property real windowEnd: zoomed ? viewEndSec : durationSec
     readonly property real windowLen: Math.max(windowEnd - windowStart, 0.001)
-    readonly property color film: "#1c1c1e"
+    readonly property color film: theme.surface
 
     signal scrub(real seconds, int segment, real source)
 
@@ -87,7 +87,7 @@ Item {
                 readonly property real to: index === root.clips.length ? root.durationSec : root.clips[index].start
                 visible: to > from
                 x: Math.round(root.xForTime(from)); width: Math.max(0, Math.round(root.xForTime(to)) - x); height: track.height
-                color: area.gapHovered === index ? "#90000000" : "#c8000000"
+                color: area.gapHovered === index ? Qt.rgba(0, 0, 0, 0.565) : Qt.rgba(0, 0, 0, 0.784)
             }
         }
     }
@@ -154,7 +154,7 @@ Item {
                     anchors.topMargin: 7; anchors.rightMargin: root.handleW + 4
                     width: 20; height: 20; radius: 10
                     readonly property bool hot: area.removeHovered
-                    color: hot ? root.accent : "#e0202023"
+                    color: hot ? root.accent : Qt.rgba(0, 0, 0, 0.878)
                     Text {
                         anchors.centerIn: parent; anchors.verticalCenterOffset: -1
                         text: "×"; font.pixelSize: 16; font.weight: Font.DemiBold
@@ -184,7 +184,7 @@ Item {
         }
         visible: root.enabled && (dragging || (area.mode === 0 && area.containsMouse && !area.removeHovered && hint !== ""))
         width: label.implicitWidth + 20; height: dragging ? 32 : 26
-        radius: 7; color: "#2c2c2f"
+        radius: 7; color: theme.raised
         x: Math.max(0, Math.min(root.width - width, (dragging ? root.xForTime(area.activeTime) : area.mouseX) - width / 2)); y: -height - 8
         Text {
             id: label; anchors.centerIn: parent; color: "white"

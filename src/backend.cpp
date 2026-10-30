@@ -1,6 +1,5 @@
 #include "backend.h"
 
-#include <QColor>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
@@ -16,7 +15,6 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
-#include <QTextStream>
 #include <QUuid>
 
 #include <algorithm>
@@ -31,15 +29,6 @@
 namespace {
 constexpr int kThumbCount = 12;
 constexpr int kThumbRevealMs = 70;
-const QString kDefaultAccent = QStringLiteral("#FFD60A");
-
-QString omarchyCurrentDir() {
-    return QDir::homePath() + QStringLiteral("/.local/state/omarchy/current");
-}
-
-QString omarchyColorsPath() {
-    return omarchyCurrentDir() + QStringLiteral("/theme/colors.toml");
-}
 
 bool isTempRoughCut(const QString &path) {
     const QFileInfo info(path);
@@ -140,7 +129,7 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
 Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, bool ownsKeys,
                  QObject *parent)
     : QObject(parent), m_provider(provider), m_filePicker(filePicker),
-      m_intent(defaultCutIntent()), m_keys(keys), m_ownsKeys(ownsKeys), m_themeAccent(kDefaultAccent) {
+      m_intent(defaultCutIntent()), m_keys(keys), m_ownsKeys(ownsKeys) {
     if (!m_filePicker->parent())
         m_filePicker->setParent(this);
     wireFilePicker();
@@ -151,16 +140,6 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     m_thumbRevealTimer.setInterval(kThumbRevealMs);
     connect(&m_thumbRevealTimer, &QTimer::timeout, this, &Backend::revealNextThumb);
 
-    // Follow omarchy theme switches live. The theme lives behind a symlink that
-    // gets swapped, so the reload also re-arms the watch paths every time.
-    const auto themeChanged = [this] {
-        watchTheme();
-        loadThemeAccent();
-    };
-    connect(&m_themeWatcher, &QFileSystemWatcher::directoryChanged, this, themeChanged);
-    connect(&m_themeWatcher, &QFileSystemWatcher::fileChanged, this, themeChanged);
-    watchTheme();
-    loadThemeAccent();
     if (m_keys)
         m_apiKey = m_keys->load();
     const QString stored = QSettings().value(QStringLiteral("sceneTransition"), QStringLiteral("dip")).toString();
@@ -296,7 +275,7 @@ bool Backend::describeJob(const QString &status, QString *job, qreal *progress, 
         return fill(QStringLiteral("reading"), 0, tr("Reading shots"));
     if (status == QStringLiteral("Choosing takes"))
         return fill(QStringLiteral("choosing"), 0, tr("Choosing lines"));
-    if (status == QStringLiteral("Revising"))
+    if (status == QStringLiteral("Revising") || status == QStringLiteral("Changing…"))
         return fill(QStringLiteral("changing"), 0, tr("Changing the list"));
     if (status == QStringLiteral("Making the card…"))
         return fill(QStringLiteral("card"), 0, tr("Making the title card"));
@@ -306,7 +285,7 @@ bool Backend::describeJob(const QString &status, QString *job, qreal *progress, 
         return fill(QStringLiteral("short"), 0, tr("Making the short"));
     if (status == QStringLiteral("Saving…"))
         return fill(QStringLiteral("saving"), 0, tr("Saving…"));
-    if (status == QStringLiteral("Loading..."))
+    if (status == QStringLiteral("Opening…"))
         return fill(QStringLiteral("opening"), 0, tr("Opening…"));
     return fill(QString(), -1, QString());
 }
@@ -349,68 +328,6 @@ QString Backend::computeStep() const {
     return QStringLiteral("shotsReady");
 }
 
-QString Backend::accentFromColorsFile(const QString &path, const QString &fallback) {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return fallback;
-
-    QTextStream in(&file);
-    while (!in.atEnd()) {
-        const QString line = in.readLine().trimmed();
-        if (line.isEmpty() || line.startsWith(QLatin1Char('#')))
-            continue;
-
-        const int equals = line.indexOf(QLatin1Char('='));
-        if (equals < 0 || line.left(equals).trimmed() != QStringLiteral("accent"))
-            continue;
-
-        QString value = line.mid(equals + 1).trimmed();
-        if (value.size() >= 2
-                && ((value.front() == QLatin1Char('"') && value.back() == QLatin1Char('"'))
-                    || (value.front() == QLatin1Char('\'') && value.back() == QLatin1Char('\''))))
-            value = value.mid(1, value.size() - 2);
-
-        return QColor::fromString(value).isValid() ? value : fallback;
-    }
-    return fallback;
-}
-
-QString Backend::foregroundFor(const QString &color) {
-    const QColor parsed = QColor::fromString(color);
-    if (!parsed.isValid())
-        return QStringLiteral("black");
-    const double luminance = 0.299 * parsed.redF()
-        + 0.587 * parsed.greenF() + 0.114 * parsed.blueF();
-    return luminance < 0.5 ? QStringLiteral("white") : QStringLiteral("black");
-}
-
-QString Backend::themeAccentForeground() const {
-    return foregroundFor(m_themeAccent);
-}
-
-void Backend::loadThemeAccent() {
-    const QString accent = accentFromColorsFile(omarchyColorsPath(), kDefaultAccent);
-    if (accent == m_themeAccent)
-        return;
-    m_themeAccent = accent;
-    emit themeAccentChanged();
-}
-
-void Backend::watchTheme() {
-    const QStringList watched = m_themeWatcher.files() + m_themeWatcher.directories();
-    if (!watched.isEmpty())
-        m_themeWatcher.removePaths(watched);
-
-    const QString currentDir = omarchyCurrentDir();
-    const QString themeDir = currentDir + QStringLiteral("/theme");
-    if (QDir(currentDir).exists())
-        m_themeWatcher.addPath(currentDir);
-    if (QDir(themeDir).exists())
-        m_themeWatcher.addPath(themeDir);
-    if (QFileInfo::exists(omarchyColorsPath()))
-        m_themeWatcher.addPath(omarchyColorsPath());
-}
-
 bool Backend::load(const QUrl &url) {
     const QString path = url.toLocalFile();
     const ffmpeg::VideoInfo info = ffmpeg::probe(path);
@@ -451,7 +368,7 @@ bool Backend::load(const QUrl &url) {
     if (leaveGathering)
         emit gatheringChanged();
 
-    setStatus(QStringLiteral("Loading..."));
+    setStatus(QStringLiteral("Opening…"));
     startThumbs();
     return true;
 }
@@ -1167,7 +1084,7 @@ void Backend::dropSelect(int id) {
             m_covers = previousCovers;
             emit selectsChanged();
             emit coversChanged();
-            setStatus(QStringLiteral("Could not save the selects"));
+            setStatus(QStringLiteral("Could not save the line list"));
         }
         return;
     }
@@ -1183,7 +1100,7 @@ void Backend::clearCover(int lineId) {
     if (!storeCovers()) {
         m_covers = previous;
         emit coversChanged();
-        setStatus(QStringLiteral("Could not save the selects"));
+        setStatus(QStringLiteral("Could not save the line list"));
     }
 }
 
@@ -1268,7 +1185,7 @@ bool Backend::storeCovers(bool withLines) const {
 void Backend::loadSelects(const QString &cutsPath) {
     QFile file(cutsPath);
     if (!file.open(QIODevice::ReadOnly)) {
-        setStatus(QStringLiteral("Could not read the selects"));
+        setStatus(QStringLiteral("Could not read the line list"));
         return;
     }
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
@@ -1796,7 +1713,7 @@ bool Backend::sendRevise(const QString &note) {
         return false;
     const QString cuts = prepareReviseCuts();
     if (cuts.isEmpty()) {
-        setStatus(QStringLiteral("Could not save the selects"));
+        setStatus(QStringLiteral("Could not save the line list"));
         return false;
     }
     const QString cli = findTool(QStringLiteral("botcut-cli"));
@@ -1811,13 +1728,13 @@ bool Backend::sendRevise(const QString &note) {
     }
     QFile stampFile(cuts);
     if (!stampFile.open(QIODevice::ReadOnly)) {
-        setStatus(QStringLiteral("Could not save the selects"));
+        setStatus(QStringLiteral("Could not save the line list"));
         return false;
     }
     m_reviseStamp = stampFile.readAll();
     m_reviseNote = trimmed;
     setBusy(true);
-    setStatus(QStringLiteral("Revising"));
+    setStatus(QStringLiteral("Changing…"));
     m_cutStage = CutStage::Revise;
     startCutProcess(launch);
     return true;
@@ -1839,7 +1756,7 @@ void Backend::revertRevise() {
         m_selects = revisedSelects;
         m_covers = revisedCovers;
         m_intent = revisedIntent;
-        setStatus(QStringLiteral("Could not save the selects"));
+        setStatus(QStringLiteral("Could not save the line list"));
         return;
     }
     m_canRevert = false;
@@ -1902,7 +1819,7 @@ void Backend::renderSelects() {
         return;
     }
     if (!writeCutsForRender()) {
-        setStatus(QStringLiteral("Could not save the selects"));
+        setStatus(QStringLiteral("Could not save the line list"));
         return;
     }
     const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
@@ -2075,7 +1992,7 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         if (unchanged || !readReviseOutcome(cuts, &intent, &pace, &dip, &deliver)) {
             m_reviseNote.clear();
             setBusy(false);
-            setStatus(QStringLiteral("Could not read the revise"));
+            setStatus(QStringLiteral("Could not read the change"));
             return;
         }
         m_undoIntent = m_intent;
@@ -2165,7 +2082,7 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
                 emit coversChanged();
                 emit cutClipsChanged();
                 setBusy(false);
-                setStatus(QStringLiteral("Could not save the selects"));
+                setStatus(QStringLiteral("Could not save the line list"));
                 return;
             }
             if (!open)
@@ -2365,7 +2282,7 @@ void Backend::startThumbs() {
         if (worker == m_thumbWorker && revision == m_thumbRevision) {
             m_thumbWorker = nullptr;
             m_thumbWorkerDone = true;
-            if (m_thumbReadyCount >= m_thumbCount && m_status == QLatin1String("Loading..."))
+            if (m_thumbReadyCount >= m_thumbCount && m_status == QStringLiteral("Opening…"))
                 setStatus(QString());
             else if (!m_thumbRevealTimer.isActive())
                 m_thumbRevealTimer.start();
@@ -2386,7 +2303,7 @@ void Backend::revealNextThumb() {
 
     m_thumbRevealTimer.stop();
     if (m_thumbWorkerDone && m_thumbReadyCount >= m_thumbCount
-            && m_status == QLatin1String("Loading..."))
+            && m_status == QStringLiteral("Opening…"))
         setStatus(QString());
 }
 

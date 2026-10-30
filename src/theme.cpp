@@ -9,12 +9,14 @@
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <algorithm>
 #include <cmath>
 
 Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     : QObject(parent),
       m_directory(directory.isEmpty() ? QDir::homePath() + QStringLiteral("/.local/state/omarchy/current")
                                       : directory) {
+    recomputeDerived();
     m_debounce.setSingleShot(true);
     m_debounce.setInterval(80);
     connect(&m_watcher, &QFileSystemWatcher::directoryChanged, this, [this] { m_debounce.start(); });
@@ -74,6 +76,31 @@ QString Theme::readColor(const QString &path, const QString &key, const QString 
     return match.hasMatch() ? match.captured(1) : fallback;
 }
 
+QString Theme::mixToward(const QString &background, const QString &foreground, double amount) {
+    const QColor from(background);
+    const QColor to(foreground);
+    if (!from.isValid() || !to.isValid())
+        return background;
+    const auto channel = [amount](int start, int end) {
+        return std::clamp(static_cast<int>(std::lround(start + (end - start) * amount)), 0, 255);
+    };
+    return QColor(channel(from.red(), to.red()), channel(from.green(), to.green()),
+                  channel(from.blue(), to.blue()))
+        .name(QColor::HexRgb);
+}
+
+void Theme::recomputeDerived() {
+    // Amounts are tuned so the Omarchy defaults (#0e0e10 toward #f4f4f5) land
+    // near the old flat surfaces. They are not a second palette.
+    m_surface = mixToward(m_background, m_foreground, 0.06);
+    m_raised = mixToward(m_background, m_foreground, 0.13);
+    m_selected = mixToward(m_background, m_foreground, 0.12);
+    m_hover = mixToward(m_background, m_foreground, 0.19);
+    m_line = mixToward(m_background, m_foreground, 0.187);
+    // One modal veil. Dialogs used #99000000; the quit card used #000000cc.
+    m_scrim = QStringLiteral("#99000000");
+}
+
 QString Theme::accentForeground() const {
     const QColor c(m_accent);
     auto linear = [](double v) { return v <= .04045 ? v / 12.92 : std::pow((v + .055) / 1.055, 2.4); };
@@ -109,5 +136,6 @@ void Theme::reload() {
     m_accent = accent;
     m_foreground = foreground;
     m_background = background;
+    recomputeDerived();
     emit changed();
 }

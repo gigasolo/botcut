@@ -6,7 +6,17 @@ A dead-simple video trimmer, with a shot tray that can rough-cut several videos 
 
 Built using **Qt Quick (QML)** UI with the Material style — the same Qt stack Quickshell builds on — and **ffmpeg** for the cut. The C++ side compiles to a single executable; the QML is embedded in it via Qt resources.
 
-<img width="3227" height="3227" alt="screenshot-2026-06-23_15-20-40" src="https://github.com/user-attachments/assets/c76047c8-618f-4c1c-91f9-e7024c4f953b" />
+The window is one plan, at least 960×640. These are the screens with the theme's corner radius.
+
+<img width="960" alt="Empty shots" src="docs/screenshots/empty-r8.png" />
+<img width="960" alt="Shots" src="docs/screenshots/shots-r8.png" />
+<img width="960" alt="Lines" src="docs/screenshots/lines-r8.png" />
+<img width="960" alt="Movie" src="docs/screenshots/movie-r8.png" />
+<img width="960" alt="Settings" src="docs/screenshots/settings-r8.png" />
+<img width="960" alt="Help" src="docs/screenshots/help-r8.png" />
+<img width="960" alt="Title card" src="docs/screenshots/title-r8.png" />
+<img width="960" alt="Quit" src="docs/screenshots/quit-r8.png" />
+<img width="960" alt="Cut again" src="docs/screenshots/confirm-r8.png" />
 
 ## Editing
 
@@ -39,15 +49,17 @@ Handles catch on neighbouring clips and the playhead.
 
 ## Several videos
 
-With no movie open, the sidebar is on Shots. Drop videos or a folder onto the main column, or press **Add videos**. Files added together are ordered oldest first, from the file's creation time. The selected file plays in the preview. **Up** and **Down** show on the current row. **Remove** takes a file out. A missing file is marked, and **Cut** stays off until you remove it.
+The window is one plan. The steps are Shots, Lines, and Movie. There is no sidebar. Drop videos or a folder onto the picture, or press **Add shots…**. Files added together are ordered oldest first, from the file's creation time. The selected shot plays in the picture. **Move up** and **Move down** show on the current row. **Remove** takes a file out. A missing file reads **File missing**, and **Cut** stays off until you remove it.
 
-**Spoken cuts** is on by default. With shots in the tray it also shows **This movie**, a pace from **Open** to **Frenzied**, and **Dip to black between files**. **Open card** and **Close card** each open one line filled with that sentence. **Make card** adds a generated still at the front or the end of the tray. **Cut** transcribes the shots and lists the lines it would keep. **Drop** or **Restore** a line, then **Render** encodes `rough_cut.mp4`. Under the lines, **Change this cut** and **Send** revise that plan. The reply can change the sentence, the pace, the dip, and which lines stay. It does not encode. **Revert** puts the previous cut back. Spoken cuts need an xAI key. **Settings** stores that key in the keyring and never shows it again. Turning Spoken cuts off keeps every file, in this order, and does not call the model.
+**Open a saved list…** sits under the shot list. **Save list…** writes the order, the cut mode, the movie line, and any lines. Dropping that file puts them back.
 
-**Save list** writes the order, the cut mode, the movie line, and any lines. **Open list**, or dropping that file, puts them back. **Trim one file**, or Ctrl+O, opens one video in the trimmer.
+Spoken cuts are on by default. The shot list then holds one sentence for the movie and a pace that reads as a sentence, from **Open · keeps long pauses** to **Frenzied · cuts every breath**. **Add a title card…** opens a dialog. The field starts empty. The placeholder is **Words on the card**. **Put it first** or **Put it last** adds a still as a shot you can move or remove.
 
-Watch plays the rough cut. **Save** copies an unedited cut into the place you pick. **Export** re-encodes a hand trim. On a plan cut the filmstrip is one block per kept range, and a handle edits that range in its own file. An untouched plan still Saves by copying. After a handle moves, the button reads **Export** and re-encodes. **Captions** and **Short** stay after Save, because the app remembers the project `cuts.json`. They wait until a trimmed plan has been exported. Opening a different video clears them. The command-line jobs are `botcut-cli run`, `render`, `revise`, `card`, `captions`, and `short`. See `cli/README.md`.
+**Cut** transcribes the shots and lists the lines it would keep. **Drop** or **Keep** a line, then **Render** encodes `rough_cut.mp4`. **Change this cut** sends a note about that plan. The reply can change the sentence, the pace, the fade, and which lines stay. It does not encode. **Undo this change** puts the previous cut back. The command is `botcut-cli revise`. Spoken cuts need an xAI key. **Settings** stores that key in the keyring and never shows it again. Turning spoken cuts off keeps every file, in this order, and does not call the model.
 
-**Settings** also holds the one-line movie prompt and **Dip to black between files**. Help, in the sidebar, lists the shortcuts above.
+**Trim one file instead…**, or Ctrl+O, opens one video on Movie. The filmstrip is the trim. **Save…** copies an unedited cut. **Export…** re-encodes a hand trim. On a plan cut the filmstrip is one block per kept range, and a handle edits that range in its own file. An untouched plan still saves by copying. After a handle moves, the button reads **Export…**. **Captions** and **Vertical short** stay after a save, because the app remembers the project `cuts.json`. They wait until a trimmed plan has been exported. Opening a different video clears them. The command-line jobs are `botcut-cli run`, `render`, `revise`, `card`, `captions`, and `short`. See `cli/README.md`.
+
+**Settings** is a dialog: spoken cuts, the xAI key, **Fade to black between shots**, and covering a line with another shot's picture. **Help** lists the shortcuts above. Quitting during a job, or with an unsaved movie or trim, asks first. **Cut again** asks before it replaces the line list.
 
 ## Keep-lists
 

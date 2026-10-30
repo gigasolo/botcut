@@ -3,6 +3,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QTimeZone>
 #include <QFile>
 #include <QFileInfo>
@@ -77,8 +78,6 @@ class ShortcutBackend : public QObject {
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
-    Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
-    Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
     Q_PROPERTY(QString step READ step NOTIFY infoChanged)
     Q_PROPERTY(QString job READ job NOTIFY infoChanged)
     Q_PROPERTY(QString jobText READ jobText NOTIFY infoChanged)
@@ -106,8 +105,6 @@ public:
         emit busyChanged();
     }
     QString status() const { return {}; }
-    QString themeAccent() const { return QStringLiteral("#FFD60A"); }
-    QString themeAccentForeground() const { return QStringLiteral("black"); }
     QString step() const { return {}; }
     QString job() const { return {}; }
     QString jobText() const { return {}; }
@@ -269,7 +266,6 @@ signals:
     void thumbsChanged();
     void busyChanged();
     void statusChanged();
-    void themeAccentChanged();
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void loadError(const QString &message);
@@ -471,6 +467,7 @@ private slots:
     void stepFollowsTheTrayAndTheLines();
     void jobFollowsTheStatusLine();
     void qmlQuitAsksWhileAJobIsRunning();
+    void grabWindowScreens();
 
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
@@ -1648,12 +1645,12 @@ void BackendTests::clearCoverKeepsTheWords() {
 
     QVERIFY(QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
     backend.clearCover(5);
-    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the line list"));
     QCOMPARE(backend.covers().size(), 1);
     QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
     backend.m_selects[1] = other;
     backend.dropSelect(5);
-    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the line list"));
     QVERIFY(backend.selects().at(1).toMap().value(QStringLiteral("keep")).toBool());
     QCOMPARE(backend.covers().size(), 1);
     QVERIFY(QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
@@ -2116,7 +2113,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QVERIFY(backend.canRevert());
     QVERIFY(!lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
     QCOMPARE(backend.covers().size(), 0);
-    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the line list"));
     QVERIFY(QFile::setPermissions(cuts, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
 
     backend.revertRevise();
@@ -2385,7 +2382,7 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     const int coverClip = backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt();
     QVERIFY2(backend.makeCard(QStringLiteral("open"), sentence), qPrintable(backend.status()));
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
-    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the line list"));
     QCOMPARE(backend.tray().size(), trayBefore);
     QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), coverClip);
     QCOMPARE(backend.m_undoCovers.at(0).toMap().value(QStringLiteral("clip")).toInt(), coverClip);
@@ -4289,10 +4286,10 @@ void BackendTests::exportHeightsNeverUpscale() {
 void BackendTests::themeAccentReadsOmarchyColors() {
     const QString fallback = QStringLiteral("#FFD60A");
     const QString colorsPath = m_dir.filePath(QStringLiteral("colors.toml"));
+    const QString key = QStringLiteral("accent");
 
     // No file at all — the non-omarchy case — keeps the fallback.
-    QCOMPARE(Backend::accentFromColorsFile(m_dir.filePath(QStringLiteral("missing.toml")), fallback),
-             fallback);
+    QCOMPARE(Theme::readColor(m_dir.filePath(QStringLiteral("missing.toml")), key, fallback), fallback);
 
     const auto writeColors = [&colorsPath](const char *contents) {
         QFile file(colorsPath);
@@ -4304,24 +4301,39 @@ void BackendTests::themeAccentReadsOmarchyColors() {
                 "mode = \"dark\"\n"
                 "background = \"#121212\"\n"
                 "accent = \"#33ccff\"\n");
-    QCOMPARE(Backend::accentFromColorsFile(colorsPath, fallback), QStringLiteral("#33ccff"));
+    QCOMPARE(Theme::readColor(colorsPath, key, fallback), QStringLiteral("#33ccff"));
 
     writeColors("accent = '#aabbcc'\n");
-    QCOMPARE(Backend::accentFromColorsFile(colorsPath, fallback), QStringLiteral("#aabbcc"));
+    QCOMPARE(Theme::readColor(colorsPath, key, fallback), QStringLiteral("#aabbcc"));
 
     // A value that isn't a color keeps the fallback rather than breaking bindings.
     writeColors("accent = \"not-a-color\"\n");
-    QCOMPARE(Backend::accentFromColorsFile(colorsPath, fallback), fallback);
+    QCOMPARE(Theme::readColor(colorsPath, key, fallback), fallback);
 
     // As does a theme without an accent at all.
     writeColors("background = \"#121212\"\n");
-    QCOMPARE(Backend::accentFromColorsFile(colorsPath, fallback), fallback);
+    QCOMPARE(Theme::readColor(colorsPath, key, fallback), fallback);
+}
+
+static QString accentForegroundFromFile(const QByteArray &colorsToml) {
+    QTemporaryDir dir;
+    if (!dir.isValid())
+        return {};
+    QDir(dir.path()).mkpath(QStringLiteral("theme"));
+    QFile colors(dir.filePath(QStringLiteral("theme/colors.toml")));
+    if (!colors.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return {};
+    colors.write(colorsToml);
+    colors.close();
+    Theme theme(dir.path(), nullptr, QString());
+    return theme.accentForeground();
 }
 
 void BackendTests::themeAccentForegroundKeepsContrast() {
-    QCOMPARE(Backend::foregroundFor(QStringLiteral("#FFD60A")), QStringLiteral("black"));
-    QCOMPARE(Backend::foregroundFor(QStringLiteral("#222266")), QStringLiteral("white"));
-    QCOMPARE(Backend::foregroundFor(QStringLiteral("garbage")), QStringLiteral("black"));
+    QCOMPARE(accentForegroundFromFile("accent = \"#FFD60A\"\n"), QStringLiteral("black"));
+    QCOMPARE(accentForegroundFromFile("accent = \"#222266\"\n"), QStringLiteral("white"));
+    // An unparsable accent falls back to #FFD60A, so the contrast stays black.
+    QCOMPARE(accentForegroundFromFile("accent = \"garbage\"\n"), QStringLiteral("black"));
 }
 
 void BackendTests::themeReadsAccentForegroundAndRounding() {
@@ -4342,6 +4354,36 @@ void BackendTests::themeReadsAccentForegroundAndRounding() {
     QCOMPARE(theme.foreground(), QStringLiteral("#abcdef"));
     QCOMPARE(theme.background(), QStringLiteral("#010203"));
     QCOMPARE(theme.radius(), 0);
+
+    QTemporaryDir defaultsDir;
+    QVERIFY(defaultsDir.isValid());
+    QDir(defaultsDir.path()).mkpath(QStringLiteral("theme"));
+    QFile defaults(defaultsDir.filePath(QStringLiteral("theme/colors.toml")));
+    QVERIFY(defaults.open(QIODevice::WriteOnly));
+    defaults.write("background = \"#0e0e10\"\nforeground = \"#f4f4f5\"\naccent = \"#FFD60A\"\n");
+    defaults.close();
+    Theme painted(defaultsDir.path(), nullptr, QString());
+    QCOMPARE(painted.background(), QStringLiteral("#0e0e10"));
+    QCOMPARE(painted.foreground(), QStringLiteral("#f4f4f5"));
+    const auto hex6 = [](const QString &value) {
+        if (value.size() != 7 || value.at(0) != QLatin1Char('#'))
+            return false;
+        for (int i = 1; i < value.size(); ++i) {
+            const QChar c = value.at(i);
+            const bool digit = c.isDigit();
+            const bool lower = c >= QLatin1Char('a') && c <= QLatin1Char('f');
+            const bool upper = c >= QLatin1Char('A') && c <= QLatin1Char('F');
+            if (!digit && !lower && !upper)
+                return false;
+        }
+        return true;
+    };
+    QVERIFY(hex6(painted.surface()));
+    QVERIFY(hex6(painted.raised()));
+    QVERIFY(hex6(painted.selected()));
+    QVERIFY(hex6(painted.hover()));
+    QVERIFY(hex6(painted.line()));
+    QVERIFY(painted.surface() != painted.background());
 }
 
 void BackendTests::stepFollowsTheTrayAndTheLines() {
@@ -4416,20 +4458,184 @@ void BackendTests::jobFollowsTheStatusLine() {
     QCOMPARE(text, QStringLiteral("Reading shots"));
     QVERIFY(Backend::describeJob(QStringLiteral("Choosing takes"), &job, &progress, &text));
     QCOMPARE(text, QStringLiteral("Choosing lines"));
+    QVERIFY(Backend::describeJob(QStringLiteral("Changing…"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("changing"));
+    QCOMPARE(text, QStringLiteral("Changing the list"));
+    QVERIFY(qAbs(progress) < 0.0001);
+    // The CLI can still print the old word. The bar must not go blank.
     QVERIFY(Backend::describeJob(QStringLiteral("Revising"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("changing"));
     QCOMPARE(text, QStringLiteral("Changing the list"));
     QVERIFY(Backend::describeJob(QStringLiteral("Making the card…"), &job, &progress, &text));
     QCOMPARE(text, QStringLiteral("Making the title card"));
     QVERIFY(Backend::describeJob(QStringLiteral("Saving…"), &job, &progress, &text));
     QCOMPARE(job, QStringLiteral("saving"));
     QVERIFY(qAbs(progress) < 0.0001);
-    QVERIFY(Backend::describeJob(QStringLiteral("Loading..."), &job, &progress, &text));
+    QVERIFY(Backend::describeJob(QStringLiteral("Opening…"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("opening"));
     QCOMPARE(text, QStringLiteral("Opening…"));
+    QVERIFY(qAbs(progress) < 0.0001);
 
     QVERIFY(!Backend::describeJob(QStringLiteral("Trying again"), &job, &progress, &text));
     QVERIFY(Backend::describeJob(QStringLiteral("Saved the list"), &job, &progress, &text));
     QCOMPARE(job, QString());
     QVERIFY(qAbs(progress + 1.0) < 0.0001);
+}
+
+static QString showAndGrab(QQuickWindow *window, const QString &path) {
+    if (!window)
+        return QStringLiteral("no window for ") + path;
+    window->resize(960, 640);
+    window->show();
+    // Offscreen sometimes never reports exposed. The grab is the check that matters.
+    if (!QTest::qWaitForWindowExposed(window, 2000))
+        window->requestUpdate();
+    window->requestUpdate();
+    QCoreApplication::processEvents();
+    QTest::qWait(80);
+    const QImage image = window->grabWindow();
+    if (image.size() != QSize(960, 640)) {
+        return QStringLiteral("size %1x%2 for %3")
+            .arg(image.width())
+            .arg(image.height())
+            .arg(path);
+    }
+    if (!image.save(path))
+        return QStringLiteral("save failed: ") + path;
+    return {};
+}
+
+class GrabSession {
+public:
+    GrabSession(Theme *theme, ShortcutBackend *backend) {
+        m_engine.addImageProvider(QStringLiteral("thumbs"), new ThumbProvider);
+        m_engine.rootContext()->setContextProperty(QStringLiteral("theme"), theme);
+        m_engine.rootContext()->setContextProperty(QStringLiteral("backend"), backend);
+        m_engine.load(QUrl::fromLocalFile(mainQmlPath()));
+        if (!m_engine.rootObjects().isEmpty())
+            m_window = qobject_cast<QQuickWindow *>(m_engine.rootObjects().first());
+    }
+
+    QQuickWindow *window() const { return m_window; }
+    QString grab(const QString &path) { return showAndGrab(m_window, path); }
+
+private:
+    QQmlApplicationEngine m_engine;
+    QQuickWindow *m_window = nullptr;
+};
+
+void BackendTests::grabWindowScreens() {
+    if (!qEnvironmentVariableIsSet("BOTCUT_GRABS"))
+        return;
+
+    const QString outDir = QFileInfo(QString::fromUtf8(__FILE__)).dir()
+                               .absoluteFilePath(QStringLiteral("../docs/screenshots"));
+    QVERIFY(QDir().mkpath(outDir));
+
+    const QString hyprctl = m_dir.filePath(QStringLiteral("grab-hyprctl"));
+    QFile script(hyprctl);
+    QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray body = QByteArrayLiteral("#!/bin/sh\nprintf '%s\\n' '{\"int\": 8}'\n");
+    QCOMPARE(script.write(body), static_cast<qint64>(body.size()));
+    script.close();
+    QVERIFY(script.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
+    const QString tags[] = {QStringLiteral("r0"), QStringLiteral("r8")};
+    const QString hyprs[] = {QString(), hyprctl};
+    for (int pass = 0; pass < 2; ++pass) {
+        Theme theme(m_dir.filePath(QStringLiteral("grab-theme-%1").arg(tags[pass])), nullptr, hyprs[pass]);
+        if (hyprs[pass].isEmpty()) {
+            QCOMPARE(theme.radius(), 0);
+        } else {
+            QSignalSpy changed(&theme, &Theme::changed);
+            bool arrived = theme.radius() == 8;
+            while (!arrived) {
+                if (!changed.wait(4000))
+                    break;
+                arrived = theme.radius() == 8;
+                changed.clear();
+            }
+            QVERIFY2(arrived, "Theme::changed never brought radius 8");
+        }
+
+        const QString tag = tags[pass];
+        const auto png = [&outDir, &tag](const char *name) {
+            return outDir + QLatin1Char('/') + QLatin1String(name) + QLatin1Char('-') + tag
+                + QStringLiteral(".png");
+        };
+
+        {
+            ShortcutBackend backend(QUrl(), 0.0);
+            GrabSession session(&theme, &backend);
+            QVERIFY(session.window());
+            QVERIFY(session.window()->findChild<QQuickItem *>(QStringLiteral("settingsButton")));
+            QVERIFY(session.window()->findChild<QQuickItem *>(QStringLiteral("cutButton")));
+            QCOMPARE(session.grab(png("empty")), QString());
+
+            QVERIFY(session.window()->setProperty("settingsOpen", true));
+            QCOMPARE(session.grab(png("settings")), QString());
+            QVERIFY(session.window()->findChild<QQuickItem *>(QStringLiteral("spokenCutsBox")));
+            QVERIFY(session.window()->setProperty("settingsOpen", false));
+
+            QVERIFY(session.window()->setProperty("helpVisible", true));
+            QCOMPARE(session.grab(png("help")), QString());
+            QVERIFY(session.window()->setProperty("helpVisible", false));
+
+            QVERIFY(session.window()->setProperty("titleCardOpen", true));
+            QCOMPARE(session.grab(png("title")), QString());
+            QVERIFY(session.window()->setProperty("titleCardOpen", false));
+
+            QVERIFY(session.window()->setProperty("quitConfirmVisible", true));
+            QCOMPARE(session.grab(png("quit")), QString());
+            QVERIFY(session.window()->setProperty("quitConfirmVisible", false));
+        }
+        {
+            ShortcutBackend backend(QUrl(), 0.0);
+            backend.setTray({m_dir.filePath(QStringLiteral("DJI_20261008_091204.MP4"))});
+            backend.setCutMode(QStringLiteral("assemble"));
+            GrabSession session(&theme, &backend);
+            QVERIFY(session.window());
+            QCOMPARE(session.grab(png("shots")), QString());
+        }
+        {
+            ShortcutBackend backend(QUrl(), 0.0);
+            QVariantMap kept;
+            kept.insert(QStringLiteral("id"), 1);
+            kept.insert(QStringLiteral("keep"), true);
+            kept.insert(QStringLiteral("text"), QStringLiteral("We started in the garage."));
+            kept.insert(QStringLiteral("start"), 12.0);
+            kept.insert(QStringLiteral("end"), 18.0);
+            kept.insert(QStringLiteral("clip"), 0);
+            QVariantMap dropped;
+            dropped.insert(QStringLiteral("id"), 2);
+            dropped.insert(QStringLiteral("keep"), false);
+            dropped.insert(QStringLiteral("text"),
+                           QStringLiteral("The first customers were shops on the same street."));
+            dropped.insert(QStringLiteral("start"), 41.0);
+            dropped.insert(QStringLiteral("end"), 48.0);
+            dropped.insert(QStringLiteral("clip"), 0);
+            dropped.insert(QStringLiteral("reason"), QStringLiteral("dropped"));
+            backend.setSelects({kept, dropped});
+            backend.setTray({m_dir.filePath(QStringLiteral("DJI_20261008_091204.MP4"))});
+            GrabSession session(&theme, &backend);
+            QVERIFY(session.window());
+            QVERIFY(session.window()->setProperty("currentLine", 0));
+            QCOMPARE(session.grab(png("lines")), QString());
+
+            QVERIFY(session.window()->setProperty("confirmCutOpen", true));
+            QCOMPARE(session.grab(png("confirm")), QString());
+            QVERIFY(session.window()->setProperty("confirmCutOpen", false));
+        }
+        {
+            ShortcutBackend backend(QUrl::fromLocalFile(m_videoPath), 1.0);
+            GrabSession session(&theme, &backend);
+            QVERIFY(session.window());
+            QQuickItem *editBar = session.window()->findChild<QQuickItem *>(QStringLiteral("editBar"));
+            QVERIFY(editBar);
+            QCOMPARE(session.grab(png("movie")), QString());
+            QVERIFY2(editBar->isVisible(), "edit bar hidden on the movie screen");
+        }
+    }
 }
 
 QTEST_MAIN(BackendTests)

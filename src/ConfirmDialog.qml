@@ -11,7 +11,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#99000000"
+        color: theme.scrim
     }
     MouseArea { anchors.fill: parent }
 
@@ -20,8 +20,8 @@ Item {
         width: Math.min(480, parent.width - 48)
         height: column.implicitHeight + 48
         radius: theme.radius
-        color: "#1c1c1e"
-        border.color: "#39393e"
+        color: theme.surface
+        border.color: theme.line
 
         MouseArea { anchors.fill: parent }
 

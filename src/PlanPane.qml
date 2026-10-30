@@ -156,7 +156,7 @@ Item {
         width: parent ? parent.width : implicitWidth
         height: 28
         radius: theme.radius
-        color: recentHover.hovered && enabled ? "#2a2a2e" : "transparent"
+        color: recentHover.hovered && enabled ? theme.selected : "transparent"
         opacity: enabled ? 1 : 0.45
         HoverHandler { id: recentHover; enabled: recent.enabled }
         Label {
@@ -331,7 +331,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: visible ? 36 : 0
                     radius: theme.radius
-                    color: "#1c1c1e"
+                    color: theme.surface
                     border.width: planIntent.activeFocus ? 1 : 0
                     border.color: theme.accent
                     opacity: planIntent.enabled ? 1 : 0.45
@@ -515,7 +515,7 @@ Item {
                                 anchors.verticalCenter: parent.verticalCenter
                                 height: 36
                                 radius: theme.radius
-                                color: "#1c1c1e"
+                                color: theme.surface
                                 border.width: reviseInput.activeFocus ? 1 : 0
                                 border.color: theme.accent
                                 opacity: reviseInput.enabled ? 1 : 0.45

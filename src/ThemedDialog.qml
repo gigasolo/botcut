@@ -14,11 +14,11 @@ Dialog {
     closePolicy: Popup.NoAutoClose
 
     background: Rectangle {
-        color: "#1c1c1e"
+        color: theme.surface
         radius: theme.radius
-        border.color: "#39393e"
+        border.color: theme.line
     }
-    Overlay.modal: Rectangle { color: "#99000000" }
+    Overlay.modal: Rectangle { color: theme.scrim }
     header: Label {
         text: dialog.title
         color: theme.foreground

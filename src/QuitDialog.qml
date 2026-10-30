@@ -28,7 +28,7 @@ Item {
         property bool primary: false
         signal clicked()
 
-        color: primary ? theme.accent : "#2c2c2f"
+        color: primary ? theme.accent : theme.raised
         border.color: activeFocus ? (primary ? theme.accentForeground : theme.accent) : "transparent"
         border.width: activeFocus ? 2 : 0
 
@@ -40,7 +40,7 @@ Item {
             id: dialogButtonLabel
             anchors.centerIn: parent
             text: dialogButton.text
-            color: dialogButton.primary ? theme.accentForeground : "white"
+            color: dialogButton.primary ? theme.accentForeground : theme.foreground
             font.pixelSize: 13
             font.weight: Font.DemiBold
         }
@@ -53,7 +53,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
-        color: "#000000cc"
+        color: theme.scrim
     }
 
     MouseArea {
@@ -66,7 +66,7 @@ Item {
         width: quitColumn.width + 64
         height: quitColumn.height + 48
         radius: theme.radius
-        color: "#1c1c1e"
+        color: theme.surface
 
         MouseArea { anchors.fill: parent }
 
@@ -79,7 +79,7 @@ Item {
                 text: backend.busy ? qsTr("Stop the render and quit?")
                         : (host.looseCut ? qsTr("Save your movie before you quit?")
                            : qsTr("Export your trim before you quit?"))
-                color: "white"
+                color: theme.foreground
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
             }
@@ -89,7 +89,8 @@ Item {
                       : (host.looseCut
                          ? qsTr("It's only in a temporary folder. Quitting deletes it.")
                          : qsTr("Your hand trim isn't in a file yet."))
-                color: "#d6d6da"
+                color: theme.foreground
+                opacity: 0.62
                 font.pixelSize: 13
                 wrapMode: Text.WordWrap
                 width: 420

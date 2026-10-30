@@ -159,7 +159,7 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: win.accent
     Material.roundedScale: theme.radius
-    color: "#0e0e10"
+    color: theme.background
 
     function fileName(url) {
         var s = url.toString();
@@ -826,7 +826,7 @@ ApplicationWindow {
                 Rectangle {
                     Layout.preferredWidth: 1
                     Layout.fillHeight: true
-                    color: "#2c2c2f"
+                    color: theme.raised
                 }
 
                 Item {
@@ -927,8 +927,6 @@ ApplicationWindow {
                         objectName: "editBar"
                         Layout.fillWidth: true
                         Layout.alignment: Qt.AlignVCenter
-                        accent: win.accent
-                        accentForeground: win.accentForeground
                         onScrub: (seconds, segment, source) => {
                             movie.player.pause();
                             if (backend.planCut && segment >= 0) {

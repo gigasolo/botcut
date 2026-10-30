@@ -33,9 +33,9 @@ Button {
     background: Rectangle {
         radius: theme.radius
         clip: true
-        color: button.progress >= 0 ? "#2c2c2f"
+        color: button.progress >= 0 ? theme.raised
                 : button.filled ? theme.accent
-                : button.hovered && button.enabled ? "#3a3a3e" : "transparent"
+                : button.hovered && button.enabled ? theme.hover : "transparent"
         opacity: button.enabled ? 1 : 0.45
         border.width: button.activeFocus ? 2 : 0
         border.color: theme.accent

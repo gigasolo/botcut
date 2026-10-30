@@ -1,72 +1,40 @@
-BotCut is a dark desktop app for one person making a rough cut of a founder or small-business movie. The window is 960×680, minimum 960×640. A sidebar stays up. The main column is where the person drops shot files, puts them in order, and presses Cut. The app transcribes the speech, keeps the useful lines, and plays the movie. They can drop a bad line, render again, watch the cut, trim it by hand, save it, write captions, or cut one vertical short.
+BotCut is a dark desktop app for one person making a rough cut of a founder or small-business movie. The window opens at 960×680 and does not go below 960×640. There is no sidebar. One plan pane, 360 px wide, sits on the left. The picture fills the rest. The steps along the top of the plan are Shots, Lines, and Movie. Settings, Help, a title card, quit, and cut-again are dialogs over that same window.
 
 This file is the same brief as docs/ux-pilot.md, written without Markdown tables. When they disagree, follow docs/ux-pilot.md.
 
 The person using it is the founder, filming on a phone or a DJI camera and editing on a Linux desktop at night. They want the next movie, not a timeline. Speech is the structure. The order of the files is the order of the story.
 
+The words on screen are shot, line, movie, and trim. Three sentences stay as they are because they are already on screen: "File missing", "Trim one file instead…", and "One file, trimmed by hand."
+
 What to draw
 
 Draw only these surfaces:
 
-• Shots, where the files are gathered
-• Watch, where the movie plays and can be trimmed
-• Settings, which covers the main column and leaves the sidebar up
-• Help, a shortcut card on the main column
-• Close, a small confirm card on the main column
+• Empty, before any shot is added
+• Shots, with files in the list
+• Lines, after a cut, the first line selected
+• Movie, with the filmstrip under the picture
+• Settings, a dialog
+• Help, a dialog
+• Title card, a dialog
+• Quit, a dialog
+• Cut again, a dialog
 
-Every control is a text button, a switch, a checkbox, a text field, a list row, or the filmstrip. Play and pause are the only icon buttons. Help in the sidebar shows a "?" beside the word.
+Every control is a text button, a switch, a checkbox, a text field, a list row, or the filmstrip. Play and pause are the only icon buttons. Help is a "?" at the bottom of the plan pane, next to the word Settings.
 
 What to leave out
 
-Leave out an account row, a media bin, a timeline with tracks, effects, titles, music, color, keyframes, a waveform editor, and a multi-track mixer. Leave out pricing and onboarding. Leave out gradients, glass, blur, and decorative illustration. Leave out icon-only toolbars. Do not show a stored API key, an export folder, a per-file duration, or a total runtime.
+Leave out an account row, a sidebar, a media bin, a timeline with tracks, effects, music, color, keyframes, a waveform editor, a multi-track mixer, and lower-thirds. Leave out a zoom control in the chrome. Leave out pricing and onboarding. Leave out gradients, glass, blur, decorative illustration, icon-only toolbars, and web fonts. Do not show a stored API key, an export folder, a per-file duration, or a total runtime. One Omarchy accent. Do not invent a second accent.
 
 Visual system
 
-This has to be buildable in Qt Quick. Use flat rectangles, one accent, and the system sans. Status and times use a monospace face.
+This has to be buildable in Qt Quick. Use flat rectangles, one accent, and the system sans. Status and times use a monospace face. theme.radius is the corner radius of the window, the cards, the rows, and the buttons. Text uses theme.foreground at full strength, at 62 percent, or at 38 percent, and that opacity sits on the text item itself, never on a parent that also holds text.
 
-┌──────────────────────────────┬────────────────────────────────────────────────────┐
-│ Role                         │ Value                                              │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Window                       │ #0e0e10                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Raised button and hover chip │ #2c2c2f                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Selected shot row            │ #2a2a2e                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Dialog card                  │ #1c1c1e                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Preview well                 │ black, 12 px corners                               │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Primary text                 │ #f4f4f5                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Secondary text               │ #b8b8bc                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Body on dialogs              │ #d6d6da                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Quiet mark                   │ #7a7a80                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Dropped line or missing file │ #e07a7a                                            │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Accent                       │ the Omarchy theme color, fallback #FFD60A          │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Page margin                  │ 16 px                                              │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Footer gap                   │ 6 px                                               │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Sidebar and footer bar       │ #1c1c1e, 212 px, collapsing to 64 px               │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Shot row                     │ 52 px tall, 8 px corners                           │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Word button                  │ 44 px tall, 8 px corners, horizontal padding 14 px │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Filled button                │ accent fill, black label                           │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Plain button                 │ dark fill, white label                             │
-├──────────────────────────────┼────────────────────────────────────────────────────┤
-│ Disabled                     │ 45% opacity                                        │
-└──────────────────────────────┴────────────────────────────────────────────────────┘
+The window background is theme.background. Cards, the film well, and the sentence wells are theme.surface. Dividers, quiet buttons, the progress track, the play button disc, and the trim hint chip are theme.raised. A selected shot, a selected line, and a hovered recent row are theme.selected. A hovered word button is theme.hover. Card borders are theme.line. Every dialog sits on one scrim, theme.scrim. The accent is the Omarchy theme color. A filled button uses that accent and theme.accentForeground for its label. The picture well is black.
 
-The accent is the Omarchy theme color. It marks the one next action, the playhead, the trim handles, a missing xAI key when spoken cuts are on, and a short notice. It does not wash the whole window. The brand mark is a 20 px accent square.
+The page margin is 16 px. The footer is 56 px tall: one sentence on the left, then the buttons for this step. One of those buttons is filled. That filled button is the next action. A disabled control is drawn at 45 percent opacity.
+
+The accent marks the filled button, the playhead, the trim handles, a missing file, a missing xAI key, and a short notice. It does not wash the window.
 
 The window title is "BotCut". With a preview or a movie it becomes "BotCut — " plus the file name.
 
@@ -78,145 +46,122 @@ Shots, in this order:
 
 1. DJI_20261008_091204.MP4, selected
 2. DJI_20261008_091418.MP4
-3. DJI_20261008_092002.MP4, marked missing on the missing-file frame only
+3. DJI_20261008_092002.MP4, marked missing only on a missing-file frame
 4. interview-founder.mov
 
-Lines, after a decide:
+Lines, after a cut:
 
-┌──────┬────────────────────────────────────────────────────┬──────────────┬───────────────────────────┐
-│ Time │ Words                                              │ Reason shown │ State                     │
-├──────┼────────────────────────────────────────────────────┼──────────────┼───────────────────────────┤
-│ 0:12 │ We started in the garage.                          │ Not sure     │ kept                      │
-├──────┼────────────────────────────────────────────────────┼──────────────┼───────────────────────────┤
-│ 0:41 │ The first customers were shops on the same street. │              │ kept                      │
-├──────┼────────────────────────────────────────────────────┼──────────────┼───────────────────────────┤
-│ 1:05 │ The first customers were shops on the same street. │ Dropped      │ dropped, words in #e07a7a │
-├──────┼────────────────────────────────────────────────────┼──────────────┼───────────────────────────┤
-│ 1:28 │ Then we opened the second location.                │ Put back     │ kept                      │
-└──────┴────────────────────────────────────────────────────┴──────────────┴───────────────────────────┘
+• 0:12, "We started in the garage.", kept, and selected
+• 0:41, "The first customers were shops on the same street.", kept
+• 1:05, the same sentence again, reason "dropped"
+• 1:28, "Then we opened the second location.", reason "put back", kept
 
-The preview still is a person talking in a small shop, 16:9, letterboxed inside a black frame. The movie still is the same person, larger, filling the watch screen.
+The picture is a person talking in a small shop, 16:9, inside the black well. On Movie the same person is larger.
 
-The movie prompt, shown only in Settings when Spoken cuts is on:
+The movie sentence, on the shot list while spoken cuts are on, and not repeated as a second field in Settings:
 
 Keep each moment in order. Drop flubs and true retakes. Keep a beat that appears only once.
 
-Sidebar
+The plan
 
-The sidebar is on every screen. It is 212 px, #1c1c1e, with a right border. A 20 px accent square, then "BotCut", then a chevron that collapses the sidebar to 64 px and hides the labels. The rows are Shots, Watch, then a gap, then Help and Settings. The active row has a 3 px accent bar. Watch is disabled until a movie is loaded. On an empty tray, under Watch: "Drop clips anywhere to start a new cut". Help shows "?" beside the word. There is no account row.
+Shots, Lines, and Movie stay at the top of the plan pane on every screen. A step that has not been reached is quiet. Lines becomes reachable once a line list exists. Movie becomes reachable once a movie is open. Settings and "?" sit on the bottom row of the plan pane. There is no account row and no collapsing column.
 
-Screen: Shots, empty
+The picture is the other column. While shots are gathered and no dialog is open, a file dropped on the picture is added to the list. Files added together are ordered oldest first.
 
-This is the first open. The main column holds a dashed card: "Drop your shots here", "MP4, MOV, or MKV · straight from your phone or camera", and a filled Add videos inside the card. Under the card, three quiet facts: "Auto-finds your best lines", "Cuts silence and dead air", "Exports ready to post".
+Empty
 
-A row above the footer holds Open list, Save list (disabled), and Trim one file. The footer is a 64 px bar. Left: "No shots yet". Right: Cut, disabled and not filled.
+This is the first open. The plan says "Pick up where you left off" and, when nothing has been saved, "Your shots will be listed here." Saved lists and movies, when they exist, are named under "Lists" and "Movies".
 
-Dropping files is allowed on this screen. While a drag is over the main column, an accent stroke frames that column and the words read "Drop to add to shots".
+The picture says "Drop the shots for this movie here." Under that: "MP4, MOV, or MKV, straight from your phone or camera." Then a quiet button, "Trim one file instead…".
 
-Screen: Shots, files loaded, before a decide
+The footer sentence is "Add the shots for one movie. You can put them in order after." Beside it: "Open a saved list…" and a filled "Add shots…".
 
-The preview is a centered 16:9 frame, at most 200 px tall. The file name sits at the bottom right. A play button sits on the frame. Under the preview, Add videos is a dashed row.
+Shots
 
-Each shot row is 52 px: the file name, the file size, Remove, and, on hover or on the current row, Up and Down. The selected row is #2a2a2e. There is no per-file duration.
+Once a file is in the list, the plan shows the shot list instead of the recent page. While spoken cuts are on, a well at the top holds the movie sentence. Its empty placeholder is "What is this movie? One sentence." Under that, the pace is one sentence. Closed, it reads "Open · keeps long pauses", "Measured · natural pauses", "Tight · trims most pauses", or "Frenzied · cuts every breath". Opening it shows those four sentences. The chosen one is the accent.
 
-While Spoken cuts is on, the column under the shot list holds This movie, the pace (Open, Measured, Tight, Frenzied), and Dip to black. Open leaves the longer pauses. Frenzied splits the shorter ones. The same sentence and the same dip are in Settings, and editing either one updates the other. Open card and Close card sit on that same row, beside the pace. Each opens one line, filled with the movie sentence, and Make card. That line stays hidden until then. Make card adds a shot at the front of the tray, or at the end for a close card. It is a shot the person can reorder or remove. It is not painted onto a camera file. While the card is being made, the footer reads "Making the card…".
+Each shot row is the file name and the file size. A missing file says "File missing" in the accent, and the name is the accent too. The selected row is theme.selected and shows "Move up", "Move down", and "Remove". The first Move up and the last Move down are quiet. There is no per-file duration. A small picture from the file sits on the row when one exists.
 
-No Lines block yet.
+Under the list: "Add shots…" and "Add a title card…", then "Open a saved list…" and "Save list…". Save list stays off until there is a shot. "Open a saved list…" stays under the shot list. It is not only in the footer.
 
-The footer bar says "4 shots" on the left and a filled Cut on the right. A missing file turns that row red and says "file not found". Cut is then disabled. The footer reads "1 shot can't be found — remove it to continue".
+The footer, with spoken cuts and a key, reads "4 shots, in this order. Cut finds the lines worth keeping." The filled button is "Cut". With spoken cuts off it reads "Cut joins all 4 shots in this order." A missing file disables Cut. The sentence names the file: "DJI_20261008_092002.MP4 is missing. Remove it, or put the file back." With no key, the sentence is "Spoken cuts need an xAI key." The buttons are "Keep every shot instead" and a filled "Add xAI key…".
 
-Screen: Shots, after a decide
+The selected shot plays in the picture. Play and pause sit on that picture. They do not open a file.
 
-The picture sits on the left, 16:9 and about 240 px tall, with Add videos, the shot list, and the plan under it. Lines scroll the full height on the right. The heading is "Lines" plus "kept (N of M)". A resting row is the accent time and the words. On hover, or on the current row, the row also shows the reason, Play, and Drop or Restore. Dropped words are #e07a7a. Play seeks that shot to the line once the file is ready, then pauses at the end.
+Lines
 
-Under the heading, one field reads "Change this cut", with Send. Before any note, that is the whole thread, so the lines keep their height. After a note, the last few notes sit in a short quiet list above the field, and Revert appears. Send does not encode. The footer can then read "Ready to render", "Ready for captions", or "Ready for a short". Render, Captions, and Short stay the buttons that encode.
+The plan switches to the line list. At the top: "Change this cut" and one field. The empty field says "Tell BotCut what to change, like \"drop the pricing part\"". Sending that note does not encode. After a note, the last note sits under the field, and "Undo this change" appears when the previous list can come back.
 
-With four shots and eight lines, the movie sentence, the pace, Dip to black, Open card, Close card, Change this cut, Lines, Render, and the footer stay fully on screen. If the column is tight, the movie sentence shrinks before a line row does. Cut and Render stay inside the window.
+Each line is a time and the words. The selected line also shows "Play" and "Drop", or "Keep" when it was dropped. A reason, when there is one, reads "unsure", "dropped", or "put back". A dropped line is drawn quieter. Play shows that line in the picture, then pauses at the end. It does not open the trim.
 
-The footer says "3 lines kept", or the job status while one is running. Cut reads Cut again and is not filled. Render is filled. While work is running, both read Cutting…. One job runs at a time. Send, Revert, the card buttons, the pace, and the trim handles are disabled too, the same as the tray. If every line is dropped, the status reads "Restore a line to render". Spoken cuts with no key do not start. The status reads "Set an xAI key for spoken cuts."
+The footer reads "3 of 4 lines kept. Render makes the movie." and the kept time when the line times are known. "Cut again…" is quiet. "Render" is filled. If every line is dropped, Render stays off and the sentence is "Every line is dropped. Keep one to render."
 
-Screen: Watch
+Cut again opens the confirm dialog. It does not start until that dialog says so.
 
-The movie fills the main column. On the picture: "Rough cut · 2:46", plus " (trimmed)" after a hand trim. A zoomed filmstrip shows a "zoomed" chip. It does not name a line number.
+Movie
 
-The bar is play, the filmstrip, the time "0:12  /  2:46", then Captions, Short, and Save. Captions and Short use the cuts.json from this cut. They stay after Save copies the movie. Opening a different video clears them. A hand-trim export is a new file, and that file does not carry those two buttons. Once the timeline has been trimmed, the last button reads Export. Settings and Shots are in the sidebar.
+The picture fills the right column. Under it: play and pause, the filmstrip, and the time, for example "0:12 / 2:46". The filmstrip is the trim. Each kept range has an accent frame and a handle on both ends. Gaps are dim. The playhead is a white line. Hovering a clip offers a small "×" when another clip would remain. A hint chip uses theme.raised and says "Double-click to split", "Double-click to join", or "Double-click to restore". Z zooms the filmstrip to the clip under the playhead. The only extra line is "Zoomed to one shot. Z zooms out." There is no zoom control in the chrome.
 
-Under the bar: "Not yet saved", or "Trimmed by hand · not yet exported", or the job status. Save copies the movie. Export re-encodes a hand trim.
+When the open movie is one file, the plan says "One file, trimmed by hand." When the movie is the plan, the line list stays up and the line under the playhead is marked. A handle then edits that range in its own file. Playback loads the source under the playhead. It does not trim a baked file by scrubbing it.
 
-When the open movie is this cut's plan, the filmstrip is one block per kept range, in order. A handle changes that range inside its own file. Removing a block drops it. Double-clicking a gap puts back the range from when Watch opened. Undo is one gesture. Playback loads the source under the playhead and does not trim the baked file. An untouched plan still Saves by copying the movie. Once a handle has moved, the last button reads Export and re-encodes. Captions and Short stay disabled until that export. A movie that is not a plan cut still trims as one timeline.
+The footer follows the movie. An unsaved rough cut says "Your movie is ready. It's only in a temporary folder until you save it." The filled button is "Save…". A hand trim says "Trimmed by hand. Export writes a new file. Captions and the short wait until then." The filled button is "Export…". A saved rough cut says "Saved as " plus the file name, and offers "Captions", "Vertical short", and "Export another size…". Captions and Vertical short wait until a trimmed plan has been exported. Opening a different video clears them.
 
-Screen: Settings
+While a job runs, the sentence and the button both show the job, and the other buttons hide. The button is disabled and fills with progress when the job reports a percent. One job runs at a time. "Opening…" is the open. "Changing…" is a change to the line list, and the button reads "Changing the list". "Cutting…" is the read. Other jobs keep their own sentences, such as "Reading shots", "Choosing lines", "Making the title card", and "Rendering 42%".
 
-Settings covers the main column. The sidebar stays. Playback is paused. The form is at most 560 px wide.
+Settings
 
-Top right: Done. If Settings was opened from Watch, Back to Watch sits beside Done.
+Settings is a dialog on theme.scrim. The card is theme.surface with a theme.line border. The picture is paused. The title is "How BotCut cuts".
 
-Spoken cuts is a switch, on by default. On, one line reads "Finds the lines that match this movie, and drops the rest." Then "This movie" and the prompt. Off, those are gone and one line reads "Keeps every file, in this order." Dip to black between files stays. The key row is "xAI key" plus a badge: "not set", "set", or "not needed". "not set" is the accent only when Spoken cuts is on. Change opens an empty field. The stored key is never written into it.
+A switch, on by default, reads "Spoken cuts: keeps the lines worth saying. Needs an xAI key." Under it: "Every shot: joins the shots in order." The active choice is full strength. The other is at 62 percent.
 
-Screen: Help
+The key line is "Saved on this computer." or, in the accent, "Not set. Spoken cuts can't run without it." The field starts empty. Its placeholder is "Paste xAI key". "Show" reveals what was typed. "Save key" stores it and clears the field. The stored key is never written back into the field.
 
-The scrim covers the main column, not the sidebar. A card, #1c1c1e, 12 px corners. Title "Keyboard shortcuts". Keys sit in neutral chips. Actions are #d6d6da. Use only the shortcuts below.
+Then three checkboxes. "Fade to black between shots", on by default. "Cover a spoken line with another shot's picture", off by default. "Keep that shot's sound under the voice", on by default, and only available while the cover is on. "Done" is filled and closes the dialog.
 
-┌─────────────┬─────────────────────────────────────┐
-│ Keys        │ Action                              │
-├─────────────┼─────────────────────────────────────┤
-│ Space       │ Play / pause                        │
-├─────────────┼─────────────────────────────────────┤
-│ ← / →       │ Move playhead 1s                    │
-├─────────────┼─────────────────────────────────────┤
-│ Shift ← / → │ Move playhead 5s                    │
-├─────────────┼─────────────────────────────────────┤
-│ Alt ← / →   │ Move playhead 0.2s                  │
-├─────────────┼─────────────────────────────────────┤
-│ [ / ]       │ Previous / next clip edge           │
-├─────────────┼─────────────────────────────────────┤
-│ S           │ Split the clip at the playhead      │
-├─────────────┼─────────────────────────────────────┤
-│ X           │ Remove the clip, or restore the gap │
-├─────────────┼─────────────────────────────────────┤
-│ Ctrl Space  │ Clip start to playhead              │
-├─────────────┼─────────────────────────────────────┤
-│ Alt Space   │ Clip end to playhead                │
-├─────────────┼─────────────────────────────────────┤
-│ Ctrl Z      │ Undo (Ctrl Shift Z redo)            │
-├─────────────┼─────────────────────────────────────┤
-│ Z           │ Zoom to the clip                    │
-├─────────────┼─────────────────────────────────────┤
-│ Ctrl O      │ Open a video                        │
-├─────────────┼─────────────────────────────────────┤
-│ Ctrl S      │ Save or export                      │
-├─────────────┼─────────────────────────────────────┤
-│ Q           │ Quit                                │
-├─────────────┼─────────────────────────────────────┤
-│ ?           │ Show these shortcuts                │
-└─────────────┴─────────────────────────────────────┘
+Help
 
-Clicking the scrim closes it. Help in the sidebar toggles it, and so does "?".
+The same scrim and card. The title is "How BotCut works". Four lines: "Add shots and put them in order." "Cut finds the lines worth keeping." "Drop lines or tell BotCut what to change, then Render." "Watch, trim by hand if you need to, then Save."
 
-Screen: Close
+Then three columns of shortcuts, and only these.
 
-Same scrim and card, on the main column. Two versions. There is no "Don't show again" and no thumbnail.
+Shots and lines: Up / Down selects. Alt+Up / Alt+Down moves. Enter plays. X drops or keeps. Delete removes. Ctrl+Enter presses the filled button.
 
-Unsaved rough cut. Title "Save this movie?". Body: "This cut is only in a temporary folder. Save it, or it will be lost." Buttons, right aligned: Cancel, Lose it, Save. Save is filled.
+Movie: Left / Right is 1 second. Shift+Left / Right is 5 seconds. Alt+Left / Right is 0.2 seconds. [ / ] is the previous or next edge. S splits. X removes or restores. Ctrl / Alt Space sets the edges. Ctrl+Z undoes. Z zooms.
 
-Hand trim that has not been exported. Title "Unexported edit". Body: "Your edit hasn't been exported. Quit anyway?" Buttons: Cancel, Quit, Export. Export is filled.
+Anywhere: Space plays or pauses. Ctrl+S saves or exports. Ctrl+O opens. ? shows these shortcuts. Q quits.
+
+"Close" is filled. Clicking the scrim also closes Help, and so does "?".
+
+Title card
+
+The same scrim and card. The title is "Add a title card". The field starts empty. The placeholder is "Words on the card". Under it: "A still with this sentence, added as a shot you can move or remove." The buttons are "Cancel", "Put it last", and a filled "Put it first". Nothing is added until one of those two place buttons is pressed, and not when the field is empty.
+
+Quit
+
+The same scrim and card. Three versions. There is no "Don't show again" and no thumbnail.
+
+A job is running. Title "Stop the render and quit?". Body "Quitting stops the job and keeps nothing." Buttons: "Keep working" and "Stop and quit".
+
+An unsaved movie. Title "Save your movie before you quit?". Body "It's only in a temporary folder. Quitting deletes it." Buttons: "Keep working", "Quit without saving", and a filled "Save…".
+
+A hand trim that has not been exported. Title "Export your trim before you quit?". Body "Your hand trim isn't in a file yet." Buttons: "Keep working", "Quit without exporting", and a filled "Export…".
+
+The filled button uses the accent. The quiet buttons use theme.raised.
+
+Cut again
+
+The same scrim and card, opened from "Cut again…" once a line list exists. Title "Cut again from the shots?". Body "This replaces the list, including lines you kept or dropped by hand." Buttons: "Keep this list" and a filled "Cut again".
 
 Frame list
 
-Generate these as separate desktop frames, in this order. Keep the chrome identical across them.
+Generate these as separate desktop frames, in this order. Keep the chrome identical across them. Do not draw a sidebar.
 
-1. Shots, empty.
-2. Shots, four files, Cut filled, with This movie, the pace, Open card, Close card, and Dip to black.
-3. Shots, one file missing, Cut disabled.
-4. Shots, drag hovering, accent frame.
-5. Shots, four lines, Render filled, Cut again, plan still under the shot list, Change this cut under Lines.
-6. Shots, rendering, status "Rendering 42%", buttons disabled and reading Cutting….
-7. Watch, rough cut, Captions and Short visible, Save.
-8. Watch, zoomed filmstrip, time line with "zoomed".
-9. Watch, after a hand trim of the rough cut, Captions and Short still visible, Export.
-10. Settings, Spoken cuts on, key not set in accent.
-11. Settings, Spoken cuts off, the one-line explanation, key row secondary.
-12. Settings opened from Watch, with Back to Watch beside Done.
-13. Help card.
-14. Close card, "Save this movie?".
-15. Close card, "Unexported edit".
+1. Empty shots.
+2. Shots, with files, the pace sentence, and Cut filled.
+3. Lines, the first line selected, Render filled, Change this cut above the list.
+4. Movie, play, the filmstrip, and the time.
+5. Settings dialog.
+6. Help dialog.
+7. Title card dialog, the field empty.
+8. Quit dialog.
+9. Cut again dialog.

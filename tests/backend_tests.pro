@@ -8,6 +8,7 @@ INCLUDEPATH += ../src
 
 HEADERS += \
     ../src/backend.h \
+    ../src/theme.h \
     ../src/cutjob.h \
     ../src/keystore.h \
     ../src/edit.h \
@@ -21,6 +22,7 @@ HEADERS += \
 SOURCES += \
     backend_tests.cpp \
     ../src/backend.cpp \
+    ../src/theme.cpp \
     ../src/keystore.cpp \
     ../src/cutjob.cpp \
     ../src/edit.cpp \

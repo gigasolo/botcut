@@ -35,6 +35,12 @@ class Backend : public QObject {
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    // Where the founder is on shots → lines → movie. The window's one sentence.
+    Q_PROPERTY(QString step READ step NOTIFY stepChanged)
+    // The running job, empty when idle. progress is -1 when idle and 0..1 while it runs.
+    Q_PROPERTY(QString job READ job NOTIFY jobChanged)
+    Q_PROPERTY(QString jobText READ jobText NOTIFY jobChanged)
+    Q_PROPERTY(qreal progress READ progress NOTIFY jobChanged)
     Q_PROPERTY(QStringList tray READ tray NOTIFY trayChanged)
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY trayChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY cutModeChanged)
@@ -80,6 +86,13 @@ public:
     int thumbRevision() const { return m_thumbRevision; }
     bool busy() const { return m_busy; }
     QString status() const { return m_status; }
+    QString step() const { return m_step; }
+    QString job() const { return m_job; }
+    QString jobText() const { return m_jobText; }
+    qreal progress() const { return m_progress; }
+    // Fills job, progress, and the words for the button. Returns false for
+    // "Trying again", which must leave the running job alone.
+    static bool describeJob(const QString &status, QString *job, qreal *progress, QString *text);
     QStringList tray() const { return m_tray; }
     int trayIndex() const { return m_trayIndex; }
     QString cutMode() const { return m_cutMode; }
@@ -185,6 +198,8 @@ signals:
     void thumbsChanged();
     void busyChanged();
     void statusChanged();
+    void stepChanged();
+    void jobChanged();
     void trayChanged();
     void trayThumbsChanged();
     void cutModeChanged();
@@ -211,6 +226,8 @@ signals:
 private:
     void setBusy(bool busy);
     void setStatus(const QString &status);
+    void refreshStep();
+    QString computeStep() const;
     void failExport(const QString &tmpPath, const QString &message);
     void copyCut(const QUrl &dst);
     void finishSavedCut(const QString &outPath);
@@ -291,6 +308,10 @@ private:
     bool m_thumbWorkerDone = false;
     bool m_busy = false;
     QString m_status;
+    QString m_step = QStringLiteral("empty");
+    QString m_job;
+    QString m_jobText;
+    qreal m_progress = -1;
     QStringList m_tray;
     int m_trayIndex = -1;
     QString m_cutMode = QStringLiteral("speech");

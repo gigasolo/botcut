@@ -23,8 +23,15 @@ ApplicationWindow {
     readonly property bool gathering: backend.gathering
     readonly property bool linesOpen: gathering && backend.selects.length > 0
     readonly property bool previewing: gathering && backend.previewUrl.toString() !== ""
-    readonly property color accent: backend.themeAccent
-    readonly property color accentForeground: backend.themeAccentForeground
+    readonly property color accent: theme.accent
+    readonly property color accentForeground: theme.accentForeground
+    readonly property bool controlFocused: activeFocusItem
+            && (activeFocusItem instanceof TextInput
+                || activeFocusItem instanceof TextEdit
+                || activeFocusItem instanceof TextArea
+                || activeFocusItem instanceof AbstractButton
+                || activeFocusItem instanceof ComboBox
+                || activeFocusItem instanceof Slider)
     readonly property bool audioOutputReady: audioOutput !== null
     property var audioOutput: null
     // So the first device signal does not reopen a stream already on this default.
@@ -61,6 +68,7 @@ ApplicationWindow {
 
     Material.theme: Material.Dark
     Material.accent: win.accent
+    Material.roundedScale: theme.radius
     color: "#0e0e10"
 
     function fileName(url) {
@@ -141,6 +149,52 @@ ApplicationWindow {
             return "No shots yet";
         return backend.tray.length + (backend.tray.length === 1 ? " shot" : " shots");
     }
+    function firstMissingShot() {
+        for (var i = 0; i < backend.tray.length; i++) {
+            if (!backend.trayFileExists(backend.tray[i]))
+                return baseName(backend.tray[i]);
+        }
+        return "";
+    }
+    // The stub used by layout tests leaves step empty, and the old sentence stays.
+    function actionSentence() {
+        if (backend.job !== "")
+            return backend.jobText !== "" ? backend.jobText : backend.status;
+        var step = backend.step;
+        if (!step)
+            return shotsStatus();
+        if (step === "needsKey")
+            return qsTr("Spoken cuts need an xAI key.");
+        if (step === "missingShot")
+            return qsTr("%1 is missing. Remove it, or put the file back.").arg(firstMissingShot());
+        if (step === "shotsReady") {
+            var count = backend.tray.length;
+            if (backend.cutMode !== "speech")
+                return qsTr("Cut joins all %1 shots in this order.").arg(count);
+            return qsTr("%1 shots, in this order. Cut finds the lines worth keeping.").arg(count);
+        }
+        if (step === "lines") {
+            return qsTr("%1 of %2 lines kept. Render makes the movie.")
+                    .arg(keptLineCount()).arg(backend.selects.length);
+        }
+        if (step === "allDropped")
+            return qsTr("Every line is dropped. Keep one to render.");
+        if (step === "movieUnsaved")
+            return qsTr("Your movie is ready. It's only in a temporary folder until you save it.");
+        if (step === "trimmed")
+            return qsTr("Trimmed by hand. Export writes a new file. Captions and the short wait until then.");
+        if (step === "movieSaved")
+            return qsTr("Saved.");
+        if (step === "empty")
+            return qsTr("Add the shots for one movie. You can put them in order after.");
+        if (step === "working")
+            return backend.jobText !== "" ? backend.jobText : backend.status;
+        return shotsStatus();
+    }
+    function actionNeedsYou() {
+        return backend.step === "needsKey" || backend.step === "missingShot"
+                || backend.step === "allDropped";
+    }
     function statusPercent() {
         var match = /(?:Rendering|Opening) (\d+)%/.exec(backend.status);
         if (!match)
@@ -179,7 +233,7 @@ ApplicationWindow {
         if (backend.trayIndex !== clip)
             backend.trayIndex = clip;
         ensureAudioOutput();
-        player.armLine();
+        movie.player.armLine();
     }
     // Load the source under a plan-filmstrip time and seek to that source range.
     function armPlan(displayTime, play) {
@@ -202,7 +256,7 @@ ApplicationWindow {
             planArmed = false;
             linePlayStart = -1;
             linePlayEnd = -1;
-            player.pause();
+            movie.player.pause();
             return;
         }
         linePlayStart = Math.max(0, Math.round(hit.source * 1000));
@@ -210,20 +264,20 @@ ApplicationWindow {
         planIndex = hit.index;
         var url = fileUrl(hit.path);
         ensureAudioOutput();
-        if (player.priming)
-            player.finishPriming();
+        if (movie.player.priming)
+            movie.player.finishPriming();
         if (planSource !== url) {
             planSource = url;
-            player.armLine();
+            movie.player.armLine();
             return;
         }
         if (play) {
-            if (player.playbackState !== MediaPlayer.PlayingState)
-                player.play();
-            player.position = linePlayStart;
+            if (movie.player.playbackState !== MediaPlayer.PlayingState)
+                movie.player.play();
+            movie.player.position = linePlayStart;
         } else {
-            player.pause();
-            player.position = linePlayStart;
+            movie.player.pause();
+            movie.player.position = linePlayStart;
         }
     }
     function showNotice(text) {
@@ -235,8 +289,8 @@ ApplicationWindow {
     }
     function openSettings() {
         settingsFromMovie = hasVideo && !gathering;
-        if (player.playbackState === MediaPlayer.PlayingState)
-            player.pause();
+        if (movie.player.playbackState === MediaPlayer.PlayingState)
+            movie.player.pause();
         settingsOpen = true;
     }
     function closeSettings() {
@@ -255,7 +309,7 @@ ApplicationWindow {
         } else if (backend.duration <= 0) {
             return;
         }
-        player.pause();
+        movie.player.pause();
         planPlaying = false;
         if (backend.planCut && backend.plan.unexported)
             backend.exportPlan();
@@ -264,7 +318,7 @@ ApplicationWindow {
     }
     function ensureAudioOutput() {
         if (audioOutput === null && (win.hasVideo || win.previewing)) {
-            audioOutput = audioOutputComponent.createObject(win);
+            audioOutput = movie.audioOutputComponent.createObject(win);
             rememberDefaultOutput();
         }
     }
@@ -278,7 +332,7 @@ ApplicationWindow {
     // QByteArray ids arrive as an ArrayBuffer. An empty device must not throw.
     function currentOutputId() {
         try {
-            var device = playbackDevices.defaultAudioOutput;
+            var device = movie.playbackDevices.defaultAudioOutput;
             if (!device)
                 return "";
             var raw = device.id;
@@ -311,17 +365,17 @@ ApplicationWindow {
         playbackDeviceId = id;
         if (audioOutput === null)
             return;
-        var wasPlaying = player.playbackState === MediaPlayer.PlayingState && !player.priming;
-        var at = player.position;
-        audioOutput.device = playbackDevices.defaultAudioOutput;
+        var wasPlaying = movie.player.playbackState === MediaPlayer.PlayingState && !movie.player.priming;
+        var at = movie.player.position;
+        audioOutput.device = movie.playbackDevices.defaultAudioOutput;
         if (!wasPlaying)
             return;
         // Seek only after play. A seek on a paused FFmpeg player clears the picture.
-        player.pause();
-        player.play();
+        movie.player.pause();
+        movie.player.play();
         Qt.callLater(function() {
-            if (player.playbackState === MediaPlayer.PlayingState)
-                player.position = at;
+            if (movie.player.playbackState === MediaPlayer.PlayingState)
+                movie.player.position = at;
         });
     }
     function syncPlaybackAudio() {
@@ -329,7 +383,7 @@ ApplicationWindow {
             ensureAudioOutput();
             return;
         }
-        player.stop();
+        movie.player.stop();
         releaseAudioOutput();
     }
     function togglePlay() {
@@ -337,22 +391,22 @@ ApplicationWindow {
             if (!win.previewing)
                 return;
             ensureAudioOutput();
-            if (player.priming)
-                player.finishPriming();
-            if (player.playbackState === MediaPlayer.PlayingState)
-                player.pause();
+            if (movie.player.priming)
+                movie.player.finishPriming();
+            if (movie.player.playbackState === MediaPlayer.PlayingState)
+                movie.player.pause();
             else
-                player.play();
+                movie.player.play();
             return;
         }
         if (backend.planCut) {
             if (backend.plan.duration <= 0)
                 return;
             ensureAudioOutput();
-            if (player.priming)
-                player.finishPriming();
-            if (player.playbackState === MediaPlayer.PlayingState) {
-                player.pause();
+            if (movie.player.priming)
+                movie.player.finishPriming();
+            if (movie.player.playbackState === MediaPlayer.PlayingState) {
+                movie.player.pause();
                 planPlaying = false;
                 return;
             }
@@ -363,43 +417,45 @@ ApplicationWindow {
         if (!win.hasVideo || backend.duration <= 0)
             return;
         ensureAudioOutput();
-        if (player.priming)
-            player.finishPriming();
-        if (player.playbackState === MediaPlayer.PlayingState) {
-            player.pause();
+        if (movie.player.priming)
+            movie.player.finishPriming();
+        if (movie.player.playbackState === MediaPlayer.PlayingState) {
+            movie.player.pause();
             return;
         }
         // Play only the clips: from the playhead if it's in one, else from
         // the next clip, and from the top once past the last.
         var from = timeline.playableFrom(editBar.playheadSec);
         seekTo(from < 0 ? timeline.edgeFrom(0, -1) : from);
-        player.play();
+        movie.player.play();
     }
     function seekTo(seconds) {
         if (backend.planCut) {
             if (backend.plan.duration <= 0)
                 return;
-            if (player.priming)
-                player.finishPriming();
+            if (movie.player.priming)
+                movie.player.finishPriming();
             var planTime = Math.max(0, Math.min(seconds, backend.plan.duration));
             editBar.playheadSec = planTime;
-            var keepPlaying = planPlaying && player.playbackState === MediaPlayer.PlayingState;
+            var keepPlaying = planPlaying && movie.player.playbackState === MediaPlayer.PlayingState;
             armPlan(planTime, keepPlaying);
             return;
         }
         if (!win.hasVideo || backend.duration <= 0)
             return;
-        if (player.priming)
-            player.finishPriming();
+        if (movie.player.priming)
+            movie.player.finishPriming();
         var t = Math.max(0, Math.min(seconds, backend.duration));
         editBar.playheadSec = t;
-        player.position = Math.round(t * 1000);
+        movie.player.position = Math.round(t * 1000);
     }
     property bool quitting: false
     function requestQuit() {
-        if (unexported || looseCut) {
-            if (player.playbackState === MediaPlayer.PlayingState)
-                player.pause();
+        // A running job is neither an unsaved movie nor a hand trim, and it
+        // used to quit with no ask. Ask first, and let that win over Save/Export.
+        if (backend.busy || unexported || looseCut) {
+            if (movie.player.playbackState === MediaPlayer.PlayingState)
+                movie.player.pause();
             quitConfirmVisible = true;
             return;
         }
@@ -410,7 +466,7 @@ ApplicationWindow {
     // backstop. The quitting flag stops onClosing from re-asking on the way out.
     function forceQuit() {
         quitting = true;
-        player.stop();
+        movie.player.stop();
         releaseAudioOutput();
         win.close();
         Qt.quit();
@@ -425,10 +481,10 @@ ApplicationWindow {
     onClosing: (close) => {
         if (win.quitting)
             return;
-        if (win.unexported || win.looseCut) {
+        if (backend.busy || win.unexported || win.looseCut) {
             close.accepted = false;
-            if (player.playbackState === MediaPlayer.PlayingState)
-                player.pause();
+            if (movie.player.playbackState === MediaPlayer.PlayingState)
+                movie.player.pause();
             win.quitConfirmVisible = true;
             return;
         }
@@ -442,8 +498,7 @@ ApplicationWindow {
         sequence: "Space"
         context: Qt.ApplicationShortcut
         enabled: !win.quitConfirmVisible && !win.settingsOpen && (win.hasVideo || win.previewing)
-                 && !keyField.activeFocus && !intentField.activeFocus && !planIntent.activeFocus
-                 && !reviseInput.activeFocus
+                 && !win.controlFocused
         onActivated: togglePlay()
     }
 
@@ -494,7 +549,7 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         enabled: win.editing
         onActivated: {
-            player.pause();
+            movie.player.pause();
             seekTo(timeline.edgeFrom(editBar.playheadSec, -1));
         }
     }
@@ -504,7 +559,7 @@ ApplicationWindow {
         context: Qt.ApplicationShortcut
         enabled: win.editing
         onActivated: {
-            player.pause();
+            movie.player.pause();
             seekTo(timeline.edgeFrom(editBar.playheadSec, 1));
         }
     }
@@ -611,211 +666,12 @@ ApplicationWindow {
         }
     }
 
-    MediaPlayer {
-        id: player
-        source: win.gathering ? backend.previewUrl : (win.planSource !== "" ? win.planSource : backend.source)
-        videoOutput: videoOut
-        audioOutput: win.audioOutput
 
-        // Render the opening frame on load instead of showing black. Playback
-        // starts muted and stops as soon as VideoOutput receives a frame.
-        // A line seek waits until this file is loaded, starts playback, then
-        // seeks. Seeking a paused FFmpeg player clears the picture and stalls.
-        property bool primed: false
-        property bool priming: false
-        property bool lineSeeked: false
-        property bool lineArmed: false
-        property int lineToken: 0
-
-        function mediaReady() {
-            return mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia;
-        }
-
-        function armLine() {
-            ++lineToken;
-            lineArmed = false;
-            lineSeeked = false;
-            priming = false;
-            primeFallback.stop();
-            playLoadedLine();
-        }
-
-        function playLoadedLine() {
-            if (win.linePlayStart < 0 || lineSeeked)
-                return;
-            priming = false;
-            primeFallback.stop();
-            if (!mediaReady())
-                return;
-            primed = true;
-            var token = lineToken;
-            if (playbackState !== MediaPlayer.PlayingState)
-                play();
-            if (playbackState === MediaPlayer.PlayingState)
-                seekPlayingLine(token);
-        }
-
-        function seekPlayingLine(token) {
-            if (lineSeeked || token !== lineToken || win.linePlayStart < 0 || !mediaReady())
-                return;
-            lineSeeked = true;
-            Qt.callLater(function() {
-                if (token !== lineToken || win.linePlayStart < 0 || !mediaReady())
-                    return;
-                position = win.linePlayStart;
-            });
-        }
-
-        function startPriming() {
-            if (win.linePlayStart >= 0) {
-                playLoadedLine();
-                return;
-            }
-            if (primed || priming || source.toString() === "")
-                return;
-            win.ensureAudioOutput();
-            primed = true;
-            priming = true;
-            position = 0;
-            play();
-            primeFallback.restart();
-        }
-
-        function finishPriming() {
-            if (!priming)
-                return;
-            primeFallback.stop();
-            pause();
-            if (win.linePlayStart < 0)
-                position = 0;
-            priming = false;
-        }
-
-        onSourceChanged: {
-            primeFallback.stop();
-            priming = false;
-            primed = false;
-            lineSeeked = false;
-            lineArmed = false;
-            ++lineToken;
-        }
-        onMediaStatusChanged: {
-            if (mediaReady())
-                startPriming();
-        }
-        onPlaybackStateChanged: {
-            if (playbackState === MediaPlayer.PlayingState)
-                seekPlayingLine(lineToken);
-        }
-        onPositionChanged: {
-            if (win.gathering && win.linePreview && win.linePlayStart >= 0
-                    && win.linePlayEnd >= win.linePlayStart) {
-                if (!lineArmed && position + 250 >= win.linePlayStart && position < win.linePlayEnd)
-                    lineArmed = true;
-                if (lineArmed && Format.linePlayReachedEnd(position, win.linePlayStart, win.linePlayEnd,
-                        playbackState === MediaPlayer.PlayingState)) {
-                    lineArmed = false;
-                    win.linePreview = false;
-                    pause();
-                    win.linePlayStart = -1;
-                    win.linePlayEnd = -1;
-                    return;
-                }
-            }
-            // The player is on one source file. Its position is not the filmstrip clock.
-            if (backend.planCut && !win.gathering) {
-                if (priming && position > 0) {
-                    finishPriming();
-                    return;
-                }
-                if (win.linePlayStart >= 0 && win.linePlayEnd >= win.linePlayStart) {
-                    if (!win.planArmed && position + 250 >= win.linePlayStart && position < win.linePlayEnd)
-                        win.planArmed = true;
-                    if (win.planPlaying && win.planArmed && Format.linePlayReachedEnd(position, win.linePlayStart,
-                            win.linePlayEnd, playbackState === MediaPlayer.PlayingState)) {
-                        // The shared display time is also the block that just finished.
-                        var nextIndex = win.planIndex + 1;
-                        win.planArmed = false;
-                        if (nextIndex < 0 || nextIndex >= backend.plan.clips.length) {
-                            pause();
-                            win.planPlaying = false;
-                            editBar.playheadSec = backend.plan.edgeFrom(backend.plan.duration, 1);
-                        } else {
-                            var sourceStart = backend.plan.edgeTime(nextIndex, true);
-                            editBar.playheadSec = backend.plan.displayForSource(nextIndex, sourceStart);
-                            win.armPlanIndex(nextIndex, sourceStart, true);
-                        }
-                        return;
-                    }
-                    if (!win.planPlaying && lineSeeked && playbackState === MediaPlayer.PlayingState
-                            && Math.abs(position - win.linePlayStart) < 400) {
-                        win.planArmed = true;
-                        pause();
-                    }
-                    if (!editBar.interacting && win.planIndex >= 0) {
-                        var shown = Math.max(win.linePlayStart, Math.min(position, win.linePlayEnd)) / 1000;
-                        var display = backend.plan.displayForSource(win.planIndex, shown);
-                        // A paused out-point maps to the next block's start. Keep this block.
-                        if (!win.planPlaying) {
-                            var blockEnd = backend.plan.displayForSource(
-                                    win.planIndex, backend.plan.edgeTime(win.planIndex, false));
-                            if (display >= blockEnd - 0.0005)
-                                display = backend.plan.playheadForEdge(win.planIndex, false);
-                        }
-                        editBar.playheadSec = display;
-                    }
-                }
-                return;
-            }
-            if (!win.gathering) {
-                win.linePlayStart = -1;
-                win.linePlayEnd = -1;
-                win.linePreview = false;
-                lineArmed = false;
-            }
-            if (priming && position > 0) {
-                finishPriming();
-                return;
-            }
-            if (win.gathering)
-                return;
-            // Play only the clips: hop over gaps and stop after the last clip.
-            if (playbackState === MediaPlayer.PlayingState) {
-                var t = position / 1000, next = timeline.playableFrom(t);
-                // Past the last clip: stop where we are. Seeking to its end
-                // could land past the final frame.
-                if (next < 0) {
-                    pause();
-                    editBar.playheadSec = timeline.edgeFrom(backend.duration, 1);
-                    return;
-                }
-                if (next - t > 0.05) {
-                    position = Math.round(next * 1000);
-                    return;
-                }
-            }
-            if (!editBar.interacting)
-                editBar.playheadSec = position / 1000;
-        }
-    }
-
-    MediaDevices {
-        id: playbackDevices
-        onAudioOutputsChanged: win.followDefaultOutput()
-    }
-
-    Component {
-        id: audioOutputComponent
-        AudioOutput {
-            muted: player.priming
-        }
-    }
-
-    Timer {
-        id: primeFallback
-        interval: 250
-        repeat: false
-        onTriggered: player.finishPriming()
+    MoviePlayer {
+        id: movie
+        host: win
+        film: editBar
+        videoItem: videoOut
     }
 
     Timer {
@@ -1488,7 +1344,7 @@ ApplicationWindow {
                     Connections {
                         target: videoOut.videoSink
                         function onVideoFrameChanged(frame) {
-                            player.finishPriming();
+                            movie.player.finishPriming();
                         }
                     }
                     MouseArea {
@@ -1504,8 +1360,8 @@ ApplicationWindow {
                         anchors.left: parent.left
                         anchors.bottom: parent.bottom
                         anchors.margins: 12
-                        iconName: player.playbackState === MediaPlayer.PlayingState && !player.priming ? "pause" : "play"
-                        tipText: player.playbackState === MediaPlayer.PlayingState ? "Pause" : "Play"
+                        iconName: movie.player.playbackState === MediaPlayer.PlayingState && !movie.player.priming ? "pause" : "play"
+                        tipText: movie.player.playbackState === MediaPlayer.PlayingState ? "Pause" : "Play"
                         onClicked: togglePlay()
                     }
                     Rectangle {
@@ -2185,8 +2041,8 @@ ApplicationWindow {
                 IconButton {
                     Layout.preferredWidth: 36
                     Layout.preferredHeight: 36
-                    iconName: player.playbackState === MediaPlayer.PlayingState && !player.priming ? "pause" : "play"
-                    tipText: player.playbackState === MediaPlayer.PlayingState ? "Pause" : "Play"
+                    iconName: movie.player.playbackState === MediaPlayer.PlayingState && !movie.player.priming ? "pause" : "play"
+                    tipText: movie.player.playbackState === MediaPlayer.PlayingState ? "Pause" : "Play"
                     enabled: backend.duration > 0
                     onClicked: togglePlay()
                 }
@@ -2197,7 +2053,7 @@ ApplicationWindow {
                     accent: win.accent
                     accentForeground: win.accentForeground
                     onScrub: (seconds, segment, source) => {
-                        player.pause();
+                        movie.player.pause();
                         if (backend.planCut && segment >= 0) {
                             planPlaying = false;
                             armPlanIndex(segment, source, false);
@@ -2227,19 +2083,36 @@ ApplicationWindow {
                     onClicked: backend.makeShort()
                 }
                 PillButton {
-                    text: win.looseCut ? "Save" : "Export"
-                    filled: true
+                    visible: backend.job === ""
+                            && !(backend.roughCut && !win.looseCut && !win.unexported
+                                 && backend.step === "movieSaved")
+                    text: win.looseCut ? qsTr("Save…") : qsTr("Export…")
+                    filled: win.looseCut || win.unexported || !backend.roughCut
                     enabled: backend.duration > 0 && !backend.busy
                     onClicked: exportVideo()
+                }
+                QuietButton {
+                    visible: backend.job === "" && backend.roughCut && !win.looseCut && !win.unexported
+                    text: qsTr("Export another size…")
+                    enabled: backend.duration > 0 && !backend.busy
+                    onClicked: exportVideo()
+                }
+                ActionButton {
+                    visible: backend.job !== ""
+                    text: backend.jobText
+                    progress: backend.progress
+                    primary: true
+                    enabled: false
                 }
             }
 
             Label {
                 visible: win.hasVideo && !win.gathering && text !== ""
                 Layout.fillWidth: true
-                text: win.statusText !== "" ? win.statusText
-                      : (win.unexported ? "Trimmed by hand · not yet exported"
-                         : (win.looseCut ? "Not yet saved" : ""))
+                text: backend.step !== "" ? actionSentence()
+                      : (win.statusText !== "" ? win.statusText
+                         : (win.unexported ? "Trimmed by hand · not yet exported"
+                            : (win.looseCut ? "Not yet saved" : "")))
                 color: win.noticeText !== "" ? win.accent : "#7a7a80"
                 font.pixelSize: 12
                 font.family: "monospace"
@@ -2295,14 +2168,6 @@ ApplicationWindow {
                 height: 1
                 color: "#2c2c2f"
             }
-            Rectangle {
-                visible: statusPercent() >= 0
-                anchors.top: parent.top
-                anchors.left: parent.left
-                height: 2
-                width: parent.width * statusPercent() / 100
-                color: win.accent
-            }
             RowLayout {
                 anchors.fill: parent
                 anchors.leftMargin: 16
@@ -2310,28 +2175,54 @@ ApplicationWindow {
                 spacing: 14
                 Label {
                     Layout.fillWidth: true
-                    text: shotsStatus()
-                    color: win.statusText === "" && missingShotCount() > 0 ? "#e07a7a" : "#7a7a80"
+                    text: actionSentence()
+                    color: actionNeedsYou() ? win.accent
+                            : (backend.step === "" && win.statusText === "" && missingShotCount() > 0
+                               ? "#e07a7a" : "#7a7a80")
                     font.pixelSize: 12
                     font.family: "monospace"
                     elide: Text.ElideRight
                 }
-                PillButton {
+                ActionButton {
+                    visible: backend.step === "needsKey" && backend.job === ""
+                    text: qsTr("Keep every shot instead")
+                    enabled: !backend.busy
+                    onClicked: backend.cutMode = "assemble"
+                }
+                ActionButton {
+                    visible: backend.job !== ""
+                    text: backend.jobText
+                    progress: backend.progress
+                    primary: true
+                    enabled: false
+                }
+                ActionButton {
                     id: cutButton
                     objectName: "cutButton"
-                    Layout.minimumWidth: implicitWidth
-                    text: backend.busy ? "Cutting…" : (backend.selects.length > 0 ? "Cut again" : "Cut")
-                    filled: backend.tray.length > 0 && backend.selects.length === 0 && !backend.busy
+                    visible: backend.job === "" && backend.step !== "needsKey" && backend.step !== "missingShot"
+                    text: backend.busy ? qsTr("Cutting…") : (backend.selects.length > 0 ? qsTr("Cut again") : qsTr("Cut"))
+                    primary: backend.tray.length > 0 && backend.selects.length === 0 && !backend.busy
                     enabled: backend.tray.length > 0 && !backend.busy && !backend.trayMissing
                     onClicked: backend.startCut()
                 }
-                PillButton {
-                    visible: backend.selects.length > 0
-                    Layout.minimumWidth: implicitWidth
-                    text: backend.busy ? "Cutting…" : "Render"
-                    filled: !backend.busy
-                    enabled: !backend.busy
+                ActionButton {
+                    visible: backend.job === "" && backend.selects.length > 0
+                            && backend.step !== "needsKey" && backend.step !== "missingShot"
+                    text: backend.busy ? qsTr("Cutting…") : qsTr("Render")
+                    primary: !backend.busy && backend.step !== "allDropped"
+                    enabled: !backend.busy && backend.step !== "allDropped"
+                            && (backend.step !== "lines" || keptLineCount() > 0)
                     onClicked: backend.renderSelects()
+                }
+                ActionButton {
+                    visible: backend.step === "needsKey" && backend.job === ""
+                    text: qsTr("Add xAI key…")
+                    primary: true
+                    enabled: !backend.busy
+                    onClicked: {
+                        openSettings();
+                        keyField.forceActiveFocus();
+                    }
                 }
             }
         }
@@ -2602,11 +2493,18 @@ ApplicationWindow {
                     spacing: 10
 
                     Label {
-                        text: "Keyboard shortcuts"
+                        text: qsTr("How BotCut works")
                         color: "white"
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
                         bottomPadding: 8
+                    }
+                    Label {
+                        width: 420
+                        wrapMode: Text.WordWrap
+                        color: "#d6d6da"
+                        font.pixelSize: 13
+                        text: qsTr("Add shots and put them in order. Cut finds the lines worth keeping. Drop lines, or tell BotCut what to change, then Render. Watch, trim by hand if you need to, then Save.")
                     }
 
                     Repeater {
@@ -2664,7 +2562,11 @@ ApplicationWindow {
             color: "#000000cc"
             z: 30
             onVisibleChanged: {
-                if (visible)
+                if (!visible)
+                    return;
+                if (backend.busy)
+                    quitCancelButton.forceActiveFocus();
+                else
                     quitExportButton.forceActiveFocus();
             }
 
@@ -2677,7 +2579,7 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 width: quitColumn.width + 64
                 height: quitColumn.height + 48
-                radius: 12
+                radius: theme.radius
                 color: "#1c1c1e"
 
                 MouseArea { anchors.fill: parent }
@@ -2688,19 +2590,23 @@ ApplicationWindow {
                     spacing: 8
 
                     Label {
-                        text: win.looseCut ? "Save this movie?" : "Unexported edit"
+                        text: backend.busy ? qsTr("Stop the render and quit?")
+                                : (win.looseCut ? qsTr("Save your movie before you quit?")
+                                   : qsTr("Export your trim before you quit?"))
                         color: "white"
                         font.pixelSize: 16
                         font.weight: Font.DemiBold
                     }
                     Label {
-                        text: win.looseCut
-                              ? "This cut is only in a temporary folder. Save it, or it will be lost."
-                              : "Your edit hasn't been exported. Quit anyway?"
+                        text: backend.busy
+                              ? qsTr("Quitting stops the job and keeps nothing.")
+                              : (win.looseCut
+                                 ? qsTr("It's only in a temporary folder. Quitting deletes it.")
+                                 : qsTr("Your hand trim isn't in a file yet."))
                         color: "#d6d6da"
                         font.pixelSize: 13
                         wrapMode: Text.WordWrap
-                        width: 360
+                        width: 420
                         bottomPadding: 12
                     }
                     Row {
@@ -2708,26 +2614,32 @@ ApplicationWindow {
                         spacing: 10
                         DialogButton {
                             id: quitCancelButton
-                            text: "Cancel"
-                            KeyNavigation.left: quitExportButton
+                            text: qsTr("Keep working")
+                            focus: true
+                            KeyNavigation.left: quitExportButton.visible ? quitExportButton : quitQuitButton
                             KeyNavigation.right: quitQuitButton
                             KeyNavigation.tab: quitQuitButton
-                            KeyNavigation.backtab: quitExportButton
+                            KeyNavigation.backtab: quitExportButton.visible ? quitExportButton : quitQuitButton
                             onClicked: win.quitConfirmVisible = false
                         }
                         DialogButton {
                             id: quitQuitButton
-                            text: win.looseCut ? "Lose it" : "Quit"
+                            text: backend.busy ? qsTr("Stop and quit")
+                                    : (win.looseCut ? qsTr("Quit without saving")
+                                       : qsTr("Quit without exporting"))
+                            focus: true
                             KeyNavigation.left: quitCancelButton
-                            KeyNavigation.right: quitExportButton
-                            KeyNavigation.tab: quitExportButton
+                            KeyNavigation.right: quitExportButton.visible ? quitExportButton : quitCancelButton
+                            KeyNavigation.tab: quitExportButton.visible ? quitExportButton : quitCancelButton
                             KeyNavigation.backtab: quitCancelButton
                             onClicked: forceQuit()
                         }
                         DialogButton {
                             id: quitExportButton
-                            text: win.looseCut ? "Save" : "Export"
+                            visible: !backend.busy
+                            text: win.looseCut ? qsTr("Save…") : qsTr("Export…")
                             primary: true
+                            focus: true
                             KeyNavigation.left: quitQuitButton
                             KeyNavigation.right: quitCancelButton
                             KeyNavigation.tab: quitCancelButton
@@ -2748,9 +2660,9 @@ ApplicationWindow {
         function onInfoChanged() {
             win.noticeText = "";
             noticeTimer.stop();
-            primeFallback.stop();
-            player.priming = false;
-            player.primed = false;
+            movie.primeFallback.stop();
+            movie.player.priming = false;
+            movie.player.primed = false;
             editBar.zoomed = false;
             editBar.playheadSec = 0;
             if (backend.planCut)

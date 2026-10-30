@@ -12,6 +12,7 @@
 #include <QVariantMap>
 #include <QPointer>
 #include <QProcess>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QSettings>
 #include <QStandardPaths>
@@ -171,6 +172,20 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     // Only an explicit false is clip sound. A missing or unknown value stays mix.
     const QString storedMix = QSettings().value(QStringLiteral("brollMix"), true).toString();
     m_brollMix = storedMix != QLatin1String("false");
+
+    const auto refresh = [this] { refreshStep(); };
+    connect(this, &Backend::busyChanged, this, refresh);
+    connect(this, &Backend::trayChanged, this, refresh);
+    connect(this, &Backend::selectsChanged, this, refresh);
+    connect(this, &Backend::gatheringChanged, this, refresh);
+    connect(this, &Backend::apiKeyChanged, this, refresh);
+    connect(this, &Backend::cutModeChanged, this, refresh);
+    connect(this, &Backend::renderedUnsavedChanged, this, refresh);
+    connect(this, &Backend::infoChanged, this, refresh);
+    connect(this, &Backend::planChanged, this, refresh);
+    connect(&m_timeline, &Timeline::changed, this, refresh);
+    connect(&m_plan, &PlanFilm::changed, this, refresh);
+    refreshStep();
 }
 
 Backend::~Backend() {
@@ -229,6 +244,109 @@ void Backend::setStatus(const QString &status) {
         return;
     m_status = status;
     emit statusChanged();
+    QString job;
+    qreal progress = -1;
+    QString text;
+    if (!describeJob(status, &job, &progress, &text))
+        return;
+    const bool same = job == m_job && text == m_jobText && qAbs(progress - m_progress) < 0.0001;
+    m_job = job;
+    m_jobText = text;
+    m_progress = progress;
+    if (!same)
+        emit jobChanged();
+    refreshStep();
+}
+
+bool Backend::describeJob(const QString &status, QString *job, qreal *progress, QString *text) {
+    if (status == QLatin1String("Trying again"))
+        return false;
+    auto fill = [&](const QString &name, qreal value, const QString &words) {
+        *job = name;
+        *progress = value;
+        *text = words;
+        return true;
+    };
+    static const QRegularExpression percent(
+        QStringLiteral("^(Rendering|Exporting|Opening) (\\d+)%$"));
+    const auto percentMatch = percent.match(status);
+    if (percentMatch.hasMatch()) {
+        const QString kind = percentMatch.captured(1);
+        const int n = qBound(0, percentMatch.captured(2).toInt(), 100);
+        QString name = QStringLiteral("rendering");
+        if (kind == QLatin1String("Exporting"))
+            name = QStringLiteral("exporting");
+        else if (kind == QLatin1String("Opening"))
+            name = QStringLiteral("opening");
+        return fill(name, n / 100.0, status);
+    }
+    static const QRegularExpression transcribing(
+        QStringLiteral("^Transcribing (\\d+)/(\\d+)\\b"));
+    const auto transcribingMatch = transcribing.match(status);
+    if (transcribingMatch.hasMatch()) {
+        const int done = transcribingMatch.captured(1).toInt();
+        const int total = transcribingMatch.captured(2).toInt();
+        const qreal value = total > 0 ? qBound(0.0, double(done) / double(total), 1.0) : 0;
+        return fill(QStringLiteral("transcribing"), value,
+                    tr("Transcribing %1 of %2").arg(done).arg(total));
+    }
+    // Ellipsis is not Latin-1, so these compare as QString.
+    if (status == QStringLiteral("Reading files") || status == QStringLiteral("Reading pictures")
+            || status == QStringLiteral("Cutting…"))
+        return fill(QStringLiteral("reading"), 0, tr("Reading shots"));
+    if (status == QStringLiteral("Choosing takes"))
+        return fill(QStringLiteral("choosing"), 0, tr("Choosing lines"));
+    if (status == QStringLiteral("Revising"))
+        return fill(QStringLiteral("changing"), 0, tr("Changing the list"));
+    if (status == QStringLiteral("Making the card…"))
+        return fill(QStringLiteral("card"), 0, tr("Making the title card"));
+    if (status == QStringLiteral("Writing captions"))
+        return fill(QStringLiteral("captions"), 0, tr("Writing captions"));
+    if (status == QStringLiteral("Cutting a short"))
+        return fill(QStringLiteral("short"), 0, tr("Making the short"));
+    if (status == QStringLiteral("Saving…"))
+        return fill(QStringLiteral("saving"), 0, tr("Saving…"));
+    if (status == QStringLiteral("Loading..."))
+        return fill(QStringLiteral("opening"), 0, tr("Opening…"));
+    return fill(QString(), -1, QString());
+}
+
+void Backend::refreshStep() {
+    const QString next = computeStep();
+    if (next == m_step)
+        return;
+    m_step = next;
+    emit stepChanged();
+}
+
+QString Backend::computeStep() const {
+    if (m_busy)
+        return QStringLiteral("working");
+    if (!m_gathering && !m_source.isEmpty()) {
+        const bool handTrim = m_plan.active() ? m_plan.unexported() : m_timeline.unexported();
+        if (handTrim)
+            return QStringLiteral("trimmed");
+        if (renderedUnsaved())
+            return QStringLiteral("movieUnsaved");
+        return QStringLiteral("movieSaved");
+    }
+    if (m_tray.isEmpty())
+        return QStringLiteral("empty");
+    if (trayMissing())
+        return QStringLiteral("missingShot");
+    if (!m_selects.isEmpty()) {
+        bool anyKept = false;
+        for (const QVariant &item : m_selects) {
+            if (item.toMap().value(QStringLiteral("keep")).toBool()) {
+                anyKept = true;
+                break;
+            }
+        }
+        return anyKept ? QStringLiteral("lines") : QStringLiteral("allDropped");
+    }
+    if (m_cutMode == QLatin1String("speech") && !apiKeySet())
+        return QStringLiteral("needsKey");
+    return QStringLiteral("shotsReady");
 }
 
 QString Backend::accentFromColorsFile(const QString &path, const QString &fallback) {

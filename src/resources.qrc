@@ -1,6 +1,9 @@
 <RCC>
     <qresource prefix="/">
         <file alias="Main.qml">Main.qml</file>
+        <file alias="ActionButton.qml">ActionButton.qml</file>
+        <file alias="MoviePlayer.qml">MoviePlayer.qml</file>
+        <file alias="ThemedDialog.qml">ThemedDialog.qml</file>
         <file alias="EditBar.qml">EditBar.qml</file>
         <file alias="Format.js">Format.js</file>
     </qresource>

@@ -14,11 +14,13 @@ HEADERS += \
     src/thumbprovider.h \
     src/timeline.h \
     src/backend.h \
+    src/theme.h \
     src/cutjob.h \
     src/keystore.h
 
 SOURCES += \
     src/main.cpp \
+    src/theme.cpp \
     src/cutjob.cpp \
     src/portalfilepicker.cpp \
     src/edit.cpp \

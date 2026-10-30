@@ -5,6 +5,7 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 ## 2026-10-29
 
 - Choosing 1080p or 720p when saving an unedited rough cut re-encodes to that size. Original still copies the file.
+- The footer names the next action. A missing xAI key offers to add one. Quitting during a job asks first.
 
 ## 2026-10-12
 

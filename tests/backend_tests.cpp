@@ -23,6 +23,7 @@
 #include <QVariantList>
 
 #include "backend.h"
+#include "theme.h"
 #include "filepicker.h"
 #include "thumbprovider.h"
 #include "cutjob.h"
@@ -78,6 +79,10 @@ class ShortcutBackend : public QObject {
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
     Q_PROPERTY(QString themeAccent READ themeAccent NOTIFY themeAccentChanged)
     Q_PROPERTY(QString themeAccentForeground READ themeAccentForeground NOTIFY themeAccentChanged)
+    Q_PROPERTY(QString step READ step NOTIFY infoChanged)
+    Q_PROPERTY(QString job READ job NOTIFY infoChanged)
+    Q_PROPERTY(QString jobText READ jobText NOTIFY infoChanged)
+    Q_PROPERTY(qreal progress READ progress NOTIFY infoChanged)
     Q_PROPERTY(QObject *timeline READ timelineObject CONSTANT)
     Q_PROPERTY(bool planCut READ planCut NOTIFY infoChanged)
     Q_PROPERTY(QObject *plan READ plan CONSTANT)
@@ -103,6 +108,10 @@ public:
     QString status() const { return {}; }
     QString themeAccent() const { return QStringLiteral("#FFD60A"); }
     QString themeAccentForeground() const { return QStringLiteral("black"); }
+    QString step() const { return {}; }
+    QString job() const { return {}; }
+    QString jobText() const { return {}; }
+    qreal progress() const { return -1; }
     QObject *timelineObject() { return &timeline; }
     bool planCut() const { return false; }
     QObject *plan() { return &timeline; }
@@ -357,8 +366,10 @@ static QString mainQmlPath() {
 // as the window is in use, so each shortcut test is just the key presses.
 class QmlHarness {
 public:
-    explicit QmlHarness(ShortcutBackend &backend) {
+    explicit QmlHarness(ShortcutBackend &backend)
+        : m_theme(QDir::temp().filePath(QStringLiteral("botcut-qml-theme")), nullptr, QString()) {
         m_engine.addImageProvider(QStringLiteral("thumbs"), new ThumbProvider);
+        m_engine.rootContext()->setContextProperty(QStringLiteral("theme"), &m_theme);
         m_engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
         m_engine.load(QUrl::fromLocalFile(mainQmlPath()));
         if (!m_engine.rootObjects().isEmpty())
@@ -372,6 +383,7 @@ public:
     }
 
 private:
+    Theme m_theme;
     QQmlApplicationEngine m_engine;
     QQuickWindow *m_window = nullptr;
 };
@@ -455,6 +467,10 @@ private slots:
     void exportHeightsNeverUpscale();
     void themeAccentReadsOmarchyColors();
     void themeAccentForegroundKeepsContrast();
+    void themeReadsAccentForegroundAndRounding();
+    void stepFollowsTheTrayAndTheLines();
+    void jobFollowsTheStatusLine();
+    void qmlQuitAsksWhileAJobIsRunning();
 
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
@@ -3398,7 +3414,7 @@ void BackendTests::qmlQuitConfirmsUnexportedEdit() {
     // The buttons work with the mouse too: Cancel dismisses, Export exports.
     QTest::keyClick(window, Qt::Key_Q);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
-    QQuickItem *cancelButton = dialogButton(window, QStringLiteral("Cancel"));
+    QQuickItem *cancelButton = dialogButton(window, QStringLiteral("Keep working"));
     QVERIFY(cancelButton);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(cancelButton));
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), false, 3000);
@@ -3406,7 +3422,7 @@ void BackendTests::qmlQuitConfirmsUnexportedEdit() {
 
     QTest::keyClick(window, Qt::Key_Q);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
-    QQuickItem *exportButton = dialogButton(window, QStringLiteral("Export"));
+    QQuickItem *exportButton = dialogButton(window, QStringLiteral("Export…"));
     QVERIFY(exportButton);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(exportButton));
     QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 2, 3000);
@@ -3443,8 +3459,8 @@ void BackendTests::qmlLooseCutAsksToSaveOrLose() {
 
     QTest::keyClick(window, Qt::Key_Q);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
-    QVERIFY(dialogButton(window, QStringLiteral("Save")));
-    QVERIFY(dialogButton(window, QStringLiteral("Lose it")));
+    QVERIFY(dialogButton(window, QStringLiteral("Save…")));
+    QVERIFY(dialogButton(window, QStringLiteral("Quit without saving")));
 
     QTest::keyClick(window, Qt::Key_Return);
     QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 1, 3000);
@@ -3458,6 +3474,37 @@ void BackendTests::qmlLooseCutAsksToSaveOrLose() {
     QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 3000);
     QCOMPARE(quitSpy.count(), 1);
     QCOMPARE(backend.exportCount, 1);
+}
+
+void BackendTests::qmlQuitAsksWhileAJobIsRunning() {
+    ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
+                            20.0);
+    backend.setBusy(true);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QCOMPARE(window->property("unexported").toBool(), false);
+    QCOMPARE(window->property("looseCut").toBool(), false);
+
+    QTest::keyClick(window, Qt::Key_Q);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
+    QVERIFY(dialogButton(window, QStringLiteral("Keep working")));
+    QQuickItem *stop = visibleItemWithText(window, QStringLiteral("Stop and quit"));
+    QVERIFY(stop);
+
+    // Enter keeps working. The running job is not the button that takes focus.
+    QTest::keyClick(window, Qt::Key_Return);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), false, 3000);
+    QVERIFY(window->isVisible());
+
+    QSignalSpy quitSpy(&harness.engine(), &QQmlApplicationEngine::quit);
+    QTest::keyClick(window, Qt::Key_Q);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("quitConfirmVisible").toBool(), true, 3000);
+    stop = visibleItemWithText(window, QStringLiteral("Stop and quit"));
+    QVERIFY(stop);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(stop));
+    QTRY_VERIFY_WITH_TIMEOUT(!window->isVisible(), 3000);
+    QCOMPARE(quitSpy.count(), 1);
 }
 
 void BackendTests::renderedCutCopiesInsteadOfEncoding() {
@@ -4357,6 +4404,114 @@ void BackendTests::themeAccentForegroundKeepsContrast() {
     QCOMPARE(Backend::foregroundFor(QStringLiteral("#FFD60A")), QStringLiteral("black"));
     QCOMPARE(Backend::foregroundFor(QStringLiteral("#222266")), QStringLiteral("white"));
     QCOMPARE(Backend::foregroundFor(QStringLiteral("garbage")), QStringLiteral("black"));
+}
+
+void BackendTests::themeReadsAccentForegroundAndRounding() {
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    QCOMPARE(Theme::readColor(dir.filePath(QStringLiteral("missing.toml")), QStringLiteral("accent"),
+                              QStringLiteral("#FFD60A")),
+             QStringLiteral("#FFD60A"));
+    QDir(dir.path()).mkpath(QStringLiteral("theme"));
+    QFile colors(dir.filePath(QStringLiteral("theme/colors.toml")));
+    QVERIFY(colors.open(QIODevice::WriteOnly));
+    colors.write("accent = \"#112233\"\nforeground = \"#abcdef\"\nbackground = \"#010203\"\n");
+    colors.close();
+
+    Theme theme(dir.path(), nullptr, QString());
+    QCOMPARE(theme.accent(), QStringLiteral("#112233"));
+    QCOMPARE(theme.accentForeground(), QStringLiteral("white"));
+    QCOMPARE(theme.foreground(), QStringLiteral("#abcdef"));
+    QCOMPARE(theme.background(), QStringLiteral("#010203"));
+    QCOMPARE(theme.radius(), 0);
+}
+
+void BackendTests::stepFollowsTheTrayAndTheLines() {
+    EnvVarGuard keyGuard("XAI_API_KEY");
+    qunsetenv("XAI_API_KEY");
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QCOMPARE(backend.step(), QStringLiteral("empty"));
+
+    const QString shot = m_dir.filePath(QStringLiteral("step-shot.mp4"));
+    QVERIFY(QFile(shot).open(QIODevice::WriteOnly));
+    backend.addTrayFiles({shot});
+    QCOMPARE(backend.step(), QStringLiteral("needsKey"));
+
+    backend.setCutMode(QStringLiteral("assemble"));
+    QCOMPARE(backend.step(), QStringLiteral("shotsReady"));
+
+    const QString missing = m_dir.filePath(QStringLiteral("step-gone.mp4"));
+    QFile missingList(m_dir.filePath(QStringLiteral("step-missing.botcut.json")));
+    QVERIFY(missingList.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray missingBytes = writeCutList(QStringLiteral("assemble"), {missing});
+    QCOMPARE(missingList.write(missingBytes), missingBytes.size());
+    missingList.close();
+    backend.addDropped({QUrl::fromLocalFile(missingList.fileName())});
+    QCOMPARE(backend.step(), QStringLiteral("missingShot"));
+
+    QVariantMap kept;
+    kept.insert(QStringLiteral("id"), 1);
+    kept.insert(QStringLiteral("keep"), true);
+    kept.insert(QStringLiteral("text"), QStringLiteral("hello"));
+    const QString listed = m_dir.filePath(QStringLiteral("step-listed.mp4"));
+    QVERIFY(QFile(listed).open(QIODevice::WriteOnly));
+    QFile list(m_dir.filePath(QStringLiteral("step.botcut.json")));
+    QVERIFY(list.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = writeCutList(QStringLiteral("speech"), {listed}, QString(), {kept});
+    QCOMPARE(list.write(bytes), bytes.size());
+    list.close();
+    backend.addDropped({QUrl::fromLocalFile(list.fileName())});
+    QCOMPARE(backend.step(), QStringLiteral("lines"));
+    backend.dropSelect(1);
+    QCOMPARE(backend.step(), QStringLiteral("allDropped"));
+    backend.restoreSelect(1);
+    QCOMPARE(backend.step(), QStringLiteral("lines"));
+}
+
+void BackendTests::jobFollowsTheStatusLine() {
+    QString job;
+    qreal progress = 0;
+    QString text;
+    QVERIFY(Backend::describeJob(QStringLiteral("Rendering 42%"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("rendering"));
+    QCOMPARE(progress, 0.42);
+    QCOMPARE(text, QStringLiteral("Rendering 42%"));
+
+    QVERIFY(Backend::describeJob(QStringLiteral("Exporting 30%"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("exporting"));
+    QCOMPARE(progress, 0.30);
+    QCOMPARE(text, QStringLiteral("Exporting 30%"));
+
+    QVERIFY(Backend::describeJob(QStringLiteral("Opening 7%"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("opening"));
+    QCOMPARE(progress, 0.07);
+
+    QVERIFY(Backend::describeJob(QStringLiteral("Transcribing 2/4 room.mp4"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("transcribing"));
+    QCOMPARE(progress, 0.5);
+    QCOMPARE(text, QStringLiteral("Transcribing 2 of 4"));
+
+    QVERIFY(Backend::describeJob(QStringLiteral("Reading files"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("reading"));
+    QCOMPARE(text, QStringLiteral("Reading shots"));
+    QVERIFY(Backend::describeJob(QStringLiteral("Choosing takes"), &job, &progress, &text));
+    QCOMPARE(text, QStringLiteral("Choosing lines"));
+    QVERIFY(Backend::describeJob(QStringLiteral("Revising"), &job, &progress, &text));
+    QCOMPARE(text, QStringLiteral("Changing the list"));
+    QVERIFY(Backend::describeJob(QStringLiteral("Making the card…"), &job, &progress, &text));
+    QCOMPARE(text, QStringLiteral("Making the title card"));
+    QVERIFY(Backend::describeJob(QStringLiteral("Saving…"), &job, &progress, &text));
+    QCOMPARE(job, QStringLiteral("saving"));
+    QVERIFY(qAbs(progress) < 0.0001);
+    QVERIFY(Backend::describeJob(QStringLiteral("Loading..."), &job, &progress, &text));
+    QCOMPARE(text, QStringLiteral("Opening…"));
+
+    QVERIFY(!Backend::describeJob(QStringLiteral("Trying again"), &job, &progress, &text));
+    QVERIFY(Backend::describeJob(QStringLiteral("Saved the list"), &job, &progress, &text));
+    QCOMPARE(job, QString());
+    QVERIFY(qAbs(progress + 1.0) < 0.0001);
 }
 
 QTEST_MAIN(BackendTests)

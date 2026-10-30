@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from botcut.broll import choose_covers
 from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
     burn_args,
@@ -58,6 +59,17 @@ def main(argv: list[str] | None = None) -> None:
         default="dip",
         help="dip through black between source files, or cut",
     )
+    run_p.add_argument(
+        "--b-roll",
+        action="store_true",
+        help="cover a spoken line with a clip's picture",
+    )
+    run_p.add_argument(
+        "--b-roll-sound",
+        choices=("mix", "clip"),
+        default="mix",
+        help="mix the clip's sound under the voice, or play the clip's own sound",
+    )
     render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
     render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
     render_p.add_argument(
@@ -65,6 +77,12 @@ def main(argv: list[str] | None = None) -> None:
         choices=("dip", "off"),
         default="dip",
         help="dip through black between source files, or cut",
+    )
+    render_p.add_argument(
+        "--b-roll-sound",
+        choices=("mix", "clip"),
+        default="mix",
+        help="mix the clip's sound under the voice, or play the clip's own sound",
     )
     cap_p = sub.add_parser("captions", help="write an SRT for the rough cut")
     cap_p.add_argument("cuts", help="path to cuts.json")
@@ -102,9 +120,15 @@ def main(argv: list[str] | None = None) -> None:
                 intent=args.intent,
                 decide=args.decide,
                 scene_transition=args.scene_transition,
+                broll=args.b_roll,
+                broll_sound=args.b_roll_sound,
             )
         elif args.cmd == "render":
-            render_saved(args.cuts, scene_transition=args.scene_transition)
+            render_saved(
+                args.cuts,
+                scene_transition=args.scene_transition,
+                broll_sound=args.b_roll_sound,
+            )
         elif args.cmd == "captions":
             captions(args.cuts, burn=args.burn)
         elif args.cmd == "short":
@@ -135,6 +159,8 @@ def run(
     intent: str = "",
     decide: bool = False,
     scene_transition: str = "dip",
+    broll: bool = False,
+    broll_sound: str = "mix",
 ) -> None:
     if mode not in ("speech", "assemble"):
         raise SystemExit(f"Unknown mode: {mode}")
@@ -163,7 +189,7 @@ def run(
             "segments": segs,
             "dropped": [],
         }
-        _write_cut(out, doc, segs, clips, scene_transition)
+        _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
         return
 
     fake = os.environ.get("BOTCUT_FAKE") == "1"
@@ -207,6 +233,7 @@ def run(
     segs = tighten(segs, silences_by_clip, max_pause)
     lines = decision_lines(utts, chosen)
     lines, segs = merge_cards(lines, segs, clips, movie)
+    covers = choose_covers(clips, lines, os.path.join(work, "stills")) if broll else []
     for line in unknown_warnings(unknown):
         print(line)
     dropped = dropped_utterances(utts, chosen)
@@ -238,12 +265,14 @@ def run(
             for utt in dropped
         ],
     }
+    if covers:
+        doc["covers"] = covers
     if decide:
         _write_doc(out, doc)
         kept_n = sum(1 for line in doc["lines"] if line["keep"])
         print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
         return
-    _write_cut(out, doc, segs, clips, scene_transition)
+    _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
 
 
 def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
@@ -271,7 +300,14 @@ def _write_doc(out: str, doc: dict) -> str:
     return cuts_path
 
 
-def _write_cut(out: str, doc: dict, segs: list, clips: list, scene_transition: str = "dip") -> None:
+def _write_cut(
+    out: str,
+    doc: dict,
+    segs: list,
+    clips: list,
+    scene_transition: str = "dip",
+    broll_sound: str = "mix",
+) -> None:
     _write_doc(out, doc)
     if not segs:
         raise SystemExit("No segments to render")
@@ -284,13 +320,16 @@ def _write_cut(out: str, doc: dict, segs: list, clips: list, scene_transition: s
         "Render failed",
         polish=True,
         scene_transition=scene_transition,
+        covers=doc.get("covers") or None,
+        lines=doc.get("lines") or None,
+        broll_sound=broll_sound,
     )
     kept_s = sum(seg["end"] - seg["start"] for seg in segs)
     total_s = sum(clip["duration"] for clip in clips)
     print(f"Wrote {os.path.abspath(dst)} ({kept_s:.1f}s of {total_s:.1f}s)")
 
 
-def render_saved(cuts: str, scene_transition: str = "dip") -> None:
+def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "mix") -> None:
     """Encode rough_cut.mp4 from a cuts.json the tray has already confirmed."""
     path = cuts
     if os.path.isdir(path):
@@ -332,7 +371,7 @@ def render_saved(cuts: str, scene_transition: str = "dip") -> None:
         ]
     else:
         segs = doc.get("segments") or []
-    _write_cut(out, doc, segs, clips, scene_transition)
+    _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
 
 
 def _segments_for_lines(

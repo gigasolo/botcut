@@ -134,7 +134,7 @@ Spoken cuts with no key do not start. The status reads "Set an xAI key for spoke
 
 ## Screen: Watch
 
-The movie fills the main column. On the picture, a quiet title: "Rough cut · 2:46", or the file name when it is not a rough cut. A hand trim adds " (trimmed)". A zoomed filmstrip shows an accent "zoomed" chip. It does not name a line number.
+The movie fills the main column. On the picture, a quiet title: "Rough cut · 2:46", or the file name when it is not a rough cut. A hand trim adds " (trimmed)". When this movie is the plan, the chip on the picture also names the words under the playhead. A zoomed filmstrip shows an accent "zoomed" chip. It does not name a line number.
 
 Under the picture, one bar:
 
@@ -163,6 +163,7 @@ Then:
 - When it is on, one line: "Finds the lines that match this movie, and drops the rest." Then a 16 px semibold heading "This movie" and a wrapping text area, about 78 px tall, containing the movie prompt.
 - When it is off, that line, the heading, and the text area are gone. One line reads "Keeps every file, in this order."
 - Checkbox **Dip to black between files**, on by default.
+- A switch, **Cut in B-roll**, off by default, covers a spoken line with a clip's picture. A checkbox under it, **Mix the clip's sound under the voice**, is on by default. Off plays the clip's own sound.
 - A row: "xAI key", then a badge reading "not set", "set", or "not needed". "not set" is the accent, and only when Spoken cuts is on. "not needed" is used when Spoken cuts is off. Then **Change**.
 - Change reveals an empty password field, placeholder "Paste xAI key", **Show**, and **Apply**. The button then reads **Hide**. Apply stores the key and clears the field. The stored key is never written into the field.
 

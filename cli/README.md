@@ -1,6 +1,6 @@
 # botcut-cli
 
-Rough-cut one ordered list of shots. The Qt app calls `run`, `render`, `captions`, and `short`. It does not run `review` after a cut.
+Rough-cut one ordered list of shots. The Qt app calls `run`, `render`, `revise`, `card`, `captions`, and `short`. It does not run `review` after a cut.
 
 ```bash
 cd cli
@@ -8,7 +8,7 @@ uv run botcut-cli run a.mp4 b.mp4 c.mp4 --out out/
 uv run botcut-cli run shots.txt --out out/ --mode assemble
 ```
 
-`--mode speech` (the default) keeps the moments that match `--intent`. The default intent keeps each moment, drops flubs and true retakes, and keeps a beat that appears once. Wording about repeated takes uses the retake prompt instead. `--decide` writes `cuts.json` and stops before ffmpeg. `botcut-cli render out/` encodes after a line is restored. `--mode assemble` keeps every file from start to end, in the order given, and does not call speech-to-text or the model. Use it for riding, B-roll, and any clip that should appear even when nobody is talking.
+`--mode speech` (the default) keeps the moments that match `--intent`. The default intent keeps each moment, drops flubs and true retakes, and keeps a beat that appears once. Wording about repeated takes uses the retake prompt instead. `--decide` writes `cuts.json` and stops before ffmpeg. `botcut-cli render out/` encodes after a line is restored. `--mode assemble` keeps every file from start to end, in the order given, and does not call speech-to-text or the model. Use it for riding, B-roll, and any clip that should appear even when nobody is talking. `--b-roll` covers one spoken line with a clip's picture. `--b-roll-sound mix` (the default) plays that clip's sound under the voice. `--b-roll-sound clip` plays the clip's own sound for that window. It is not `--mode assemble`, which plays every file in order with its own sound.
 
 A single `.txt` argument is a shot list, one path per line. Blank lines and `#` comments are skipped.
 
@@ -33,9 +33,25 @@ uv sync --extra local
 
 Speech-to-text is `grok-voice-transcribe-2.0` with filler words kept. The model chooses utterance ids. It does not choose timestamps. One JPEG from the middle of each line is sent with the transcript, and stored under `out/work/stills/`. A missed frame does not stop the cut. The reason may mention the picture. A dropped connection, a timeout, or a brief server error is tried again. A rejected key or body is not.
 
-Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.25 seconds before and 0.40 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range. The rough cut levels the clips, fades up from black, and fades out to black. Joins inside one file fade the audio by 20 ms. Between source files the picture dips through black and the audio fades for 120 ms, unless `--scene-transition off`. The app remembers that choice for every movie. The review master stays a straight concat.
+Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.25 seconds before and 0.40 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range. The rough cut keeps the camera level, fades up from black, and fades out to black, and joins stay 20 ms inside a file and 120 ms across a dip unless `--scene-transition off`. The app remembers that choice for every movie. The review master stays a straight concat.
 
 A dropped line that is not a near-duplicate of a kept line prints `unique? id N: ...`. The line stays dropped.
+
+## Revise
+
+```bash
+uv run botcut-cli revise out/cuts.json --pace measured --scene-transition dip -- "Drop the second take"
+```
+
+`revise` rewrites the sentence, the pace, dip on or off, and which lines stay. The note is the argument after `--`, so a note that looks like a flag stays text. It does not return times, padding, or a join other than dip. It does not start ffmpeg. `BOTCUT_FAKE=1` applies a fixture and does not call the network. Without a key, and with fake mode off, the command is refused.
+
+## Card
+
+```bash
+uv run botcut-cli card --out /path/botcut-card-open.mp4 -- "The movie in one sentence"
+```
+
+`card` writes a 3 second 16:9 mp4. The destination file name starts with `botcut-card-` and ends in `.mp4`, and the directory is the app card directory. The sentence is the argument after `--`. `BOTCUT_FAKE=1` writes a tiny movie and does not call the network. A spoken cut keeps that file as one line with reason `card` and does not transcribe it.
 
 ## Captions
 

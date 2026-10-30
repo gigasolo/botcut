@@ -22,12 +22,13 @@ def test_render_args_has_one_input_per_segment_and_concat():
     assert "concat=n=2:v=1:a=1" in graph
     assert "scale=640:360:force_original_aspect_ratio=decrease" in graph
     assert "pad=640:360:(ow-iw)/2:(oh-ih)/2" in graph
-    assert "aresample=48000" in graph
+    assert "aresample=osr=48000" in graph
     assert "fps=30" in graph
     assert args[args.index("-c:v") + 1] == "libx264"
     assert args[args.index("-preset") + 1] == "veryfast"
     assert args[args.index("-crf") + 1] == "18"
     assert args[args.index("-c:a") + 1] == "aac"
+    assert args[args.index("-ar") + 1] == "48000"
     assert args[args.index("-movflags") + 1] == "+faststart"
     assert args[-1] == "/tmp/out.mp4"
     assert args[args.index("-t") + 1] == "1.500"
@@ -214,10 +215,11 @@ def test_rough_cut_audio_fades_and_levels():
     segs = [{"clip": 0, "start": 0.0, "end": 1.5, "reason": "a"}]
     args = render_args(segs, clips, "/tmp/out.mp4", polish=True)
     graph = args[args.index("-filter_complex") + 1]
-    assert "loudnorm=I=-16:TP=-1.5:LRA=11" in graph
+    assert "loudnorm" not in graph
     assert "afade=t=in:st=0:d=0.020" in graph
     assert "afade=t=out:st=1.480:d=0.020" in graph
-    assert "aresample=48000" in graph
+    assert "aresample=osr=48000" in graph
+    assert args[args.index("-ar") + 1] == "48000"
 
 
 def test_render_args_uses_vaapi_and_downloads_only_a_mismatched_rate():

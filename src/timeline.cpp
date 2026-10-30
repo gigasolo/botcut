@@ -244,9 +244,11 @@ bool PlanFilm::unexported() const {
 
 QVariantList PlanFilm::clipList() const {
     QVariantList result;
-    for (const View &view : m_view) {
-        result.append(QVariantMap{{QStringLiteral("start"), view.start},
-                                  {QStringLiteral("end"), view.end}});
+    // relayout() keeps m_view in the same order as m_current, including mid-drag.
+    for (int i = 0; i < m_view.size(); ++i) {
+        result.append(QVariantMap{{QStringLiteral("start"), m_view.at(i).start},
+                                  {QStringLiteral("end"), m_view.at(i).end},
+                                  {QStringLiteral("text"), m_current.at(i).text}});
     }
     return result;
 }

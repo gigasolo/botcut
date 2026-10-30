@@ -20,11 +20,12 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent = QString(), bool decide = false,
                        const QString &sceneTransition = QStringLiteral("dip"),
-                       double maxPause = 0.8);
+                       double maxPause = 0.8, bool broll = false, bool brollMix = true);
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
-                          const QString &sceneTransition = QStringLiteral("dip"));
+                          const QString &sceneTransition = QStringLiteral("dip"),
+                          bool brollMix = true);
 
 CutLaunch cutReviewLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
                           const QString &cliProject);

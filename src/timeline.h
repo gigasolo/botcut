@@ -100,6 +100,8 @@ public:
         double start = 0;
         double end = 0;
         QString reason;
+        // Words of the source line. Not written to cuts.json.
+        QString text;
         QJsonObject raw;
     };
 

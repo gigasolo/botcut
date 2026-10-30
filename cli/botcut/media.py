@@ -158,6 +158,9 @@ def render_with_progress(
     fail_prefix: str,
     polish: bool = False,
     scene_transition: str = "dip",
+    covers=None,
+    lines=None,
+    broll_sound: str = "mix",
 ) -> None:
     """Encode segments and print '<label> N%' as ffmpeg advances.
 
@@ -176,6 +179,9 @@ def render_with_progress(
         device=device,
         polish=polish,
         scene_transition=scene_transition,
+        covers=covers,
+        lines=lines,
+        broll_sound=broll_sound,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -317,18 +323,63 @@ def _picture_suffix(duration: float, fade_in: float, fade_out: float) -> str:
     return ("," + ",".join(parts)) if parts else ""
 
 
-def _audio_chain(
-    index: int, seg: dict, polish: bool, segments: list[dict], scene_transition: str
+def _audio_filter(
+    in_index: int,
+    out_index: int,
+    polish: bool,
+    duration: float,
+    fade_in: float,
+    fade_out: float,
+    mix_index: int | None = None,
 ) -> str:
-    if not polish:
-        return f"[{index}:a]aresample=48000[a{index}]"
-    duration = max(0.0, float(seg["end"]) - float(seg["start"]))
-    fade_in, fade_out = _audio_edges(index, segments, duration, scene_transition)
-    fade_at = max(0.0, round(duration - fade_out, 3))
-    return (
-        f"[{index}:a]aresample=48000,loudnorm=I=-16:TP=-1.5:LRA=11,"
-        f"afade=t=in:st=0:d={fade_in:.3f},afade=t=out:st={fade_at:.3f}:d={fade_out:.3f}[a{index}]"
+    if mix_index is not None:
+        # duration=first follows the voice, the first input, so a short clip does not end the window.
+        chain = (
+            f"[{in_index}:a]volume=0.25[b{out_index}];"
+            f"[{mix_index}:a][b{out_index}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+            f"aresample=osr=48000"
+        )
+    else:
+        chain = f"[{in_index}:a]aresample=osr=48000"
+    if polish and fade_in > 0:
+        chain += f",afade=t=in:st=0:d={fade_in:.3f}"
+    if polish and fade_out > 0:
+        fade_at = max(0.0, round(duration - fade_out, 3))
+        chain += f",afade=t=out:st={fade_at:.3f}:d={fade_out:.3f}"
+    return chain + f"[a{out_index}]"
+
+
+def _video_filter(
+    in_index: int,
+    out_index: int,
+    clip: dict,
+    width: int,
+    height: int,
+    fps: float,
+    fps_s: str,
+    encoder: str,
+    on_gpu: bool,
+    picture: str,
+) -> str:
+    if not on_gpu:
+        return (
+            f"[{in_index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps_s}"
+            + picture
+            + (",format=nv12,hwupload" if encoder == "vaapi" else "")
+            + f"[v{out_index}]"
+        )
+    # scale_vaapi keeps the 4K resize on the Arc. This GPU drops the
+    # surface when more than one VA-API input stays on the device
+    # through concat, so each branch downloads, pads, and uploads
+    # again for h264_vaapi. The dip runs on those software frames.
+    chain = (
+        f"[{in_index}:v]scale_vaapi={width}:{height}:format=nv12:force_original_aspect_ratio=decrease,"
+        f"hwdownload,format=nv12,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     )
+    if not _same_rate(clip, fps):
+        chain += f",fps={fps_s}"
+    return chain + picture + f",format=nv12,hwupload[v{out_index}]"
 
 
 def render_args(
@@ -339,11 +390,16 @@ def render_args(
     device: str | None = None,
     polish: bool = False,
     scene_transition: str = "dip",
+    covers=None,
+    lines=None,
+    broll_sound: str = "mix",
 ) -> list[str]:
     if not segments:
         raise SystemExit("No segments to render")
     if encoder not in ("x264", "vaapi"):
         raise SystemExit(f"Unknown encoder {encoder}")
+    if broll_sound not in ("mix", "clip"):
+        raise SystemExit(f"Unknown b-roll sound {broll_sound}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
     # An open card is clips[0]. Its still is not the camera's size or rate.
@@ -360,55 +416,103 @@ def render_args(
         args += ["-init_hw_device", f"vaapi=va:{device}", "-filter_hw_device", "va"]
     fps_s = _fps(fps)
     transition = _transition(scene_transition)
+    by_segment: dict[int, list[dict]] = {}
+    if covers:
+        from botcut.broll import cover_windows
+
+        durations = []
+        for clip in clips:
+            try:
+                durations.append(float(clip.get("duration") or 0))
+            except (TypeError, ValueError):
+                durations.append(0.0)
+        for window in cover_windows(covers, lines or [], segments, durations):
+            by_segment.setdefault(int(window["segment"]), []).append(window)
     filters = []
+    out_i = 0
+    in_i = 0
+    # Outer fades are chosen on the spoken segments. A cover cut inside one
+    # segment is not a scene change, so it does not get those fades.
     for i, seg in enumerate(segments):
-        clip = clips[seg["clip"]]
-        duration = max(0.0, float(seg["end"]) - float(seg["start"]))
-        picture = ""
+        spoken = int(seg["clip"])
+        seg_start = float(seg["start"])
+        seg_end = float(seg["end"])
+        duration = max(0.0, seg_end - seg_start)
+        pic_in, pic_out = (0.0, 0.0)
+        aud_in, aud_out = (0.0, 0.0)
         if polish:
-            fade_in, fade_out = _picture_edges(i, segments, transition)
-            picture = _picture_suffix(duration, fade_in, fade_out)
-        on_gpu = encoder == "vaapi" and not _rotated(clip) and _vaapi_decodable(clip)
-        if on_gpu:
-            args += [
-                "-hwaccel",
-                "vaapi",
-                "-hwaccel_device",
-                str(device),
-                "-hwaccel_output_format",
-                "vaapi",
-            ]
-        args += [
-            "-ss",
-            _num(seg["start"]),
-            "-t",
-            _num(seg["end"] - seg["start"]),
-            "-i",
-            clip["path"],
-        ]
-        if not on_gpu:
+            pic_in, pic_out = _picture_edges(i, segments, transition)
+            aud_in, aud_out = _audio_edges(i, segments, duration, transition)
+        pieces: list[dict] = []
+        cursor = seg_start
+        for window in sorted(by_segment.get(i, []), key=lambda item: float(item["start"])):
+            win_start = float(window["start"])
+            win_end = float(window["end"])
+            if win_start - cursor > 1e-3:
+                pieces.append({"clip": spoken, "start": cursor, "end": win_start})
+            if win_end - win_start > 1e-3:
+                # Mix seeks the spoken file to this window. Clip sound does not open it.
+                length = win_end - win_start
+                piece = {"clip": int(window["clip"]), "start": 0.0, "end": length}
+                if broll_sound == "mix":
+                    piece["voice"] = spoken
+                    piece["voice_start"] = win_start
+                pieces.append(piece)
+            cursor = max(cursor, win_end)
+        if seg_end - cursor > 1e-3 or not pieces:
+            pieces.append(
+                {
+                    "clip": spoken,
+                    "start": seg_start if not pieces else cursor,
+                    "end": seg_end,
+                }
+            )
+        single = len(pieces) == 1 and pieces[0]["clip"] == spoken
+        last_piece = len(pieces) - 1
+        for j, piece in enumerate(pieces):
+            video = clips[int(piece["clip"])]
+            if single:
+                video_start = seg["start"]
+                span = seg["end"] - seg["start"]
+                shown = duration
+                fade_in, fade_out = pic_in, pic_out
+                a_in, a_out = aud_in, aud_out
+            else:
+                video_start = piece["start"]
+                span = piece["end"] - piece["start"]
+                shown = max(0.0, span)
+                fade_in = pic_in if j == 0 else 0.0
+                fade_out = pic_out if j == last_piece else 0.0
+                raw_in = aud_in if j == 0 else 0.0
+                raw_out = aud_out if j == last_piece else 0.0
+                a_in, a_out = _fit_pair(shown, raw_in, raw_out) if polish else (0.0, 0.0)
+            on_gpu = encoder == "vaapi" and not _rotated(video) and _vaapi_decodable(video)
+            if on_gpu:
+                args += [
+                    "-hwaccel",
+                    "vaapi",
+                    "-hwaccel_device",
+                    str(device),
+                    "-hwaccel_output_format",
+                    "vaapi",
+                ]
+            args += ["-ss", _num(video_start), "-t", _num(span), "-i", video["path"]]
+            v_in = in_i
+            in_i += 1
+            voice_in = None
+            if "voice" in piece:
+                voice = clips[int(piece["voice"])]
+                args += ["-ss", _num(float(piece["voice_start"])), "-t", _num(span), "-i", voice["path"]]
+                voice_in = in_i
+                in_i += 1
+            picture = _picture_suffix(shown, fade_in, fade_out) if polish else ""
             filters.append(
-                f"[{i}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps_s}"
-                + picture
-                + (",format=nv12,hwupload" if encoder == "vaapi" else "")
-                + f"[v{i}]"
+                _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture)
             )
-        else:
-            # scale_vaapi keeps the 4K resize on the Arc. This GPU drops the
-            # surface when more than one VA-API input stays on the device
-            # through concat, so each branch downloads, pads, and uploads
-            # again for h264_vaapi. The dip runs on those software frames.
-            chain = (
-                f"[{i}:v]scale_vaapi={width}:{height}:format=nv12:force_original_aspect_ratio=decrease,"
-                f"hwdownload,format=nv12,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
-            )
-            if not _same_rate(clip, fps):
-                chain += f",fps={fps_s}"
-            filters.append(chain + picture + f",format=nv12,hwupload[v{i}]")
-        filters.append(_audio_chain(i, seg, polish, segments, transition))
-    concat_in = "".join(f"[v{i}][a{i}]" for i in range(len(segments)))
-    filters.append(f"{concat_in}concat=n={len(segments)}:v=1:a=1[v][a]")
+            filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in))
+            out_i += 1
+    concat_in = "".join(f"[v{i}][a{i}]" for i in range(out_i))
+    filters.append(f"{concat_in}concat=n={out_i}:v=1:a=1[v][a]")
     args += [
         "-filter_complex",
         ";".join(filters),
@@ -421,7 +525,7 @@ def render_args(
         args += ["-c:v", "h264_vaapi", "-qp", "20"]
     else:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
-    args += ["-c:a", "aac", "-movflags", "+faststart", dst]
+    args += ["-c:a", "aac", "-ar", "48000", "-movflags", "+faststart", dst]
     return args
 
 

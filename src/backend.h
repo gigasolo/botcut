@@ -39,6 +39,10 @@ class Backend : public QObject {
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY trayChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY cutModeChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY sceneTransitionChanged)
+    Q_PROPERTY(bool broll READ broll WRITE setBroll NOTIFY brollChanged)
+    Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY brollMixChanged)
+    Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
+    Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
     Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
@@ -80,6 +84,10 @@ public:
     int trayIndex() const { return m_trayIndex; }
     QString cutMode() const { return m_cutMode; }
     QString sceneTransition() const { return m_sceneTransition; }
+    bool broll() const { return m_broll; }
+    bool brollMix() const { return m_brollMix; }
+    QVariantList covers() const { return m_covers; }
+    QStringList cutClips() const { return m_cutClips; }
     QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
     QStringList reviseNotes() const { return m_reviseNotes; }
@@ -98,6 +106,8 @@ public:
     void setTrayIndex(int index);
     void setCutMode(const QString &mode);
     void setSceneTransition(const QString &value);
+    void setBroll(bool value);
+    void setBrollMix(bool value);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
     QString themeAccent() const { return m_themeAccent; }
@@ -137,6 +147,7 @@ public:
     Q_INVOKABLE void startCut();
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
+    Q_INVOKABLE void clearCover(int lineId);
     Q_INVOKABLE void renderSelects();
     // Re-encode a hand-trimmed plan from its cuts.json. An untouched plan copies instead.
     Q_INVOKABLE void exportPlan();
@@ -154,7 +165,10 @@ public:
 
     // Write what the clips keep of the loaded video to dst. A non-zero
     // scaleHeight downscales the shorter side to that size.
-    void exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight = 0);
+    // followSave is an untouched rough cut asked to downsample: on success it
+    // loads the written file and keeps the plan, as a copy does.
+    void exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHeight = 0,
+                     bool followSave = false);
 
     // The downscale heights worth offering for a source: only ones strictly
     // below the source's shorter side, so exports never upscale.
@@ -175,6 +189,10 @@ signals:
     void trayThumbsChanged();
     void cutModeChanged();
     void sceneTransitionChanged();
+    void brollChanged();
+    void brollMixChanged();
+    void coversChanged();
+    void cutClipsChanged();
     void paceChanged();
     void intentChanged();
     void reviseNotesChanged();
@@ -195,6 +213,7 @@ private:
     void setStatus(const QString &status);
     void failExport(const QString &tmpPath, const QString &message);
     void copyCut(const QUrl &dst);
+    void finishSavedCut(const QString &outPath);
     void noteCutSaved(const QString &path);
     void startThumbs();
     void stopThumbs();
@@ -240,6 +259,8 @@ private:
     void clearReviseThread();
     QString prepareReviseCuts();
     bool syncLinesKeepingPause(const QString &cutsPath) const;
+    bool storeCovers(bool withLines = false) const;
+    bool takeCover(int lineId);
     bool readReviseOutcome(const QString &cutsPath, QString *intent, QString *pace, bool *dip,
                            QString *deliver) const;
     QUrl suggestedCutListUrl() const;
@@ -275,6 +296,8 @@ private:
     QString m_cutMode = QStringLiteral("speech");
     QString m_listPath;
     QString m_sceneTransition = QStringLiteral("dip");
+    bool m_broll = false;
+    bool m_brollMix = true;
     QString m_pace = QStringLiteral("open");
     QString m_planCuts;
     QString m_planMovie;
@@ -287,7 +310,11 @@ private:
     QString m_undoPace;
     QString m_undoDip;
     QVariantList m_undoSelects;
+    QVariantList m_undoCovers;
     QVariantList m_selects;
+    QVariantList m_covers;
+    // Paths from cuts.json, in clip-index order. The live tray can move without rewriting that file.
+    QStringList m_cutClips;
     bool m_gathering = true;
     QString m_apiKey;
     KeyStore *m_keys = nullptr;

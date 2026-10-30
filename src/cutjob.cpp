@@ -54,7 +54,7 @@ QString defaultCutIntent() {
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent, bool decide, const QString &sceneTransition,
-                       double maxPause) {
+                       double maxPause, bool broll, bool brollMix) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -67,17 +67,22 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
     tail << QStringLiteral("--intent") << movie;
     tail << QStringLiteral("--scene-transition") << sceneTransitionValue(sceneTransition);
     tail << QStringLiteral("--max-pause") << QString::number(maxPause);
+    if (broll)
+        tail << QStringLiteral("--b-roll");
+    tail << QStringLiteral("--b-roll-sound")
+         << (brollMix ? QStringLiteral("mix") : QStringLiteral("clip"));
     if (decide)
         tail << QStringLiteral("--decide");
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
-                          const QString &cliProject, const QString &sceneTransition) {
+                          const QString &cliProject, const QString &sceneTransition, bool brollMix) {
     if (outDir.isEmpty())
         return {QString(), {}, QStringLiteral("No output directory")};
     const QStringList tail{QStringLiteral("render"), outDir, QStringLiteral("--scene-transition"),
-                           sceneTransitionValue(sceneTransition)};
+                           sceneTransitionValue(sceneTransition), QStringLiteral("--b-roll-sound"),
+                           brollMix ? QStringLiteral("mix") : QStringLiteral("clip")};
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 

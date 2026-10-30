@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 
+from botcut.broll import kept_covers
 from botcut.net import post
 from botcut.pick import chat_fields, llm_url
 
@@ -150,6 +151,11 @@ def revise(cuts_path: str, note: str, *, pace: str = "open", dip: bool = True) -
     print("Revising", flush=True)
     result = _plan(lines, text, str(doc.get("intent") or ""), pace, bool(dip))
     new_lines = apply_revise(lines, result["keep"])
+    covers = kept_covers(doc.get("covers"), new_lines)
+    if covers:
+        doc["covers"] = covers
+    else:
+        doc.pop("covers", None)
     doc["intent"] = result["intent"]
     doc["lines"] = new_lines
     doc["dropped"] = [

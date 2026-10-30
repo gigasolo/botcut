@@ -2,12 +2,19 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-10-29
+
+- Choosing 1080p or 720p when saving an unedited rough cut re-encodes to that size. Original still copies the file.
+
 ## 2026-10-12
 
+- Cut in B-roll, off until Settings turns it on, covers a spoken line with a clip's picture. Mix the clip's sound under the voice is the default. Turning that off plays the clip's own sound.
 - Change this cut revises the lines, the sentence, the pace, and Dip to black. It does not encode. Revert puts the previous cut back.
 - Open card and Close card add a shot at the front or the end of the tray. The footer reads "Making the card…". One job runs at a time.
 - Watch on a plan cut trims each source range. An untouched plan still Saves by copying. After a handle moves, Export re-encodes, and Captions and Short wait for that export.
+- Watch names the line under the playhead on a plan cut.
 - At the minimum window the sentence, the pace, the cards, the lines, Render, and the footer stay on screen. The sentence shrinks before a line row does. The pace stays locked while a job runs.
+- The README and `docs/github-release.md` describe the local Arch package and how a GitHub release would be attached later. No release was published. The package still does not install `botcut-cli`.
 
 ## 2026-10-11
 

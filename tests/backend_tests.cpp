@@ -122,6 +122,10 @@ public:
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY infoChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY infoChanged)
+    Q_PROPERTY(bool broll READ broll WRITE setBroll NOTIFY infoChanged)
+    Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY infoChanged)
+    Q_PROPERTY(QVariantList covers READ covers NOTIFY infoChanged)
+    Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY infoChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY infoChanged)
     Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY infoChanged)
     Q_PROPERTY(bool canRevert READ canRevert NOTIFY infoChanged)
@@ -155,6 +159,31 @@ public:
     QString sceneTransition() const { return m_sceneTransition; }
     void setSceneTransition(const QString &value) {
         m_sceneTransition = value == QLatin1String("off") ? QStringLiteral("off") : QStringLiteral("dip");
+    }
+    bool broll() const { return m_broll; }
+    void setBroll(bool value) {
+        if (m_broll == value)
+            return;
+        m_broll = value;
+        emit infoChanged();
+    }
+    bool brollMix() const { return m_brollMix; }
+    void setBrollMix(bool value) {
+        if (m_brollMix == value)
+            return;
+        m_brollMix = value;
+        emit infoChanged();
+    }
+    QVariantList covers() const { return m_covers; }
+    void setCovers(const QVariantList &covers) { m_covers = covers; }
+    QStringList cutClips() const { return m_cutClips; }
+    void setCutClips(const QStringList &clips) { m_cutClips = clips; }
+    Q_INVOKABLE void clearCover(int lineId) {
+        for (int i = m_covers.size() - 1; i >= 0; --i) {
+            if (m_covers.at(i).toMap().value(QStringLiteral("line")).toInt() == lineId)
+                m_covers.removeAt(i);
+        }
+        emit infoChanged();
     }
     QString pace() const { return m_pace; }
     QStringList reviseNotes() const { return {}; }
@@ -243,6 +272,10 @@ private:
     QVariantList m_selects;
     bool m_renderedUnsaved = false;
     QString m_sceneTransition = QStringLiteral("dip");
+    bool m_broll = false;
+    bool m_brollMix = true;
+    QVariantList m_covers;
+    QStringList m_cutClips;
     QString m_pace = QStringLiteral("open");
     bool m_busy = false;
     bool m_canRevert = false;
@@ -365,6 +398,12 @@ private slots:
     void linePlayReachedEnd();
     void cutLaunchUsesTheCliOrUv();
     void sceneTransitionRoundTrips();
+    void clearCoverKeepsTheWords();
+    void coverHoverNamesTheCutClip();
+    void loadSelectsKeepsClipArrayOrder();
+    void assembleLaunchOmitsBroll();
+    void renderSelectsPassesBrollSound();
+    void planSegmentWriteLeavesCovers();
     void reviseDropsALineAndReverts();
     void cardLandsAtTheEndsOfTheTray();
     void helpNoteDoesNotReplayRevise();
@@ -396,6 +435,8 @@ private slots:
     void qmlQuitConfirmsUnexportedEdit();
     void qmlLooseCutAsksToSaveOrLose();
     void renderedCutCopiesInsteadOfEncoding();
+    void renderedCutRefusesAnUpscale();
+    void renderedCutDownscalesToTheChosenSize();
     void savedCutCopiesTheCaptionFile();
     void planWatchTrimsOneSourceAndRenders();
     void timelineSplitsTrimsAndJoins();
@@ -1299,7 +1340,9 @@ void BackendTests::gatherLabelsFit() {
     QVERIFY(window->property("settingsOpen").toBool());
 
     const QStringList settingLabels{QStringLiteral("Spoken cuts"), QStringLiteral("This movie"),
-                                    QStringLiteral("Dip to black between files")};
+                                    QStringLiteral("Dip to black between files"),
+                                    QStringLiteral("Cut in B-roll"),
+                                    QStringLiteral("Mix the clip's sound under the voice")};
     for (const QString &label : settingLabels)
         QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
@@ -1364,7 +1407,8 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                              QStringLiteral("assemble"), QStringLiteral("--intent"),
                                              defaultCutIntent(), QStringLiteral("--scene-transition"),
                                              QStringLiteral("dip"), QStringLiteral("--max-pause"),
-                                             QStringLiteral("0.8")}));
+                                             QStringLiteral("0.8"), QStringLiteral("--b-roll-sound"),
+                                             QStringLiteral("mix")}));
     QVERIFY(direct.error.isEmpty());
 
     const CutLaunch viaUv = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
@@ -1410,13 +1454,37 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                              QString(), false, QStringLiteral("dip"), 0.1);
     QCOMPARE(frenzied.arguments.at(frenzied.arguments.indexOf(QStringLiteral("--max-pause")) + 1),
              QStringLiteral("0.1"));
+    QVERIFY(!frenzied.arguments.contains(QStringLiteral("--b-roll")));
+
+    const CutLaunch covered = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                            QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                            QString(), true, QStringLiteral("dip"), 0.8, true);
+    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--max-pause")) + 2),
+             QStringLiteral("--b-roll"));
+    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--b-roll")) + 1),
+             QStringLiteral("--b-roll-sound"));
+    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
+             QStringLiteral("mix"));
+    QCOMPARE(covered.arguments.last(), QStringLiteral("--decide"));
+
+    const CutLaunch clipSound = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                              QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                              QString(), false, QStringLiteral("dip"), 0.8, false, false);
+    QCOMPARE(clipSound.arguments.at(clipSound.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
+             QStringLiteral("clip"));
+    QVERIFY(!clipSound.arguments.contains(QStringLiteral("--b-roll")));
 
     const CutLaunch rendered = cutRenderLaunch(QStringLiteral("/tmp/out"),
                                                 QStringLiteral("/usr/bin/botcut-cli"), QString(),
                                                 QString(), QStringLiteral("weird"));
     QCOMPARE(rendered.arguments, (QStringList{QStringLiteral("render"), QStringLiteral("/tmp/out"),
                                                QStringLiteral("--scene-transition"),
-                                               QStringLiteral("dip")}));
+                                               QStringLiteral("dip"), QStringLiteral("--b-roll-sound"),
+                                               QStringLiteral("mix")}));
+    const CutLaunch renderedClip = cutRenderLaunch(QStringLiteral("/tmp/out"),
+                                                    QStringLiteral("/usr/bin/botcut-cli"), QString(),
+                                                    QString(), QStringLiteral("dip"), false);
+    QCOMPARE(renderedClip.arguments.last(), QStringLiteral("clip"));
 
     const QString cutsPath = QStringLiteral("/tmp/out/cuts.json");
     const CutLaunch captions = cutCaptionsLaunch(cutsPath, QStringLiteral("/usr/bin/botcut-cli"),
@@ -1457,10 +1525,16 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *picker = new FakeFilePicker;
     Backend first(&provider, picker);
     QCOMPARE(first.sceneTransition(), QStringLiteral("dip"));
+    QCOMPARE(first.broll(), false);
+    QCOMPARE(first.brollMix(), true);
     QCOMPARE(first.pace(), QStringLiteral("open"));
     QCOMPARE(first.maxPause(), 0.8);
     first.setSceneTransition(QStringLiteral("off"));
     QCOMPARE(first.sceneTransition(), QStringLiteral("off"));
+    first.setBroll(true);
+    QCOMPARE(first.broll(), true);
+    first.setBrollMix(false);
+    QCOMPARE(first.brollMix(), false);
     first.setPace(QStringLiteral("frenzied"));
     QCOMPARE(first.pace(), QStringLiteral("frenzied"));
     QCOMPARE(first.maxPause(), 0.1);
@@ -1472,10 +1546,16 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *againPicker = new FakeFilePicker;
     Backend again(&provider, againPicker);
     QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
+    QCOMPARE(again.broll(), true);
+    QCOMPARE(again.brollMix(), false);
     QCOMPARE(again.pace(), QStringLiteral("measured"));
     QCOMPARE(again.maxPause(), 0.4);
     again.setSceneTransition(QStringLiteral("nope"));
     QCOMPARE(again.sceneTransition(), QStringLiteral("dip"));
+    again.setBroll(false);
+    QCOMPARE(again.broll(), false);
+    again.setBrollMix(true);
+    QCOMPARE(again.brollMix(), true);
     again.setPace(QStringLiteral("nope"));
     QCOMPARE(again.pace(), QStringLiteral("open"));
     QCOMPARE(again.maxPause(), 0.8);
@@ -1483,11 +1563,428 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *thirdPicker = new FakeFilePicker;
     Backend third(&provider, thirdPicker);
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
+    QCOMPARE(third.broll(), false);
+    QCOMPARE(third.brollMix(), true);
     QCOMPARE(third.pace(), QStringLiteral("open"));
     third.setSceneTransition(QStringLiteral("dip"));
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
     third.setPace(QStringLiteral("open"));
     QCOMPARE(third.pace(), QStringLiteral("open"));
+    third.setBroll(false);
+    QSettings().setValue(QStringLiteral("brollMix"), QStringLiteral("false"));
+    Backend exactFalse(&provider, new FakeFilePicker);
+    QCOMPARE(exactFalse.brollMix(), false);
+    QSettings().setValue(QStringLiteral("brollMix"), QStringLiteral("False"));
+    Backend capitalFalse(&provider, new FakeFilePicker);
+    QCOMPARE(capitalFalse.brollMix(), true);
+    QSettings().setValue(QStringLiteral("brollMix"), QStringLiteral("0"));
+    Backend zero(&provider, new FakeFilePicker);
+    QCOMPARE(zero.brollMix(), true);
+    // A default-constructed QString is a null variant, and setValue drops the key.
+    QSettings().setValue(QStringLiteral("brollMix"), QStringLiteral(""));
+    QVERIFY(QSettings().contains(QStringLiteral("brollMix")));
+    Backend empty(&provider, new FakeFilePicker);
+    QCOMPARE(empty.brollMix(), true);
+    QSettings().remove(QStringLiteral("brollMix"));
+    Backend absent(&provider, new FakeFilePicker);
+    QCOMPARE(absent.brollMix(), true);
+}
+
+void BackendTests::clearCoverKeepsTheWords() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString dir = m_dir.filePath(QStringLiteral("cover-clear"));
+    QVERIFY(QDir().mkpath(dir));
+    backend.m_cutOut = dir;
+
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 4);
+    line.insert(QStringLiteral("clip"), 0);
+    line.insert(QStringLiteral("start"), 1.0);
+    line.insert(QStringLiteral("end"), 3.0);
+    line.insert(QStringLiteral("text"), QStringLiteral("hello there"));
+    line.insert(QStringLiteral("keep"), true);
+    line.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QVariantMap other = line;
+    other.insert(QStringLiteral("id"), 5);
+    other.insert(QStringLiteral("text"), QStringLiteral("the next line"));
+    backend.m_selects = {line, other};
+    QVariantMap cover;
+    cover.insert(QStringLiteral("clip"), 2);
+    cover.insert(QStringLiteral("line"), 4);
+    QVariantMap otherCover;
+    otherCover.insert(QStringLiteral("clip"), 3);
+    otherCover.insert(QStringLiteral("line"), 5);
+    backend.m_covers = {cover, otherCover};
+
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    QJsonArray lines;
+    QJsonObject kept;
+    kept.insert(QStringLiteral("id"), 4);
+    kept.insert(QStringLiteral("clip"), 0);
+    kept.insert(QStringLiteral("start"), 1.0);
+    kept.insert(QStringLiteral("end"), 3.0);
+    kept.insert(QStringLiteral("text"), QStringLiteral("hello there"));
+    kept.insert(QStringLiteral("keep"), true);
+    kept.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QJsonObject next = kept;
+    next.insert(QStringLiteral("id"), 5);
+    next.insert(QStringLiteral("text"), QStringLiteral("the next line"));
+    lines.append(kept);
+    lines.append(next);
+    QJsonArray rows;
+    QJsonObject item;
+    item.insert(QStringLiteral("clip"), 2);
+    item.insert(QStringLiteral("line"), 4);
+    QJsonObject itemNext;
+    itemNext.insert(QStringLiteral("clip"), 3);
+    itemNext.insert(QStringLiteral("line"), 5);
+    rows.append(item);
+    rows.append(itemNext);
+    QJsonObject segment;
+    segment.insert(QStringLiteral("clip"), 0);
+    segment.insert(QStringLiteral("start"), 1.0);
+    segment.insert(QStringLiteral("end"), 8.0);
+    QJsonObject tighten;
+    tighten.insert(QStringLiteral("max_pause"), 0.4);
+    QJsonObject root;
+    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("covers"), rows);
+    root.insert(QStringLiteral("segments"), QJsonArray{segment});
+    root.insert(QStringLiteral("trimmed"), true);
+    root.insert(QStringLiteral("tighten"), tighten);
+    const auto writeRoot = [&cuts](const QJsonObject &object) {
+        QFile file(cuts);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+            return false;
+        const QByteArray bytes = QJsonDocument(object).toJson(QJsonDocument::Indented);
+        return file.write(bytes) == bytes.size();
+    };
+    const auto readRoot = [&cuts]() {
+        QFile file(cuts);
+        if (!file.open(QIODevice::ReadOnly))
+            return QJsonObject();
+        return QJsonDocument::fromJson(file.readAll()).object();
+    };
+    QVERIFY(writeRoot(root));
+
+    backend.clearCover(99);
+    QCOMPARE(backend.covers().size(), 2);
+    QCOMPARE(readRoot().value(QStringLiteral("covers")).toArray().size(), 2);
+
+    backend.clearCover(4);
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
+    QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello there"));
+    const QJsonObject afterClear = readRoot();
+    const QJsonArray clearedLines = afterClear.value(QStringLiteral("lines")).toArray();
+    QCOMPARE(clearedLines.at(0).toObject().value(QStringLiteral("keep")).toBool(), true);
+    QCOMPARE(clearedLines.at(0).toObject().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello there"));
+    const QJsonArray clearedCovers = afterClear.value(QStringLiteral("covers")).toArray();
+    QCOMPARE(clearedCovers.size(), 1);
+    QCOMPARE(clearedCovers.at(0).toObject().value(QStringLiteral("clip")).toInt(), 3);
+    QCOMPARE(clearedCovers.at(0).toObject().value(QStringLiteral("line")).toInt(), 5);
+    QCOMPARE(afterClear.value(QStringLiteral("segments")).toArray().at(0).toObject().value(QStringLiteral("end")).toDouble(),
+             8.0);
+    QCOMPARE(afterClear.value(QStringLiteral("trimmed")).toBool(), true);
+    QCOMPARE(afterClear.value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(), 0.4);
+
+    QVERIFY(writeRoot(root));
+    backend.m_covers = {cover, otherCover};
+    backend.m_selects = {line, other};
+    backend.dropSelect(4);
+    QVERIFY(!backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello there"));
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
+    const QJsonObject afterDrop = readRoot();
+    const QJsonArray droppedLines = afterDrop.value(QStringLiteral("lines")).toArray();
+    QCOMPARE(droppedLines.at(0).toObject().value(QStringLiteral("keep")).toBool(), false);
+    QCOMPARE(droppedLines.at(0).toObject().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello there"));
+    QCOMPARE(droppedLines.at(1).toObject().value(QStringLiteral("keep")).toBool(), true);
+    const QJsonArray droppedCovers = afterDrop.value(QStringLiteral("covers")).toArray();
+    QCOMPARE(droppedCovers.size(), 1);
+    QCOMPARE(droppedCovers.at(0).toObject().value(QStringLiteral("line")).toInt(), 5);
+    QCOMPARE(afterDrop.value(QStringLiteral("segments")).toArray().at(0).toObject().value(QStringLiteral("end")).toDouble(),
+             8.0);
+    QCOMPARE(afterDrop.value(QStringLiteral("trimmed")).toBool(), true);
+    QCOMPARE(afterDrop.value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(), 0.4);
+
+    QVERIFY(QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    backend.clearCover(5);
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
+    backend.m_selects[1] = other;
+    backend.dropSelect(5);
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QVERIFY(backend.selects().at(1).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.covers().size(), 1);
+    QVERIFY(QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+    const QJsonObject stillThere = readRoot();
+    QCOMPARE(stillThere.value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("line")).toInt(),
+             5);
+    QCOMPARE(stillThere.value(QStringLiteral("lines")).toArray().at(1).toObject().value(QStringLiteral("keep")).toBool(),
+             true);
+}
+
+void BackendTests::coverHoverNamesTheCutClip() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    QVariantMap first;
+    first.insert(QStringLiteral("id"), 4);
+    first.insert(QStringLiteral("text"), QStringLiteral("the spoken line"));
+    first.insert(QStringLiteral("keep"), true);
+    first.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QVariantMap second;
+    second.insert(QStringLiteral("id"), 5);
+    second.insert(QStringLiteral("text"), QStringLiteral("the other line"));
+    second.insert(QStringLiteral("keep"), true);
+    second.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    backend.setSelects({first, second});
+    backend.setTray({QStringLiteral("/tmp/not-the-cut-a.mp4"), QStringLiteral("/tmp/not-the-cut-b.mp4")});
+    QVariantMap coverA;
+    coverA.insert(QStringLiteral("clip"), 1);
+    coverA.insert(QStringLiteral("line"), 4);
+    QVariantMap coverB;
+    coverB.insert(QStringLiteral("clip"), 0);
+    coverB.insert(QStringLiteral("line"), 5);
+    backend.setCovers({coverA, coverB});
+    backend.setCutClips({QStringLiteral("/cuts/speaker.mp4"), QStringLiteral("/cuts/room.mp4")});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
+    window->setProperty("currentLine", 0);
+    QTest::qWait(50);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("room.mp4")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("speaker.mp4")));
+    QQuickItem *clear = visibleItemWithText(window, QStringLiteral("Clear"));
+    QVERIFY(clear);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(clear));
+    QTest::qWait(50);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("the spoken line")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("the other line")));
+    window->setProperty("currentLine", 1);
+    QTest::qWait(50);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("speaker.mp4")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
+}
+
+void BackendTests::loadSelectsKeepsClipArrayOrder() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString dir = m_dir.filePath(QStringLiteral("clip-order"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    const QString room = QStringLiteral("/cuts/room.mp4");
+    const QString speaker = QStringLiteral("/cuts/speaker.mp4");
+    // Indexes 2 then 0 skip 1. Cover numbers follow the array, not a sort that inserts a blank.
+    QJsonObject first;
+    first.insert(QStringLiteral("index"), 2);
+    first.insert(QStringLiteral("path"), room);
+    QJsonObject second;
+    second.insert(QStringLiteral("index"), 0);
+    second.insert(QStringLiteral("path"), speaker);
+    QJsonArray clips;
+    clips.append(first);
+    clips.append(second);
+    QJsonObject cover0;
+    cover0.insert(QStringLiteral("clip"), 0);
+    cover0.insert(QStringLiteral("line"), 4);
+    QJsonObject cover1;
+    cover1.insert(QStringLiteral("clip"), 1);
+    cover1.insert(QStringLiteral("line"), 5);
+    QJsonArray covers;
+    covers.append(cover0);
+    covers.append(cover1);
+    QJsonObject root;
+    root.insert(QStringLiteral("clips"), clips);
+    root.insert(QStringLiteral("covers"), covers);
+    QFile file(cuts);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    QCOMPARE(file.write(bytes), bytes.size());
+    file.close();
+
+    backend.loadSelects(cuts);
+    const QStringList paths = backend.cutClips();
+    QCOMPARE(paths, QStringList({room, speaker}));
+    QVERIFY(!paths.contains(QString()));
+    QCOMPARE(backend.covers().size(), 2);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 0);
+    QCOMPARE(paths.at(0), room);
+    QCOMPARE(backend.covers().at(1).toMap().value(QStringLiteral("clip")).toInt(), 1);
+    QCOMPARE(paths.at(1), speaker);
+}
+
+void BackendTests::assembleLaunchOmitsBroll() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString clip = m_dir.filePath(QStringLiteral("assemble-broll.mp4"));
+    QVERIFY(QFile(clip).open(QIODevice::WriteOnly));
+    backend.m_tray = {QFileInfo(clip).absoluteFilePath()};
+    backend.m_cutMode = QStringLiteral("assemble");
+    backend.setBroll(true);
+    backend.m_launchProgram = QStringLiteral("/bin/true");
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QVERIFY(backend.m_cutProcess);
+    QVERIFY(!backend.m_cutProcess->arguments().contains(QStringLiteral("--b-roll")));
+
+    backend.m_cutMode = QStringLiteral("speech");
+    backend.setApiKey(QStringLiteral("not-a-real-key"));
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    const QStringList args = backend.m_cutProcess->arguments();
+    const int pause = args.indexOf(QStringLiteral("--max-pause"));
+    QVERIFY(pause >= 0);
+    QCOMPARE(args.at(pause + 2), QStringLiteral("--b-roll"));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("mix"));
+    QCOMPARE(args.last(), QStringLiteral("--decide"));
+    QVERIFY(!args.contains(QStringLiteral("not-a-real-key")));
+    backend.setBrollMix(false);
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    const QStringList clipArgs = backend.m_cutProcess->arguments();
+    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
+    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--max-pause")) + 2), QStringLiteral("--b-roll"));
+    QCOMPARE(clipArgs.last(), QStringLiteral("--decide"));
+    QVERIFY(!clipArgs.contains(QStringLiteral("not-a-real-key")));
+    backend.setBrollMix(true);
+    backend.setBroll(false);
+}
+
+void BackendTests::renderSelectsPassesBrollSound() {
+    const QString stub = m_dir.filePath(QStringLiteral("render-selects-stub.sh"));
+    {
+        QFile script(stub);
+        QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QVERIFY(script.write("#!/bin/sh\nexit 0\n") > 0);
+    }
+    QVERIFY(QFile::setPermissions(stub, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
+    const QString dir = m_dir.filePath(QStringLiteral("render-selects"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    {
+        QFile file(cuts);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        const QByteArray bytes = QJsonDocument(QJsonObject()).toJson(QJsonDocument::Indented);
+        QCOMPARE(file.write(bytes), bytes.size());
+    }
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("keep"), true);
+    backend.m_selects = {line};
+    backend.m_cutOut = dir;
+    // The stub stands in for botcut-cli. A real render would encode.
+    backend.m_launchProgram = stub;
+
+    backend.renderSelects();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QVERIFY(backend.m_cutProcess);
+    QCOMPARE(backend.m_cutProcess->program(), stub);
+    const QStringList args = backend.m_cutProcess->arguments();
+    QVERIFY(args.contains(QStringLiteral("render")));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("mix"));
+
+    backend.setBrollMix(false);
+    backend.renderSelects();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.m_cutProcess->program(), stub);
+    const QStringList clipArgs = backend.m_cutProcess->arguments();
+    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
+    backend.setBrollMix(true);
+}
+
+void BackendTests::planSegmentWriteLeavesCovers() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString dir = m_dir.filePath(QStringLiteral("plan-covers"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString movie = QDir(dir).filePath(QStringLiteral("rough_cut.mp4"));
+    QFile movieFile(movie);
+    QVERIFY(movieFile.open(QIODevice::WriteOnly));
+    movieFile.write("not a movie");
+    movieFile.close();
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    QJsonObject clip;
+    clip.insert(QStringLiteral("index"), 0);
+    clip.insert(QStringLiteral("path"), movie);
+    clip.insert(QStringLiteral("duration"), 20);
+    QJsonArray clips;
+    clips.append(clip);
+    QJsonObject seg;
+    seg.insert(QStringLiteral("clip"), 0);
+    seg.insert(QStringLiteral("start"), 1.0);
+    seg.insert(QStringLiteral("end"), 8.0);
+    seg.insert(QStringLiteral("reason"), QStringLiteral("fake"));
+    QJsonArray segments;
+    segments.append(seg);
+    QJsonObject cover;
+    cover.insert(QStringLiteral("clip"), 2);
+    cover.insert(QStringLiteral("line"), 4);
+    QJsonArray covers;
+    covers.append(cover);
+    QJsonObject root;
+    root.insert(QStringLiteral("clips"), clips);
+    root.insert(QStringLiteral("segments"), segments);
+    root.insert(QStringLiteral("covers"), covers);
+    QFile file(cuts);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    QCOMPARE(file.write(bytes), bytes.size());
+    file.close();
+
+    backend.m_path = movie;
+    backend.m_planCuts = QFileInfo(cuts).absoluteFilePath();
+    backend.m_planMovie = QFileInfo(movie).absoluteFilePath();
+    backend.loadPlanFilm();
+    QVERIFY(backend.m_plan.active());
+    QVERIFY(backend.writePlanSegments());
+
+    QFile writtenFile(cuts);
+    QVERIFY(writtenFile.open(QIODevice::ReadOnly));
+    QJsonArray written = QJsonDocument::fromJson(writtenFile.readAll()).object().value(QStringLiteral("covers")).toArray();
+    writtenFile.close();
+    QCOMPARE(written.size(), 1);
+    QCOMPARE(written.at(0).toObject().value(QStringLiteral("clip")).toInt(), 2);
+    QCOMPARE(written.at(0).toObject().value(QStringLiteral("line")).toInt(), 4);
+
+    backend.m_plan.moveEdge(0, false, 4.0);
+    QFile movedFile(cuts);
+    QVERIFY(movedFile.open(QIODevice::ReadOnly));
+    written = QJsonDocument::fromJson(movedFile.readAll()).object().value(QStringLiteral("covers")).toArray();
+    movedFile.close();
+    QCOMPARE(written.size(), 1);
+    QCOMPARE(written.at(0).toObject().value(QStringLiteral("clip")).toInt(), 2);
+    QCOMPARE(written.at(0).toObject().value(QStringLiteral("line")).toInt(), 4);
+    QFile trimmed(cuts);
+    QVERIFY(trimmed.open(QIODevice::ReadOnly));
+    const double end = QJsonDocument::fromJson(trimmed.readAll())
+                           .object()
+                           .value(QStringLiteral("segments"))
+                           .toArray()
+                           .at(0)
+                           .toObject()
+                           .value(QStringLiteral("end"))
+                           .toDouble();
+    QVERIFY(end < 8.0);
 }
 
 void BackendTests::reviseDropsALineAndReverts() {
@@ -1585,6 +2082,16 @@ void BackendTests::reviseDropsALineAndReverts() {
     root.insert(QStringLiteral("segments"), segments);
     root.insert(QStringLiteral("lines"), QJsonArray());
     root.insert(QStringLiteral("dropped"), QJsonArray());
+    QJsonObject cover;
+    cover.insert(QStringLiteral("clip"), 3);
+    cover.insert(QStringLiteral("line"), 2);
+    QJsonArray covers;
+    covers.append(cover);
+    root.insert(QStringLiteral("covers"), covers);
+    QVariantMap coverRow;
+    coverRow.insert(QStringLiteral("clip"), 3);
+    coverRow.insert(QStringLiteral("line"), 2);
+    backend.m_covers = {coverRow};
     const QString cuts = QDir(out).filePath(QStringLiteral("cuts.json"));
     {
         QFile file(cuts);
@@ -1667,6 +2174,16 @@ void BackendTests::reviseDropsALineAndReverts() {
     QVERIFY(backend.writeSelects(cuts));
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
              0.1);
+    QCOMPARE(backend.covers().size(), 0);
+    QVERIFY(!readRoot().contains(QStringLiteral("covers")));
+
+    QVERIFY(QFile::setPermissions(cuts, QFileDevice::ReadOwner));
+    backend.revertRevise();
+    QVERIFY(backend.canRevert());
+    QVERIFY(!lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.covers().size(), 0);
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QVERIFY(QFile::setPermissions(cuts, QFileDevice::ReadOwner | QFileDevice::WriteOwner));
 
     backend.revertRevise();
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
@@ -1676,6 +2193,11 @@ void BackendTests::reviseDropsALineAndReverts() {
     QVERIFY(!backend.canRevert());
     QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
     QVERIFY(lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 3);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 2);
+    QCOMPARE(readRoot().value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("line")).toInt(),
+             2);
     QCOMPARE(lineById(backend.selects(), 2).value(QStringLiteral("reason")).toString(),
              QStringLiteral("story"));
     QCOMPARE(lineById(backend.selects(), 1).value(QStringLiteral("still")).toString(),
@@ -1790,6 +2312,11 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QVERIFY(!backend.status().contains(QStringLiteral("supersecret")));
     backend.m_launchProgram.clear();
     backend.m_undoSelects = backend.m_selects;
+    QVariantMap cover;
+    cover.insert(QStringLiteral("clip"), 1);
+    cover.insert(QStringLiteral("line"), 1);
+    backend.m_covers = {cover};
+    backend.m_undoCovers = {cover};
     backend.m_cutOut = m_dir.filePath(QStringLiteral("cut-out"));
     QVERIFY(QDir().mkpath(backend.m_cutOut));
     QFile cutsFile(QDir(backend.m_cutOut).filePath(QStringLiteral("cuts.json")));
@@ -1797,7 +2324,8 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     const QString cutsJson = QStringLiteral(
         "{\"clips\":[{\"index\":0,\"path\":\"%1\",\"duration\":1},{\"index\":1,\"path\":\"%2\",\"duration\":1}],"
         "\"lines\":[{\"id\":1,\"clip\":0,\"start\":0,\"end\":1,\"text\":\"hello\",\"keep\":true,\"reason\":\"story\"}],"
-        "\"segments\":[{\"clip\":0,\"start\":0,\"end\":1,\"reason\":\"story\"}]}")
+        "\"segments\":[{\"clip\":0,\"start\":0,\"end\":1,\"reason\":\"story\"}],"
+        "\"covers\":[{\"clip\":1,\"line\":1}]}")
                                  .arg(QFileInfo(first).absoluteFilePath(),
                                       QFileInfo(second).absoluteFilePath());
     QCOMPARE(cutsFile.write(cutsJson.toUtf8()), qint64(cutsJson.toUtf8().size()));
@@ -1842,6 +2370,8 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QCOMPARE(backend.selects().size(), 1);
     QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("clip")).toInt(), 1);
     QCOMPARE(backend.m_undoSelects.at(0).toMap().value(QStringLiteral("clip")).toInt(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 2);
+    QCOMPARE(backend.m_undoCovers.at(0).toMap().value(QStringLiteral("clip")).toInt(), 2);
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
     QVERIFY(cutsFile.open(QIODevice::ReadOnly));
     const QJsonObject cutsRoot = QJsonDocument::fromJson(cutsFile.readAll()).object();
@@ -1855,6 +2385,8 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
              1);
     QCOMPARE(cutsRoot.value(QStringLiteral("segments")).toArray().at(0).toObject().value(QStringLiteral("clip")).toInt(),
              1);
+    QCOMPARE(cutsRoot.value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("clip")).toInt(),
+             2);
     QVERIFY(!work.exists(QStringLiteral("0-card-a.fake.words.json")));
     QVERIFY(!work.exists(QStringLiteral("0-card-a.silences.json")));
     QVERIFY(!work.exists(QStringLiteral("0-card-a.flac")));
@@ -1895,6 +2427,11 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QCOMPARE(backend.tray().at(1), QFileInfo(first).absoluteFilePath());
     QCOMPARE(backend.tray().at(2), QFileInfo(second).absoluteFilePath());
     QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("clip")).toInt(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 2);
+    QVERIFY(cutsFile.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(cutsFile.readAll()).object().value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("clip")).toInt(),
+             2);
+    cutsFile.close();
     QVERIFY(QFileInfo(work.filePath(QStringLiteral("1-card-a.fake.words.json"))).isFile());
     QVERIFY(QFileInfo(work.filePath(QStringLiteral("1-card-a.silences.json"))).isFile());
     QVERIFY(QFileInfo(work.filePath(QStringLiteral("2-card-b.fake.words.json"))).isFile());
@@ -1908,6 +2445,18 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QVERIFY(!closeArgs.join(QLatin1Char(' ')).contains(QStringLiteral("supersecret")));
     QVERIFY(!closeArgs.contains(QStringLiteral("XAI_API_KEY")));
     QCOMPARE(backend.selects().size(), 1);
+
+    QVERIFY(QFile::setPermissions(work.path(), QFileDevice::ReadOwner | QFileDevice::ExeOwner));
+    const int trayBefore = backend.tray().size();
+    const int coverClip = backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt();
+    QVERIFY2(backend.makeCard(QStringLiteral("open"), sentence), qPrintable(backend.status()));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
+    QCOMPARE(backend.status(), QStringLiteral("Could not save the selects"));
+    QCOMPARE(backend.tray().size(), trayBefore);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), coverClip);
+    QCOMPARE(backend.m_undoCovers.at(0).toMap().value(QStringLiteral("clip")).toInt(), coverClip);
+    QVERIFY(QFile::setPermissions(work.path(),
+                                  QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
 
     backend.setPace(QStringLiteral("open"));
     backend.setSceneTransition(QStringLiteral("dip"));
@@ -2944,6 +3493,109 @@ void BackendTests::renderedCutCopiesInsteadOfEncoding() {
     QDir(dirPath).removeRecursively();
 }
 
+void BackendTests::renderedCutRefusesAnUpscale() {
+    const QString seed = makeVideo(QStringLiteral("seed-no-upscale.mp4"), 1.0, false);
+    QVERIFY(!seed.isEmpty());
+    const QString dirPath = QDir::temp().filePath(QStringLiteral("botcut-cut-noscale-test"));
+    QVERIFY(QDir().mkpath(dirPath));
+    const QString rough = QDir(dirPath).filePath(QStringLiteral("rough_cut.mp4"));
+    QFile::remove(rough);
+    QVERIFY(QFile::copy(seed, rough));
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QVERIFY(backend.load(QUrl::fromLocalFile(rough)));
+    QVERIFY(backend.renderedUnsaved());
+
+    const QString saved = m_dir.filePath(QStringLiteral("saved-no-upscale.mp4"));
+    QFile::remove(saved);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    // 32×32 is already below 720p. The choice must copy, not grow the frame.
+    emit picker->exportSelected(QUrl::fromLocalFile(saved), 720);
+    QTRY_COMPARE_WITH_TIMEOUT(doneSpy.count(), 1, 5000);
+    QCOMPARE(failedSpy.count(), 0);
+    QFile savedFile(saved);
+    QFile roughFile(rough);
+    QVERIFY(savedFile.open(QIODevice::ReadOnly));
+    QVERIFY(roughFile.open(QIODevice::ReadOnly));
+    QCOMPARE(savedFile.readAll(), roughFile.readAll());
+    QVERIFY(!backend.renderedUnsaved());
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(saved));
+    QVERIFY(QFileInfo::exists(rough));
+    QDir(dirPath).removeRecursively();
+}
+
+void BackendTests::renderedCutDownscalesToTheChosenSize() {
+    const QString ffmpegBin = QStandardPaths::findExecutable(QStringLiteral("ffmpeg"));
+    QVERIFY(!ffmpegBin.isEmpty());
+    const QString seed = m_dir.filePath(QStringLiteral("seed-downscale.mp4"));
+    QProcess make;
+    make.start(ffmpegBin, {
+        QStringLiteral("-hide_banner"), QStringLiteral("-loglevel"), QStringLiteral("error"),
+        QStringLiteral("-f"), QStringLiteral("lavfi"),
+        QStringLiteral("-i"), QStringLiteral("testsrc=size=320x180:rate=30:duration=1"),
+        QStringLiteral("-pix_fmt"), QStringLiteral("yuv420p"),
+        QStringLiteral("-y"), seed,
+    });
+    QVERIFY(make.waitForFinished(15000));
+    QCOMPARE(make.exitCode(), 0);
+
+    const QString dirPath = QDir::temp().filePath(QStringLiteral("botcut-cut-downscale-test"));
+    QDir(dirPath).removeRecursively();
+    QVERIFY(QDir().mkpath(dirPath));
+    const QString rough = QDir(dirPath).filePath(QStringLiteral("rough_cut.mp4"));
+    QVERIFY(QFile::copy(seed, rough));
+    QFile cuts(QDir(dirPath).filePath(QStringLiteral("cuts.json")));
+    QVERIFY(cuts.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    cuts.write("{}\n");
+    cuts.close();
+    const QString srtBody = QStringLiteral("1\n00:00:00,000 --> 00:00:01,000\nHello\n");
+    QFile srt(QDir(dirPath).filePath(QStringLiteral("rough_cut.srt")));
+    QVERIFY(srt.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    srt.write(srtBody.toUtf8());
+    srt.close();
+
+    ThumbProvider provider;
+    auto *picker = new FakeFilePicker;
+    Backend backend(&provider, picker);
+    QVERIFY(backend.load(QUrl::fromLocalFile(rough)));
+    QVERIFY(backend.renderedUnsaved());
+    QVERIFY(backend.roughCut());
+
+    const QString saved = m_dir.filePath(QStringLiteral("saved-downscale.mp4"));
+    const QString savedSrt = m_dir.filePath(QStringLiteral("saved-downscale.srt"));
+    QFile::remove(saved);
+    QFile::remove(savedSrt);
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+    emit picker->exportSelected(QUrl::fromLocalFile(saved), 90);
+    QTRY_COMPARE_WITH_TIMEOUT(doneSpy.count() + failedSpy.count(), 1, 20000);
+    QVERIFY2(failedSpy.isEmpty(),
+             qPrintable(failedSpy.isEmpty() ? QString() : failedSpy.first().first().toString()));
+    QCOMPARE(doneSpy.count(), 1);
+
+    const ffmpeg::VideoInfo info = ffmpeg::probe(saved);
+    QVERIFY(info.ok);
+    QCOMPARE(info.width, 160);
+    QCOMPARE(info.height, 90);
+    QFile savedFile(saved);
+    QFile roughFile(rough);
+    QVERIFY(savedFile.open(QIODevice::ReadOnly));
+    QVERIFY(roughFile.open(QIODevice::ReadOnly));
+    QVERIFY(savedFile.readAll() != roughFile.readAll());
+    QVERIFY(QFileInfo::exists(rough));
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(saved));
+    QVERIFY(!backend.renderedUnsaved());
+    QVERIFY(backend.roughCut());
+    QVERIFY(backend.status().isEmpty());
+    QFile copied(savedSrt);
+    QVERIFY(copied.open(QIODevice::ReadOnly));
+    QCOMPARE(QString::fromUtf8(copied.readAll()), srtBody);
+    QDir(dirPath).removeRecursively();
+}
+
 void BackendTests::savedCutCopiesTheCaptionFile() {
     const QString seed = makeVideo(QStringLiteral("seed-for-captions.mp4"), 1.0, false);
     QVERIFY(!seed.isEmpty());
@@ -3049,21 +3701,67 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QJsonArray segments;
     segments.append(segA);
     segments.append(segB);
+    // Against source [1, 5), hello is the greatest overlap and the earlier start.
+    // long is the longest line, later is the first equal overlap, second copies
+    // hello's range, after is the last equal overlap, and early is the earliest
+    // start with the segment's reason and a smaller overlap.
+    QJsonObject longLine;
+    longLine.insert(QStringLiteral("id"), 2);
+    longLine.insert(QStringLiteral("clip"), 0);
+    longLine.insert(QStringLiteral("start"), 4.0);
+    longLine.insert(QStringLiteral("end"), 8.0);
+    longLine.insert(QStringLiteral("text"), QStringLiteral("long"));
+    longLine.insert(QStringLiteral("keep"), true);
+    QJsonObject later;
+    later.insert(QStringLiteral("id"), 3);
+    later.insert(QStringLiteral("clip"), 0);
+    later.insert(QStringLiteral("start"), 3.0);
+    later.insert(QStringLiteral("end"), 5.5);
+    later.insert(QStringLiteral("text"), QStringLiteral("later"));
+    later.insert(QStringLiteral("keep"), true);
     QJsonObject line;
     line.insert(QStringLiteral("id"), 1);
     line.insert(QStringLiteral("clip"), 0);
-    line.insert(QStringLiteral("start"), 1.2);
-    line.insert(QStringLiteral("end"), 2.0);
+    line.insert(QStringLiteral("start"), 0.5);
+    line.insert(QStringLiteral("end"), 3.0);
     line.insert(QStringLiteral("text"), QStringLiteral("hello"));
     line.insert(QStringLiteral("keep"), true);
-    line.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QJsonObject duplicate;
+    duplicate.insert(QStringLiteral("id"), 5);
+    duplicate.insert(QStringLiteral("clip"), 0);
+    duplicate.insert(QStringLiteral("start"), 0.5);
+    duplicate.insert(QStringLiteral("end"), 3.0);
+    duplicate.insert(QStringLiteral("text"), QStringLiteral("second"));
+    duplicate.insert(QStringLiteral("keep"), true);
+    QJsonObject after;
+    after.insert(QStringLiteral("id"), 6);
+    after.insert(QStringLiteral("clip"), 0);
+    after.insert(QStringLiteral("start"), 2.5);
+    after.insert(QStringLiteral("end"), 4.5);
+    after.insert(QStringLiteral("text"), QStringLiteral("after"));
+    after.insert(QStringLiteral("keep"), true);
+    QJsonObject early;
+    early.insert(QStringLiteral("id"), 7);
+    early.insert(QStringLiteral("clip"), 0);
+    early.insert(QStringLiteral("start"), 0.0);
+    early.insert(QStringLiteral("end"), 1.4);
+    early.insert(QStringLiteral("text"), QStringLiteral("early"));
+    early.insert(QStringLiteral("keep"), true);
+    early.insert(QStringLiteral("reason"), QStringLiteral("story"));
+    QJsonObject missed;
+    missed.insert(QStringLiteral("id"), 4);
+    missed.insert(QStringLiteral("clip"), 1);
+    missed.insert(QStringLiteral("start"), 0.0);
+    missed.insert(QStringLiteral("end"), 0.5);
+    missed.insert(QStringLiteral("text"), QStringLiteral("touch"));
+    missed.insert(QStringLiteral("keep"), true);
     QJsonObject root;
     root.insert(QStringLiteral("version"), 1);
     root.insert(QStringLiteral("mode"), QStringLiteral("speech"));
     root.insert(QStringLiteral("intent"), QStringLiteral("A quiet ride"));
     root.insert(QStringLiteral("clips"), clips);
     root.insert(QStringLiteral("segments"), segments);
-    root.insert(QStringLiteral("lines"), QJsonArray{line});
+    root.insert(QStringLiteral("lines"), QJsonArray{longLine, later, line, duplicate, after, early, missed});
     root.insert(QStringLiteral("dropped"), QJsonArray());
     {
         QFile file(cutsPath);
@@ -3094,6 +3792,16 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QCOMPARE(backend.m_plan.segments().at(1).end, 3.5);
     QVERIFY(!backend.m_plan.unexported());
     QCOMPARE(backend.m_plan.duration(), 7.0);
+    QCOMPARE(backend.m_plan.segments().at(0).text, QStringLiteral("hello"));
+    QCOMPARE(backend.m_plan.segments().at(1).text, QString());
+    const QVariantList shown = backend.m_plan.clipList();
+    QCOMPARE(shown.size(), 2);
+    QCOMPARE(shown.at(0).toMap().value(QStringLiteral("start")).toDouble(), 0.0);
+    QCOMPARE(shown.at(0).toMap().value(QStringLiteral("end")).toDouble(), 4.0);
+    QCOMPARE(shown.at(0).toMap().value(QStringLiteral("text")).toString(), QStringLiteral("hello"));
+    QCOMPARE(shown.at(1).toMap().value(QStringLiteral("start")).toDouble(), 4.0);
+    QCOMPARE(shown.at(1).toMap().value(QStringLiteral("end")).toDouble(), 7.0);
+    QCOMPARE(shown.at(1).toMap().value(QStringLiteral("text")).toString(), QString());
 
     const QVariantMap at = backend.m_plan.sourceAt(0.5);
     QCOMPARE(at.value(QStringLiteral("ok")).toBool(), true);
@@ -3195,6 +3903,8 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QCOMPARE(shortened.at(1).toObject().value(QStringLiteral("start")).toDouble(), 0.5);
     QCOMPARE(shortened.at(1).toObject().value(QStringLiteral("end")).toDouble(), 3.5);
     QCOMPARE(shortened.at(1).toObject().value(QStringLiteral("reason")).toString(), QStringLiteral("wide"));
+    QVERIFY(!shortened.at(0).toObject().contains(QStringLiteral("text")));
+    QVERIFY(!shortened.at(1).toObject().contains(QStringLiteral("text")));
     QCOMPARE(readRoot().value(QStringLiteral("trimmed")).toBool(), true);
     backend.writeCaptions();
     backend.makeShort();
@@ -3203,7 +3913,7 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QVERIFY(backend.m_cutProcess == nullptr);
     QCOMPARE(readRoot().value(QStringLiteral("trimmed")).toBool(), true);
     QCOMPARE(readRoot().value(QStringLiteral("intent")).toString(), QStringLiteral("A quiet ride"));
-    QCOMPARE(readRoot().value(QStringLiteral("lines")).toArray().at(0).toObject().value(QStringLiteral("text")).toString(),
+    QCOMPARE(readRoot().value(QStringLiteral("lines")).toArray().at(2).toObject().value(QStringLiteral("text")).toString(),
              QStringLiteral("hello"));
     QCOMPARE(readRoot().value(QStringLiteral("clips")).toArray().at(1).toObject().value(QStringLiteral("path")).toString(),
              fileB);
@@ -3240,6 +3950,9 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QCOMPARE(backend.m_plan.segments().at(0).path, fileB);
     backend.m_plan.restoreGap(0);
     QCOMPARE(backend.m_plan.segments().size(), 2);
+    QCOMPARE(backend.m_plan.segments().at(0).text, QStringLiteral("hello"));
+    QCOMPARE(backend.m_plan.clipList().at(0).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("hello"));
     QCOMPARE(backend.m_plan.segments().at(0).start, 1.0);
     QCOMPARE(backend.m_plan.segments().at(0).end, 5.0);
     QCOMPARE(backend.m_plan.segments().at(1).end, 3.5);
@@ -3266,7 +3979,24 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     const QStringList args = backend.m_cutProcess->arguments();
     QVERIFY(args.contains(QStringLiteral("render")));
     QVERIFY(args.contains(QFileInfo(cutsPath).absolutePath()));
+    QCOMPARE(args.at(args.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("mix"));
     QVERIFY(!args.join(QLatin1Char(' ')).contains(token));
+    // A finished export matches the file, so Export waits for the next trim.
+    QVERIFY(!backend.m_plan.unexported());
+    backend.m_plan.moveEdge(0, false, 2.0);
+    QVERIFY(backend.m_plan.unexported());
+    backend.setBrollMix(false);
+    backend.exportPlan();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    const QStringList clipArgs = backend.m_cutProcess->arguments();
+    QVERIFY(clipArgs.contains(QStringLiteral("render")));
+    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
+    QVERIFY(!clipArgs.join(QLatin1Char(' ')).contains(token));
+    backend.setBrollMix(true);
+    // The checks below still read the 3.5 out point.
+    backend.m_plan.moveEdge(0, false, 2.5);
+    QCOMPARE(backend.m_plan.segments().at(0).end, 3.5);
+    QVERIFY(backend.writePlanSegments());
     QVERIFY(!args.contains(QStringLiteral("XAI_API_KEY")));
     QCOMPARE(backend.m_cutProcess->processEnvironment().value(QStringLiteral("BOTCUT_FAKE")),
              QStringLiteral("1"));
@@ -3280,6 +4010,8 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     QCOMPARE(exportedSegs.at(1).toObject().value(QStringLiteral("start")).toDouble(), 0.5);
     QCOMPARE(exportedSegs.at(1).toObject().value(QStringLiteral("end")).toDouble(), 3.5);
     QCOMPARE(exportedSegs.at(1).toObject().value(QStringLiteral("reason")).toString(), QStringLiteral("wide"));
+    QVERIFY(!exportedSegs.at(0).toObject().contains(QStringLiteral("text")));
+    QVERIFY(!exportedSegs.at(1).toObject().contains(QStringLiteral("text")));
     QCOMPARE(exported.value(QStringLiteral("trimmed")).toBool(), true);
     QVERIFY(!QString::fromUtf8(QJsonDocument(exported).toJson()).contains(token));
 

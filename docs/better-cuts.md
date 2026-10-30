@@ -10,7 +10,9 @@ The shot screen also holds the pace: **Open**, **Measured**, **Tight**, or **Fre
 
 **Cut** transcribes, asks for keep ids and reasons, and lists every line. It does not start ffmpeg. **Drop** and **Restore** change that list and do not call the model again. **Render** is the encode, and the status reads `Rendering N%`. If every line is dropped, Render refuses until one is restored.
 
-The model may return only utterance ids and a reason. One still from the middle of each line goes with the transcript, and that still is shown on the row. Each keep is padded by 0.25 seconds before and 0.40 seconds after, snapped to silence, and split when a pause inside it is longer than the pace. Neighbors in the same file merge when the gap before padding is under 1 second. The rough cut levels the clips, fades in and out, and dips through black between files unless that setting is off.
+The model may return only utterance ids and a reason. One still from the middle of each line goes with the transcript, and that still is shown on the row. Each keep is padded by 0.25 seconds before and 0.40 seconds after, snapped to silence, and split when a pause inside it is longer than the pace. Neighbors in the same file merge when the gap before padding is under 1 second. The rough cut keeps the camera level, fades in and out, and joins stay 20 ms inside a file and 120 ms across a dip unless that setting is off.
+
+Cut in B-roll, off until Settings turns it on, covers one spoken line with a clip that has no kept speech. Mix the clip's sound under the voice is the default for that window. Turning it off plays the clip's own sound.
 
 The app then plays `rough_cut.mp4`. It does not build `master.mp4`. `botcut-cli review` still can, from the command line.
 

@@ -168,9 +168,20 @@ Item {
     // Hint above the timeline: the time under a dragged handle, or what a double-click will do.
     Rectangle {
         readonly property bool dragging: root.trimming
-        readonly property string hint: area.gapHovered >= 0 ? "Double-click to restore"
-                                      : area.splitHovered >= 0 ? "Double-click to join"
-                                      : area.clipHovered >= 0 && !area.onHandle && !root.plan ? "Double-click to split" : ""
+        readonly property string hint: {
+            if (area.gapHovered >= 0)
+                return "Double-click to restore"
+            if (area.splitHovered >= 0)
+                return "Double-click to join"
+            if (area.clipHovered < 0)
+                return ""
+            if (!root.plan)
+                return area.onHandle ? "" : "Double-click to split"
+            var row = root.clips[area.clipHovered]
+            if (!row || row.text === undefined || row.text === null)
+                return ""
+            return String(row.text).trim()
+        }
         visible: root.enabled && (dragging || (area.mode === 0 && area.containsMouse && !area.removeHovered && hint !== ""))
         width: label.implicitWidth + 20; height: dragging ? 32 : 26
         radius: 7; color: "#2c2c2f"

@@ -27,6 +27,8 @@ ApplicationWindow {
     readonly property color accentForeground: backend.themeAccentForeground
     readonly property bool audioOutputReady: audioOutput !== null
     property var audioOutput: null
+    // So the first device signal does not reopen a stream already on this default.
+    property string playbackDeviceId: ""
     property string noticeText: ""
     property bool helpVisible: false
     property bool quitConfirmVisible: false
@@ -261,8 +263,10 @@ ApplicationWindow {
             backend.exportDialog();
     }
     function ensureAudioOutput() {
-        if (audioOutput === null && (win.hasVideo || win.previewing))
+        if (audioOutput === null && (win.hasVideo || win.previewing)) {
             audioOutput = audioOutputComponent.createObject(win);
+            rememberDefaultOutput();
+        }
     }
     function releaseAudioOutput() {
         if (audioOutput === null)
@@ -270,6 +274,55 @@ ApplicationWindow {
         var oldAudioOutput = audioOutput;
         audioOutput = null;
         oldAudioOutput.destroy();
+    }
+    // QByteArray ids arrive as an ArrayBuffer. An empty device must not throw.
+    function currentOutputId() {
+        try {
+            var device = playbackDevices.defaultAudioOutput;
+            if (!device)
+                return "";
+            var raw = device.id;
+            if (raw === undefined || raw === null || raw === "")
+                return "";
+            if (typeof raw === "string")
+                return raw;
+            if (typeof raw.byteLength !== "number" || raw.byteLength === 0
+                    || typeof Uint8Array !== "function")
+                return "";
+            var bytes = new Uint8Array(raw);
+            var text = "";
+            for (var i = 0; i < bytes.length; ++i)
+                text += String.fromCharCode(bytes[i]);
+            return text;
+        } catch (e) {
+            return "";
+        }
+    }
+    function rememberDefaultOutput() {
+        var id = currentOutputId();
+        if (id !== "")
+            playbackDeviceId = id;
+    }
+    // PipeWire keeps the stream on the node it opened on. A new default does not move it.
+    function followDefaultOutput() {
+        var id = currentOutputId();
+        if (id === "" || id === playbackDeviceId)
+            return;
+        playbackDeviceId = id;
+        if (audioOutput === null)
+            return;
+        var wasPlaying = player.playbackState === MediaPlayer.PlayingState && !player.priming;
+        var at = player.position;
+        audioOutput.device = playbackDevices.defaultAudioOutput;
+        if (!wasPlaying)
+            return;
+        // Seek only after play. A seek on a paused FFmpeg player clears the picture.
+        player.pause();
+        player.play();
+        Qt.callLater(function() {
+            if (player.playbackState === MediaPlayer.PlayingState)
+                player.position = at;
+        });
     }
     function syncPlaybackAudio() {
         if (hasVideo || previewing) {
@@ -363,7 +416,10 @@ ApplicationWindow {
         Qt.quit();
     }
 
-    Component.onCompleted: ensureAudioOutput()
+    Component.onCompleted: {
+        rememberDefaultOutput();
+        ensureAudioOutput();
+    }
     onHasVideoChanged: syncPlaybackAudio()
     onPreviewingChanged: syncPlaybackAudio()
     onClosing: (close) => {
@@ -741,6 +797,11 @@ ApplicationWindow {
             if (!editBar.interacting)
                 editBar.playheadSec = position / 1000;
         }
+    }
+
+    MediaDevices {
+        id: playbackDevices
+        onAudioOutputsChanged: win.followDefaultOutput()
     }
 
     Component {
@@ -1448,23 +1509,64 @@ ApplicationWindow {
                         onClicked: togglePlay()
                     }
                     Rectangle {
+                        id: watchChip
                         visible: !win.gathering && win.hasVideo
                         z: 2
                         anchors.left: parent.left
                         anchors.top: parent.top
                         anchors.margins: 12
-                        width: watchTitle.implicitWidth + 16
-                        height: watchTitle.implicitHeight + 8
+                        // Words under the playhead. A plain movie, a gap, or an empty line stays one title.
+                        readonly property string lineWords: {
+                            if (!backend.planCut)
+                                return ""
+                            // Same block as playback: the end of a block is still that block.
+                            var hit = backend.plan.sourceAt(editBar.playheadSec)
+                            if (!hit || !hit.ok)
+                                return ""
+                            var index = hit.index
+                            var rows = backend.plan.clips
+                            if (!rows || index === undefined || index < 0 || index >= rows.length)
+                                return ""
+                            var row = rows[index]
+                            if (!row || row.text === undefined || row.text === null)
+                                return ""
+                            return String(row.text).trim()
+                        }
+                        // Leave the zoom badge its own width, plus the same 12px gap the chip keeps from the edge.
+                        readonly property real maxInner: Math.max(0, parent.width - 40
+                            - (editBar.zoomed ? zoomChip.implicitWidth + 16 : 0))
+                        readonly property real inner: Math.min(maxInner, Math.max(watchTitle.implicitWidth,
+                            lineWords !== "" ? watchWords.implicitWidth : 0))
+                        width: inner + 16
+                        height: watchTitles.implicitHeight + 8
                         radius: 8
                         color: "#00000088"
-                        Label {
-                            id: watchTitle
+                        Column {
+                            id: watchTitles
                             anchors.centerIn: parent
-                            text: (backend.roughCut ? "Rough cut" : fileName(backend.source))
-                                  + " · " + lineClock(backend.duration)
-                                  + (win.unexported ? " (trimmed)" : "")
-                            color: "#f4f4f5"
-                            font.pixelSize: 12
+                            width: watchChip.inner
+                            spacing: 0
+                            Label {
+                                id: watchTitle
+                                width: watchTitles.width
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideRight
+                                text: (backend.roughCut ? "Rough cut" : fileName(backend.source))
+                                      + " · " + lineClock(backend.duration)
+                                      + (win.unexported ? " (trimmed)" : "")
+                                color: "#f4f4f5"
+                                font.pixelSize: 12
+                            }
+                            Label {
+                                id: watchWords
+                                visible: watchChip.lineWords !== ""
+                                width: watchTitles.width
+                                horizontalAlignment: Text.AlignHCenter
+                                elide: Text.ElideRight
+                                text: watchChip.lineWords
+                                color: "#f4f4f5"
+                                font.pixelSize: 12
+                            }
                         }
                     }
                 }
@@ -1958,6 +2060,32 @@ ApplicationWindow {
                                 required property int index
                                 required property var modelData
                                 readonly property bool lineHot: lineHover.hovered || index === win.currentLine
+                                readonly property bool covered: {
+                                    var rows = backend.covers
+                                    if (!rows)
+                                        return false
+                                    for (var i = 0; i < rows.length; i++) {
+                                        if (rows[i].line == modelData.id)
+                                            return true
+                                    }
+                                    return false
+                                }
+                                // The index is into cuts.json, which a tray move does not rewrite.
+                                readonly property string coverName: {
+                                    var rows = backend.covers
+                                    var files = backend.cutClips
+                                    if (!covered || !rows || !files)
+                                        return ""
+                                    for (var i = 0; i < rows.length; i++) {
+                                        if (rows[i].line != modelData.id)
+                                            continue
+                                        var clip = rows[i].clip
+                                        if (clip < 0 || clip >= files.length)
+                                            return ""
+                                        return baseName(files[clip])
+                                    }
+                                    return ""
+                                }
                                 width: selectCol.width
                                 height: 40
                                 radius: 8
@@ -2008,6 +2136,20 @@ ApplicationWindow {
                                         text: lineReason(modelData.reason)
                                         color: "#7a7a80"
                                         font.pixelSize: 11
+                                    }
+                                    Label {
+                                        visible: lineHot && coverName !== ""
+                                        text: coverName
+                                        color: "#b8b8bc"
+                                        font.pixelSize: 11
+                                        elide: Text.ElideRight
+                                        Layout.maximumWidth: 140
+                                    }
+                                    QuietButton {
+                                        visible: lineHot && covered
+                                        text: "Clear"
+                                        enabled: !backend.busy
+                                        onClicked: backend.clearCover(modelData.id)
                                     }
                                     QuietButton {
                                         visible: lineHot
@@ -2317,6 +2459,32 @@ ApplicationWindow {
                     enabled: !backend.busy
                     checked: backend.sceneTransition === "dip"
                     onClicked: backend.sceneTransition = checked ? "dip" : "off"
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    Switch {
+                        focusPolicy: Qt.NoFocus
+                        enabled: !backend.busy
+                        checked: backend.broll
+                        onClicked: backend.broll = checked
+                    }
+                    Label {
+                        text: "Cut in B-roll"
+                        color: "#f4f4f5"
+                        font.pixelSize: 14
+                        Layout.minimumWidth: implicitWidth
+                    }
+                }
+                CheckBox {
+                    Layout.fillWidth: true
+                    text: "Mix the clip's sound under the voice"
+                    font.pixelSize: 13
+                    padding: 0
+                    focusPolicy: Qt.NoFocus
+                    enabled: backend.broll && !backend.busy
+                    checked: backend.brollMix
+                    onClicked: backend.brollMix = checked
                 }
                 RowLayout {
                     Layout.fillWidth: true

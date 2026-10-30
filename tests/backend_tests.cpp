@@ -1109,94 +1109,8 @@ void BackendTests::gatherLabelsFit() {
     QVERIFY2(window, qPrintable(mainQmlPath()));
     window->show();
     QTest::qWait(50);
-    window->resize(960, 680);
-    QTest::qWait(50);
-    const auto movieSentence = [window]() {
-        return visibleItemWithText(window, QStringLiteral(
-            "Keep each moment in order. Drop flubs and true retakes. Keep a beat that appears only once."));
-    };
-    const auto linesFlick = [window]() -> QQuickItem * {
-        const auto items = window->findChildren<QQuickItem *>();
-        for (QQuickItem *item : items) {
-            if (!item->isVisible())
-                continue;
-            if (QString::fromLatin1(item->metaObject()->className()).contains(QStringLiteral("Flickable")))
-                return item;
-        }
-        return nullptr;
-    };
-    QQuickItem *tallSentence = movieSentence();
-    QVERIFY(tallSentence);
-    const qreal sentenceAtEase = tallSentence->height();
     window->resize(960, 640);
     QTest::qWait(100);
-
-    QQuickItem *cut = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
-    QVERIFY(cut);
-    QVERIFY(cut->isVisible());
-    const qreal cutTop = cut->mapToScene(QPointF(0, 0)).y();
-    const qreal cutBottom = cut->mapToScene(QPointF(0, cut->height())).y();
-    QVERIFY2(cutTop >= 0, qPrintable(QStringLiteral("cut top %1").arg(cutTop)));
-    const qreal cutRight = cut->mapToScene(QPointF(cut->width(), 0)).x();
-    QVERIFY2(cutBottom <= window->height() + 1.0,
-             qPrintable(QStringLiteral("cut bottom %1 is past the window bottom %2")
-                            .arg(cutBottom)
-                            .arg(window->height())));
-    QVERIFY2(cutRight <= window->width() + 1.0,
-             qPrintable(QStringLiteral("cut right %1 is past the window").arg(cutRight)));
-    QVERIFY(visibleItemWithText(window, QStringLiteral("Lines")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Revert")));
-    const QStringList onScreenLabels{QStringLiteral("Change this cut"), QStringLiteral("Send"),
-                                     QStringLiteral("Lines"), QStringLiteral("Frenzied"),
-                                     QStringLiteral("Dip to black between files")};
-    for (const QString &label : onScreenLabels) {
-        QQuickItem *item = visibleItemWithText(window, label);
-        QVERIFY2(item, qPrintable(label + QStringLiteral(" is missing")));
-        const qreal top = item->mapToScene(QPointF(0, 0)).y();
-        const qreal bottom = item->mapToScene(QPointF(0, item->height())).y();
-        QVERIFY2(top >= -1.0, qPrintable(QStringLiteral("%1 top %2").arg(label).arg(top)));
-        QVERIFY2(bottom <= window->height() + 1.0,
-                 qPrintable(QStringLiteral("%1 bottom %2 is past the window bottom %3")
-                                .arg(label)
-                                .arg(bottom)
-                                .arg(window->height())));
-    }
-    QVERIFY2(labelFitError(window, QStringLiteral("Change this cut")).isEmpty(),
-             qPrintable(labelFitError(window, QStringLiteral("Change this cut"))));
-    QVERIFY2(labelFitError(window, QStringLiteral("Send")).isEmpty(),
-             qPrintable(labelFitError(window, QStringLiteral("Send"))));
-    QVERIFY2(labelFitError(window, QStringLiteral("Render")).isEmpty(),
-             qPrintable(labelFitError(window, QStringLiteral("Render"))));
-
-    const QStringList mainLabels{QStringLiteral("Open list"), QStringLiteral("Save list"),
-                                 QStringLiteral("Trim one file")};
-    for (const QString &label : mainLabels)
-        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
-    QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
-    const QStringList planLabels{QStringLiteral("This movie"), QStringLiteral("Open"),
-                                 QStringLiteral("Measured"), QStringLiteral("Tight"),
-                                 QStringLiteral("Frenzied"), QStringLiteral("Open card"),
-                                 QStringLiteral("Close card"),
-                                 QStringLiteral("Dip to black between files")};
-    for (const QString &label : planLabels)
-        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
-    QQuickItem *pace = visibleItemWithText(window, QStringLiteral("Frenzied"));
-    QVERIFY(pace);
-    const qreal paceMid = pace->mapToScene(QPointF(0, pace->height() / 2)).y();
-    for (const QString &label : {QStringLiteral("Open card"), QStringLiteral("Close card")}) {
-        QQuickItem *card = visibleItemWithText(window, label);
-        QVERIFY2(card, qPrintable(label));
-        const qreal left = card->mapToScene(QPointF(0, 0)).x();
-        const qreal right = card->mapToScene(QPointF(card->width(), 0)).x();
-        QVERIFY2(left >= 0, qPrintable(QStringLiteral("%1 left %2").arg(label).arg(left)));
-        QVERIFY2(right <= window->width() + 1.0,
-                 qPrintable(QStringLiteral("%1 right %2 is past the window").arg(label).arg(right)));
-        const qreal cardMid = card->mapToScene(QPointF(0, card->height() / 2)).y();
-        QVERIFY2(qAbs(paceMid - cardMid) < 12.0,
-                 qPrintable(QStringLiteral("%1 is not beside the pace").arg(label)));
-    }
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Spoken cuts")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Make card")));
 
     const auto fullyInside = [&](QQuickItem *item, const QString &label) {
         if (!item || !item->isVisible())
@@ -1215,47 +1129,52 @@ void BackendTests::gatherLabelsFit() {
         }
         return QString();
     };
-    QQuickItem *sentence = movieSentence();
-    QQuickItem *linesList = linesFlick();
-    QQuickItem *lineText = visibleItemWithText(window, QStringLiteral(
-        "a spoken line that is long enough to fill the row"));
-    QQuickItem *lineRow = lineText && lineText->parentItem() ? lineText->parentItem()->parentItem() : nullptr;
-    QQuickItem *footer = visibleItemWithText(window, QStringLiteral("4 lines kept"));
-    QQuickItem *render = visibleItemWithText(window, QStringLiteral("Render"));
-    QVERIFY(sentence && linesList && lineRow && footer && render);
-    const QStringList fitted{QStringLiteral("This movie"),
-                             QStringLiteral("Open"),
-                             QStringLiteral("Measured"),
-                             QStringLiteral("Tight"),
-                             QStringLiteral("Frenzied"),
-                             QStringLiteral("Dip to black between files"),
-                             QStringLiteral("Open card"),
-                             QStringLiteral("Close card"),
-                             QStringLiteral("Change this cut"),
-                             QStringLiteral("Lines"),
-                             QStringLiteral("Render"),
-                             QStringLiteral("4 lines kept")};
-    for (const QString &label : fitted) {
-        QVERIFY2(fullyInside(visibleItemWithText(window, label), label).isEmpty(),
-                 qPrintable(fullyInside(visibleItemWithText(window, label), label)));
-    }
-    QVERIFY2(fullyInside(sentence, QStringLiteral("movie sentence")).isEmpty(),
-             qPrintable(fullyInside(sentence, QStringLiteral("movie sentence"))));
+    const auto onScreen = [&](const QString &text) -> QQuickItem * {
+        QQuickItem *fallback = nullptr;
+        const auto take = [&](QQuickItem *item) {
+            if (!item || !item->isVisible() || item->property("text").toString() != text)
+                return false;
+            if (!fallback)
+                fallback = item;
+            return fullyInside(item, text).isEmpty();
+        };
+        const auto items = window->findChildren<QQuickItem *>();
+        for (QQuickItem *item : items) {
+            if (take(item))
+                return item;
+        }
+        // List delegates can sit in the visual tree without joining findChildren.
+        QList<QQuickItem *> pending;
+        if (window->contentItem())
+            pending.append(window->contentItem());
+        while (!pending.isEmpty()) {
+            QQuickItem *item = pending.takeFirst();
+            if (take(item))
+                return item;
+            const auto kids = item->childItems();
+            for (QQuickItem *child : kids)
+                pending.append(child);
+        }
+        return fallback;
+    };
+    QCOMPARE(window->property("currentLine").toInt(), 0);
+
+    QQuickItem *cut = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
+    QVERIFY(cut);
+    QVERIFY(cut->isVisible());
     QVERIFY2(fullyInside(cut, QStringLiteral("Cut")).isEmpty(),
              qPrintable(fullyInside(cut, QStringLiteral("Cut"))));
-    QVERIFY(sentence->height() + 1.0 >= sentence->property("contentHeight").toDouble());
-    QVERIFY(sentence->width() + 1.0 >= sentence->property("contentWidth").toDouble());
-    QVERIFY(sentence->height() <= sentenceAtEase + 0.5);
-    QVERIFY(linesList->height() + 1.0 >= linesList->property("contentHeight").toDouble());
-    QVERIFY(qAbs(lineRow->height() - 40.0) < 0.5);
-    const qreal sentenceBeforeTight = sentence->height();
-    const qreal linesBeforeTight = linesList->height();
 
-    backend.setCanRevert(true);
-    QTest::qWait(50);
-    // Send stays quiet until there is a note, so the busy check needs one.
+    QQuickItem *settings = window->findChild<QQuickItem *>(QStringLiteral("settingsButton"));
+    QVERIFY(settings);
+    QVERIFY(settings->isVisible());
+
     QQuickItem *reviseHint = visibleItemWithText(window, QStringLiteral("Change this cut"));
     QVERIFY(reviseHint && reviseHint->parentItem());
+    QVERIFY2(fullyInside(reviseHint, QStringLiteral("Change this cut")).isEmpty(),
+             qPrintable(fullyInside(reviseHint, QStringLiteral("Change this cut"))));
+    QVERIFY2(labelFitError(window, QStringLiteral("Change this cut")).isEmpty(),
+             qPrintable(labelFitError(window, QStringLiteral("Change this cut"))));
     QQuickItem *reviseField = nullptr;
     const auto reviseKids = reviseHint->parentItem()->childItems();
     for (QQuickItem *child : reviseKids) {
@@ -1265,103 +1184,61 @@ void BackendTests::gatherLabelsFit() {
         }
     }
     QVERIFY(reviseField);
-    QCOMPARE(reviseField->setProperty("text", QStringLiteral("drop the stumble")), true);
-    QTest::qWait(50);
-    QQuickItem *send = visibleItemWithText(window, QStringLiteral("Send"));
-    QQuickItem *revert = visibleItemWithText(window, QStringLiteral("Revert"));
-    QQuickItem *openCard = visibleItemWithText(window, QStringLiteral("Open card"));
-    QQuickItem *closeCard = visibleItemWithText(window, QStringLiteral("Close card"));
-    QVERIFY(send && revert && openCard && closeCard);
-    QVERIFY(send->isEnabled());
-    QVERIFY(revert->isEnabled());
-    QVERIFY(openCard->isEnabled());
-    QVERIFY(closeCard->isEnabled());
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(openCard));
-    QTest::qWait(50);
-    QQuickItem *makeCard = visibleItemWithText(window, QStringLiteral("Make card"));
-    QQuickItem *sentenceTight = movieSentence();
-    QQuickItem *linesTight = linesFlick();
-    QQuickItem *dipTight = visibleItemWithText(window, QStringLiteral("Dip to black between files"));
-    QQuickItem *footerRow = visibleItemWithText(window, QStringLiteral("Open list"));
-    QVERIFY(makeCard && sentenceTight && linesTight && dipTight && footerRow);
-    QVERIFY(makeCard->isEnabled());
-    // The card row makes the column tight. The sentence gives up height; the lines do not.
-    QVERIFY2(sentenceTight->height() < sentenceBeforeTight - 4.0,
-             qPrintable(QStringLiteral("sentence %1 did not shrink from %2")
-                            .arg(sentenceTight->height())
-                            .arg(sentenceBeforeTight)));
-    QVERIFY(qAbs(linesTight->height() - linesBeforeTight) < 1.0);
-    QVERIFY(qAbs(lineRow->height() - 40.0) < 0.5);
-    QVERIFY(linesTight->height() + 1.0 >= linesTight->property("contentHeight").toDouble());
-    const qreal dipBottom = dipTight->mapToScene(QPointF(0, dipTight->height())).y();
-    const qreal footerTop = footerRow->mapToScene(QPointF(0, 0)).y();
-    QVERIFY2(dipBottom <= footerTop + 1.0,
-             qPrintable(QStringLiteral("dip bottom %1 covers the footer at %2").arg(dipBottom).arg(footerTop)));
-    QVERIFY2(fullyInside(makeCard, QStringLiteral("Make card")).isEmpty(),
-             qPrintable(fullyInside(makeCard, QStringLiteral("Make card"))));
-    // Opening the other card line closes this one. One row still fits; the lines stay put.
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(closeCard));
-    QTest::qWait(50);
-    QVERIFY(!makeCard->isVisible());
-    QQuickItem *closeMake = visibleItemWithText(window, QStringLiteral("Make card"));
-    QVERIFY(closeMake);
-    QVERIFY(closeMake != makeCard);
-    QQuickItem *dipSwitched = visibleItemWithText(window, QStringLiteral("Dip to black between files"));
-    QQuickItem *footerSwitched = visibleItemWithText(window, QStringLiteral("Open list"));
-    QQuickItem *linesSwitched = linesFlick();
-    QVERIFY(dipSwitched && footerSwitched && linesSwitched);
-    const qreal dipAfterSwitch = dipSwitched->mapToScene(QPointF(0, dipSwitched->height())).y();
-    const qreal footerAfterSwitch = footerSwitched->mapToScene(QPointF(0, 0)).y();
-    QVERIFY2(dipAfterSwitch <= footerAfterSwitch + 1.0,
-             qPrintable(QStringLiteral("dip bottom %1 covers the footer at %2")
-                            .arg(dipAfterSwitch)
-                            .arg(footerAfterSwitch)));
-    QVERIFY(qAbs(linesSwitched->height() - linesBeforeTight) < 1.0);
-    QVERIFY(qAbs(lineRow->height() - 40.0) < 0.5);
-    QVERIFY(linesSwitched->height() + 1.0 >= linesSwitched->property("contentHeight").toDouble());
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(openCard));
-    QTest::qWait(50);
-    QVERIFY(!closeMake->isVisible());
-    QVERIFY(makeCard->isVisible());
-    dipSwitched = visibleItemWithText(window, QStringLiteral("Dip to black between files"));
-    footerSwitched = visibleItemWithText(window, QStringLiteral("Open list"));
-    QVERIFY(dipSwitched && footerSwitched);
-    QVERIFY2(dipSwitched->mapToScene(QPointF(0, dipSwitched->height())).y()
-                 <= footerSwitched->mapToScene(QPointF(0, 0)).y() + 1.0,
-             qPrintable(QStringLiteral("dip covers the footer after switching back")));
-    QVERIFY(qAbs(lineRow->height() - 40.0) < 0.5);
-    backend.setBusy(true);
-    QTest::qWait(50);
-    QVERIFY(!send->isEnabled());
-    QVERIFY(!revert->isEnabled());
-    QVERIFY(!openCard->isEnabled());
-    QVERIFY(!closeCard->isEnabled());
-    QVERIFY(!makeCard->isEnabled());
-    QVERIFY(!pace->isEnabled());
-    const QString paceBefore = backend.pace();
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(pace));
-    QCOMPARE(backend.pace(), paceBefore);
-    backend.setBusy(false);
-    backend.setCanRevert(false);
-    QTest::qWait(50);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(openCard));
-    QTest::qWait(50);
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Make card")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Revert")));
 
-    QQuickItem *settings = window->findChild<QQuickItem *>(QStringLiteral("settingsButton"));
-    QVERIFY(settings);
-    QVERIFY(settings->isVisible());
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(settings));
-    QVERIFY(window->property("settingsOpen").toBool());
+    const QString lineWords = QStringLiteral("a spoken line that is long enough to fill the row");
+    QQuickItem *lineText = onScreen(lineWords);
+    QVERIFY2(fullyInside(lineText, QStringLiteral("line")).isEmpty(),
+             qPrintable(fullyInside(lineText, QStringLiteral("line"))));
 
-    const QStringList settingLabels{QStringLiteral("Spoken cuts"), QStringLiteral("This movie"),
-                                    QStringLiteral("Dip to black between files"),
-                                    QStringLiteral("Cut in B-roll"),
-                                    QStringLiteral("Mix the clip's sound under the voice")};
-    for (const QString &label : settingLabels)
-        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
+    QQuickItem *render = visibleItemWithText(window, QStringLiteral("Render"));
+    QVERIFY2(fullyInside(render, QStringLiteral("Render")).isEmpty(),
+             qPrintable(fullyInside(render, QStringLiteral("Render"))));
+    QVERIFY2(labelFitError(window, QStringLiteral("Render")).isEmpty(),
+             qPrintable(labelFitError(window, QStringLiteral("Render"))));
+
+    QQuickItem *shots = window->findChild<QQuickItem *>(QStringLiteral("shotsStep"));
+    QVERIFY(shots);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shots));
+    QTest::qWait(50);
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+
+    const QString paceLabel = QStringLiteral("Open \u00B7 keeps long pauses");
+    QQuickItem *pace = visibleItemWithText(window, paceLabel);
+    QVERIFY2(fullyInside(pace, paceLabel).isEmpty(), qPrintable(fullyInside(pace, paceLabel)));
+    for (const QString &label : {QStringLiteral("Open a saved list\u2026"), QStringLiteral("Save list\u2026"),
+                                 QStringLiteral("Add a title card\u2026")}) {
+        QVERIFY2(fullyInside(visibleItemWithText(window, label), label).isEmpty(),
+                 qPrintable(fullyInside(visibleItemWithText(window, label), label)));
+        QVERIFY2(labelFitError(window, label).isEmpty(), qPrintable(labelFitError(window, label)));
+    }
+
+    QQuickItem *addCard = visibleItemWithText(window, QStringLiteral("Add a title card\u2026"));
+    QVERIFY(addCard);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(addCard));
+    QTest::qWait(50);
+    QQuickItem *cardField = window->findChild<QQuickItem *>(QStringLiteral("titleCardField"));
+    QVERIFY(cardField);
+    QVERIFY(cardField->isVisible());
+    QCOMPARE(cardField->property("text").toString(), QString());
+    QVERIFY2(fullyInside(visibleItemWithText(window, QStringLiteral("Put it first")),
+                         QStringLiteral("Put it first"))
+                 .isEmpty(),
+             qPrintable(fullyInside(visibleItemWithText(window, QStringLiteral("Put it first")),
+                                    QStringLiteral("Put it first"))));
+    QVERIFY2(fullyInside(visibleItemWithText(window, QStringLiteral("Put it last")),
+                         QStringLiteral("Put it last"))
+                 .isEmpty(),
+             qPrintable(fullyInside(visibleItemWithText(window, QStringLiteral("Put it last")),
+                                    QStringLiteral("Put it last"))));
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("titleCardOpen").toBool(), false, 3000);
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(settings));
+    QCOMPARE(window->property("settingsOpen").toBool(), true);
+    const QString fadeLabel = QStringLiteral("Fade to black between shots");
+    QVERIFY2(fullyInside(visibleItemWithText(window, fadeLabel), fadeLabel).isEmpty(),
+             qPrintable(fullyInside(visibleItemWithText(window, fadeLabel), fadeLabel)));
+    QVERIFY2(labelFitError(window, fadeLabel).isEmpty(), qPrintable(labelFitError(window, fadeLabel)));
 
     QQuickItem *spoken = window->findChild<QQuickItem *>(QStringLiteral("spokenCutsBox"));
     QVERIFY(spoken);
@@ -1369,13 +1246,51 @@ void BackendTests::gatherLabelsFit() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(spoken));
     QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
     QVERIFY(!visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
-    QVERIFY2(labelFitError(window, QStringLiteral("Keeps every file, in this order.")).isEmpty(),
-             qPrintable(labelFitError(window, QStringLiteral("Keeps every file, in this order."))));
-
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(spoken));
     QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Keeps every file, in this order.")));
+
+    QTest::keyClick(window, Qt::Key_Escape);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
+
+    QQuickItem *linesStep = window->findChild<QQuickItem *>(QStringLiteral("linesStep"));
+    QVERIFY(linesStep);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(linesStep));
+    QTest::qWait(50);
+    reviseHint = visibleItemWithText(window, QStringLiteral("Change this cut"));
+    QVERIFY(reviseHint && reviseHint->parentItem());
+    reviseField = nullptr;
+    for (QQuickItem *child : reviseHint->parentItem()->childItems()) {
+        if (QString::fromLatin1(child->metaObject()->className()).contains(QStringLiteral("TextInput"))) {
+            reviseField = child;
+            break;
+        }
+    }
+    QVERIFY(reviseField);
+    QCOMPARE(reviseField->setProperty("text", QStringLiteral("drop the stumble")), true);
+    backend.setCanRevert(true);
+    QTest::qWait(50);
+    QQuickItem *undo = visibleItemWithText(window, QStringLiteral("Undo this change"));
+    QVERIFY(undo);
+    QVERIFY(undo->isEnabled());
+
+    backend.setBusy(true);
+    QTest::qWait(50);
+    QVERIFY(!reviseField->isEnabled());
+    QVERIFY(!undo->isEnabled());
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shots));
+    QTest::qWait(50);
+    pace = visibleItemWithText(window, paceLabel);
+    QVERIFY(pace);
+    QVERIFY(!pace->isEnabled());
+    QQuickItem *cardButton = visibleItemWithText(window, QStringLiteral("Add a title card\u2026"));
+    QVERIFY(cardButton);
+    QVERIFY(!cardButton->isEnabled());
+    const QString paceBefore = backend.pace();
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(pace));
+    QCOMPARE(backend.pace(), paceBefore);
+    QCOMPARE(backend.pace(), QStringLiteral("open"));
 }
 
 void BackendTests::linePlayReachedEnd() {
@@ -1778,24 +1693,27 @@ void BackendTests::coverHoverNamesTheCutClip() {
     window->show();
     window->resize(960, 640);
     QTest::qWait(50);
+    QCOMPARE(window->property("currentLine").toInt(), 0);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll: room.mp4")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll: speaker.mp4")));
     QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
-    window->setProperty("currentLine", 0);
-    QTest::qWait(50);
-    QVERIFY(visibleItemWithText(window, QStringLiteral("room.mp4")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("speaker.mp4")));
-    QQuickItem *clear = visibleItemWithText(window, QStringLiteral("Clear"));
-    QVERIFY(clear);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(clear));
-    QTest::qWait(50);
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
-    QCOMPARE(backend.covers().size(), 1);
-    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Clear")));
     QVERIFY(visibleItemWithText(window, QStringLiteral("the spoken line")));
     QVERIFY(visibleItemWithText(window, QStringLiteral("the other line")));
+    QQuickItem *remove = visibleItemWithText(window, QStringLiteral("Remove B-roll"));
+    QVERIFY(remove);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(remove));
+    QTest::qWait(50);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("B-roll: room.mp4")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll: speaker.mp4")));
+    QCOMPARE(backend.covers().size(), 1);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("line")).toInt(), 5);
     window->setProperty("currentLine", 1);
     QTest::qWait(50);
-    QVERIFY(visibleItemWithText(window, QStringLiteral("speaker.mp4")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("room.mp4")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll: speaker.mp4")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Remove B-roll")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("the spoken line")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("the other line")));
 }
 
 void BackendTests::loadSelectsKeepsClipArrayOrder() {

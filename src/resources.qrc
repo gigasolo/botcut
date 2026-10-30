@@ -6,5 +6,15 @@
         <file alias="ThemedDialog.qml">ThemedDialog.qml</file>
         <file alias="EditBar.qml">EditBar.qml</file>
         <file alias="Format.js">Format.js</file>
+        <file alias="PlanPane.qml">PlanPane.qml</file>
+        <file alias="ShotRow.qml">ShotRow.qml</file>
+        <file alias="LineRow.qml">LineRow.qml</file>
+        <file alias="ActionBar.qml">ActionBar.qml</file>
+        <file alias="PlayButton.qml">PlayButton.qml</file>
+        <file alias="SettingsDialog.qml">SettingsDialog.qml</file>
+        <file alias="HelpDialog.qml">HelpDialog.qml</file>
+        <file alias="QuitDialog.qml">QuitDialog.qml</file>
+        <file alias="TitleCardDialog.qml">TitleCardDialog.qml</file>
+        <file alias="ConfirmDialog.qml">ConfirmDialog.qml</file>
     </qresource>
 </RCC>

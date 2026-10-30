@@ -4,7 +4,7 @@ import QtQuick.Controls.Material
 
 Button {
     id: button
-    property bool primary: false
+    property bool filled: false
     // 0..1 fills the button while a job runs. -1 is an ordinary button.
     property real progress: -1
 
@@ -12,14 +12,14 @@ Button {
     topPadding: 8
     bottomPadding: 8
     font.pixelSize: 13
-    font.weight: button.primary || button.progress >= 0 ? Font.DemiBold : Font.Normal
+    font.weight: button.filled || button.progress >= 0 ? Font.DemiBold : Font.Normal
     focusPolicy: Qt.NoFocus
     implicitHeight: 36
     Material.accent: theme.accent
     Material.roundedScale: theme.radius
 
     readonly property color foreground: button.progress >= 0 ? theme.foreground
-            : button.primary ? theme.accentForeground : theme.foreground
+            : button.filled ? theme.accentForeground : theme.foreground
 
     contentItem: Text {
         text: button.text
@@ -34,7 +34,7 @@ Button {
         radius: theme.radius
         clip: true
         color: button.progress >= 0 ? "#2c2c2f"
-                : button.primary ? theme.accent
+                : button.filled ? theme.accent
                 : button.hovered && button.enabled ? "#3a3a3e" : "transparent"
         opacity: button.enabled ? 1 : 0.45
         border.width: button.activeFocus ? 2 : 0

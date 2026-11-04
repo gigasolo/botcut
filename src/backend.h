@@ -49,6 +49,7 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
+    Q_PROPERTY(double maxPause READ maxPause NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
     Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
     Q_PROPERTY(bool canRevert READ canRevert NOTIFY canRevertChanged)
@@ -160,6 +161,8 @@ public:
     Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence);
     // Exports the clips as they are when the dialog opens.
     Q_INVOKABLE void exportDialog();
+    // Opens the folder that contains the saved movie, not a player on the file.
+    Q_INVOKABLE void showFile();
 
     // Suggested "<name>_trimmed.mp4" target next to the source.
     Q_INVOKABLE QUrl suggestedExportUrl() const;

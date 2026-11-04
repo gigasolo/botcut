@@ -9,12 +9,12 @@ Item {
 
     function pacePhrase(pace) {
         if (pace === "measured")
-            return qsTr("Measured \u00B7 natural pauses")
+            return qsTr("Measured · natural pauses")
         if (pace === "tight")
-            return qsTr("Tight \u00B7 trims most pauses")
+            return qsTr("Tight · trims most pauses")
         if (pace === "frenzied")
-            return qsTr("Frenzied \u00B7 cuts every breath")
-        return qsTr("Open \u00B7 keeps long pauses")
+            return qsTr("Frenzied · cuts every breath")
+        return qsTr("Open · keeps long pauses")
     }
     function reasonText(reason) {
         if (reason === "unique?")
@@ -79,13 +79,6 @@ Item {
         }
         return -1
     }
-    readonly property string lastNote: {
-        var notes = backend.reviseNotes
-        if (!notes || notes.length === 0)
-            return ""
-        return String(notes[notes.length - 1])
-    }
-
     function pickShots() {
         host.shotsPinned = true
         if (host.hasVideo)
@@ -103,41 +96,107 @@ Item {
             return
         backend.showMovie()
     }
-    function sendNote() {
-        var note = reviseInput.text.replace(/\s+/g, " ").trim()
-        if (note === "" || backend.busy)
+    readonly property bool paceOpen: paceBox.open
+    readonly property bool paceKeys: paceOpen || paceClosed.activeFocus
+    function closePace() {
+        paceBox.open = false
+    }
+    // Lines, and Shots for a speech cut once a shot is in. Hidden while the
+    // movie is the plan and on the empty home. Item.visible is effective, so
+    // the slot binds this rule and never its own visible.
+    readonly property bool paceShown: {
+        if (!host || host.viewStep === "movie")
+            return false
+        if (host.viewStep === "lines")
+            return true
+        return backend.tray.length > 0 && backend.cutMode === "speech"
+    }
+    // A hidden list would leave paceKeys true, and Space would stay swallowed.
+    // Layout ignores an invisible item, so clear the height it already gave the slot.
+    onPaceShownChanged: {
+        if (paceShown)
             return
-        if (backend.sendRevise(note))
-            reviseInput.text = ""
+        closePace()
+        paceSlot.height = 0
+    }
+    readonly property string shotsFullLabel: backend.tray.length > 0
+            ? qsTr("Shots %1").arg(backend.tray.length) : qsTr("Shots")
+    readonly property string linesFullLabel: backend.selects.length > 0
+            ? qsTr("Lines %1 of %2").arg(host.keptLineCount()).arg(backend.selects.length)
+            : qsTr("Lines")
+    readonly property string linesShortLabel: backend.selects.length > 0
+            ? qsTr("Lines %1").arg(host.keptLineCount()) : qsTr("Lines")
+    readonly property string movieFullLabel: qsTr("Movie %1").arg(movieClock())
+    // Each segment is its word plus 8 px each side. The control pads 2 px around
+    // its segments and 2 px between them. Lists adds its word, 4 px each side,
+    // and the 8 px gap before the control.
+    function stepRowWidth(shortLines, shortShots) {
+        var w = 8
+        w += (shortShots ? shotsShortMetrics.width : shotsFullMetrics.width) + 16
+        w += (shortLines ? linesShortMetrics.width : linesFullMetrics.width) + 16
+        w += movieMetrics.width + 16
+        if (homeLink.visible)
+            w += homeText.implicitWidth + 16
+        return w
+    }
+    readonly property real stepRoom: paneColumn.width - 24
+    readonly property bool linesNeedShort: stepRowWidth(false, false) > stepRoom
+    readonly property bool shotsNeedShort: linesNeedShort && stepRowWidth(true, false) > stepRoom
+
+    TextMetrics {
+        id: shotsFullMetrics
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: root.shotsFullLabel
+    }
+    TextMetrics {
+        id: shotsShortMetrics
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: qsTr("Shots")
+    }
+    TextMetrics {
+        id: linesFullMetrics
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: root.linesFullLabel
+    }
+    TextMetrics {
+        id: linesShortMetrics
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: root.linesShortLabel
+    }
+    TextMetrics {
+        id: movieMetrics
+        font.pixelSize: 13
+        font.weight: Font.DemiBold
+        text: root.movieFullLabel
     }
 
-    component StepTab: Item {
+    // One step of the segmented control. The current step is the filled one,
+    // a reached step is quiet, and a step not yet reached is quieter still.
+    component Segment: Rectangle {
         id: step
         property string label
         property bool current: false
         property bool reached: false
         signal picked()
-        width: stepLabel.implicitWidth + 4
-        height: 36
-        opacity: current ? 1 : (reached ? 0.62 : 0.38)
+        Layout.fillWidth: true
+        Layout.minimumWidth: implicitWidth
+        implicitWidth: stepLabel.implicitWidth + 16
+        implicitHeight: 28
+        radius: Math.max(0, theme.radius - 2)
+        color: current ? theme.raised : (stepHover.hovered && reached ? theme.hover : "transparent")
+        HoverHandler { id: stepHover; enabled: step.reached && !step.current }
         Label {
             id: stepLabel
-            anchors.bottom: underline.top
-            anchors.bottomMargin: 4
-            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.centerIn: parent
             text: step.label
             color: theme.foreground
+            opacity: step.current ? 1 : (step.reached ? 0.62 : 0.38)
             font.pixelSize: 13
             font.weight: step.current ? Font.DemiBold : Font.Normal
-        }
-        Rectangle {
-            id: underline
-            visible: step.current
-            anchors.bottom: parent.bottom
-            anchors.horizontalCenter: parent.horizontalCenter
-            width: stepLabel.implicitWidth
-            height: 2
-            color: theme.accent
         }
         MouseArea {
             anchors.fill: parent
@@ -157,7 +216,6 @@ Item {
         height: 28
         radius: theme.radius
         color: recentHover.hovered && enabled ? theme.selected : "transparent"
-        opacity: enabled ? 1 : 0.45
         HoverHandler { id: recentHover; enabled: recent.enabled }
         Label {
             anchors.left: parent.left
@@ -167,7 +225,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             text: recent.title
             color: theme.foreground
-            opacity: 0.62
+            opacity: recent.enabled ? 0.62 : 0.38
             font.pixelSize: 12
             elide: Text.ElideRight
         }
@@ -185,6 +243,7 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             text: recent.side
             color: theme.accent
+            opacity: recent.enabled ? 1 : 0.38
             font.pixelSize: 12
         }
         MouseArea {
@@ -202,69 +261,370 @@ Item {
         anchors.fill: parent
         anchors.leftMargin: 16
         anchors.rightMargin: 16
-        anchors.topMargin: 8
-        anchors.bottomMargin: 8
-        spacing: 8
+        anchors.topMargin: 12
+        anchors.bottomMargin: 12
+        spacing: 12
 
-        Row {
+        // The rail card: the way home, the step, and the decisions for this
+        // step. The lists scroll under it.
+        Rectangle {
+            id: railCard
             Layout.fillWidth: true
-            Layout.preferredHeight: 36
-            spacing: 16
-            // The way back to the home of the plan. Only the window closes, not the files.
-            Item {
-                id: homeLink
-                objectName: "listsHome"
-                visible: backend.tray.length > 0 || host.hasVideo
-                enabled: !backend.busy
-                width: homeText.implicitWidth + 4
-                height: 36
-                opacity: enabled ? 0.62 : 0.38
-                Label {
-                    id: homeText
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 6
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    text: qsTr("Lists")
-                    color: theme.foreground
-                    font.pixelSize: 13
+            Layout.preferredHeight: cardColumn.implicitHeight + 24
+            radius: theme.radius
+            color: theme.surface
+            border.width: 1
+            border.color: theme.line
+
+            ColumnLayout {
+                id: cardColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 12
+                spacing: 12
+
+                RowLayout {
+                    id: stepRow
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    // The way back to the home of the plan. Only the window closes, not the files.
+                    Item {
+                        id: homeLink
+                        objectName: "listsHome"
+                        visible: backend.tray.length > 0 || host.hasVideo
+                        enabled: !backend.busy
+                        Layout.preferredWidth: homeText.implicitWidth + 8
+                        Layout.minimumWidth: Layout.preferredWidth
+                        Layout.preferredHeight: 32
+                        Layout.alignment: Qt.AlignVCenter
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: Math.max(0, theme.radius - 2)
+                            color: theme.hover
+                            visible: homeHover.hovered && homeLink.enabled
+                        }
+                        HoverHandler { id: homeHover; enabled: homeLink.enabled }
+                        Label {
+                            id: homeText
+                            anchors.centerIn: parent
+                            text: qsTr("Lists")
+                            color: theme.foreground
+                            opacity: homeLink.enabled ? 0.62 : 0.38
+                            font.pixelSize: 13
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            enabled: homeLink.enabled
+                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: host.closeProject()
+                        }
+                    }
+
+                    // Shots, Lines, and Movie as one segmented control. Words only.
+                    Rectangle {
+                        id: stepControl
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 32
+                        Layout.minimumHeight: 32
+                        radius: theme.radius
+                        color: theme.background
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.margins: 2
+                            spacing: 2
+                            Segment {
+                                objectName: "shotsStep"
+                                label: root.shotsNeedShort ? qsTr("Shots") : root.shotsFullLabel
+                                reached: true
+                                current: host.viewStep === "shots"
+                                onPicked: root.pickShots()
+                            }
+                            Segment {
+                                objectName: "linesStep"
+                                label: root.linesNeedShort ? root.linesShortLabel : root.linesFullLabel
+                                reached: backend.selects.length > 0
+                                current: host.viewStep === "lines"
+                                onPicked: root.pickLines()
+                            }
+                            Segment {
+                                objectName: "movieStep"
+                                label: root.movieFullLabel
+                                reached: host.hasVideo
+                                current: host.viewStep === "movie"
+                                onPicked: root.pickMovie()
+                            }
+                        }
+                    }
                 }
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: homeLink.enabled
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: host.closeProject()
+
+                // What this movie is, while spoken cuts choose the lines.
+                Rectangle {
+                    visible: host.viewStep === "shots" && backend.tray.length > 0
+                             && backend.cutMode === "speech"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 36
+                    radius: theme.radius
+                    color: theme.raised
+                    border.width: planIntent.activeFocus ? 1 : 0
+                    border.color: theme.accent
+                    TextInput {
+                        id: planIntent
+                        z: 1
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        verticalAlignment: Text.AlignVCenter
+                        clip: true
+                        color: theme.foreground
+                        opacity: enabled ? 1 : 0.38
+                        font.pixelSize: 13
+                        selectByMouse: true
+                        enabled: !backend.busy
+                        Component.onCompleted: text = backend.intent
+                        onTextChanged: {
+                            if (backend.busy) {
+                                if (text !== backend.intent)
+                                    text = backend.intent
+                                return
+                            }
+                            if (text !== backend.intent)
+                                backend.intent = text
+                        }
+                        onVisibleChanged: {
+                            if (!visible)
+                                focus = false
+                        }
+                    }
+                    Label {
+                        anchors.fill: planIntent
+                        visible: planIntent.text === ""
+                        text: qsTr("What is this movie? One sentence.")
+                        color: theme.foreground
+                        opacity: 0.38
+                        font.pixelSize: 13
+                        verticalAlignment: Text.AlignVCenter
+                        elide: Text.ElideRight
+                    }
                 }
-            }
-            Rectangle {
-                visible: homeLink.visible
-                width: 1
-                height: 16
-                anchors.bottom: parent.bottom
-                anchors.bottomMargin: 8
-                color: theme.raised
-            }
-            StepTab {
-                objectName: "shotsStep"
-                label: backend.tray.length > 0 ? qsTr("Shots %1").arg(backend.tray.length) : qsTr("Shots")
-                reached: true
-                current: host.viewStep === "shots"
-                onPicked: root.pickShots()
-            }
-            StepTab {
-                objectName: "linesStep"
-                label: backend.selects.length > 0
-                       ? qsTr("Lines %1 of %2").arg(host.keptLineCount()).arg(backend.selects.length)
-                       : qsTr("Lines")
-                reached: backend.selects.length > 0
-                current: host.viewStep === "lines"
-                onPicked: root.pickLines()
-            }
-            StepTab {
-                objectName: "movieStep"
-                label: qsTr("Movie %1").arg(root.movieClock())
-                reached: host.hasVideo
-                current: host.viewStep === "movie"
-                onPicked: root.pickMovie()
+
+                // Pace and Fade: a name, one sentence, and the control. One
+                // field serves Shots and Lines, so it keeps one open state.
+                Item {
+                    id: paceSlot
+                    visible: root.paceShown
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: root.paceShown ? paceFade.implicitHeight : 0
+
+                    ColumnLayout {
+                        id: paceFade
+                        width: parent ? parent.width : 0
+                        height: implicitHeight
+                        spacing: 12
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 0
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("Pace")
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                            }
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 2
+                                Layout.minimumHeight: 2
+                                Layout.maximumHeight: 2
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: qsTr("How much air to leave between lines.")
+                                color: theme.foreground
+                                opacity: 0.62
+                                font.pixelSize: 12
+                                wrapMode: Text.WordWrap
+                            }
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 6
+                                Layout.minimumHeight: 6
+                                Layout.maximumHeight: 6
+                            }
+
+                            Item {
+                                id: paceBox
+                                objectName: "paceField"
+                                property bool open: false
+                                Layout.fillWidth: true
+                                implicitHeight: 36 + (open ? paceMenu.height : 0)
+                                Layout.preferredHeight: implicitHeight
+                                onOpenChanged: {
+                                    if (!open)
+                                        return
+                                    var at = paceMenu.paces.indexOf(backend.pace)
+                                    paceMenu.cursor = at < 0 ? 0 : at
+                                    paceMenu.forceActiveFocus()
+                                }
+
+                                Rectangle {
+                                    id: paceClosed
+                                    width: parent.width
+                                    height: 36
+                                    radius: theme.radius
+                                    color: paceHover.hovered && !backend.busy ? theme.hover : theme.raised
+                                    border.width: paceBox.open || activeFocus ? 1 : 0
+                                    border.color: theme.accent
+                                    activeFocusOnTab: true
+                                    HoverHandler { id: paceHover; enabled: !backend.busy }
+                                    Label {
+                                        id: paceClosedText
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 12
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: root.pacePhrase(backend.pace)
+                                        color: theme.foreground
+                                        opacity: backend.busy ? 0.38 : 1
+                                        font.pixelSize: 13
+                                        elide: Text.ElideRight
+                                        enabled: !backend.busy
+                                    }
+                                    MouseArea {
+                                        objectName: "paceHit"
+                                        anchors.fill: parent
+                                        enabled: !backend.busy
+                                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                        onClicked: {
+                                            paceClosed.forceActiveFocus()
+                                            paceBox.open = !paceBox.open
+                                        }
+                                    }
+                                    Keys.onPressed: (event) => {
+                                        if (backend.busy || paceBox.open)
+                                            return
+                                        if (event.key === Qt.Key_Space || event.key === Qt.Key_Return
+                                                || event.key === Qt.Key_Enter) {
+                                            paceBox.open = true
+                                            event.accepted = true
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: paceMenu
+                                    y: 36
+                                    visible: paceBox.open
+                                    width: parent.width
+                                    height: paceRows.implicitHeight
+                                    radius: theme.radius
+                                    color: theme.raised
+                                    focus: true
+                                    property int cursor: 0
+                                    property var paces: ["open", "measured", "tight", "frenzied"]
+                                    function pick() {
+                                        backend.pace = paces[cursor]
+                                        paceBox.open = false
+                                    }
+                                    Column {
+                                        id: paceRows
+                                        width: parent.width
+                                        Repeater {
+                                            model: paceMenu.paces
+                                            delegate: Rectangle {
+                                                required property string modelData
+                                                required property int index
+                                                width: parent.width
+                                                height: 32
+                                                color: paceRowHover.hovered ? theme.hover : "transparent"
+                                                HoverHandler { id: paceRowHover }
+                                                Label {
+                                                    anchors.left: parent.left
+                                                    anchors.leftMargin: 12
+                                                    anchors.right: parent.right
+                                                    anchors.rightMargin: 12
+                                                    anchors.verticalCenter: parent.verticalCenter
+                                                    text: root.pacePhrase(modelData)
+                                                    color: index === paceMenu.cursor ? theme.accent : theme.foreground
+                                                    font.pixelSize: 13
+                                                    elide: Text.ElideRight
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: {
+                                                        backend.pace = modelData
+                                                        paceBox.open = false
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Keys.onUpPressed: (event) => {
+                                        cursor = Math.max(0, cursor - 1)
+                                        event.accepted = true
+                                    }
+                                    Keys.onDownPressed: (event) => {
+                                        cursor = Math.min(paces.length - 1, cursor + 1)
+                                        event.accepted = true
+                                    }
+                                    Keys.onReturnPressed: (event) => { pick(); event.accepted = true }
+                                    Keys.onEnterPressed: (event) => { pick(); event.accepted = true }
+                                    Keys.onEscapePressed: (event) => {
+                                        paceBox.open = false
+                                        event.accepted = true
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.alignment: Qt.AlignVCenter
+                                spacing: 0
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: qsTr("Fade")
+                                    color: theme.foreground
+                                    font.pixelSize: 13
+                                    font.weight: Font.DemiBold
+                                }
+                                Item {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 2
+                                    Layout.minimumHeight: 2
+                                    Layout.maximumHeight: 2
+                                }
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: qsTr("A short fade between shots.")
+                                    color: theme.foreground
+                                    opacity: 0.62
+                                    font.pixelSize: 12
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                            Switch {
+                                id: planFadeSwitch
+                                objectName: "planFadeSwitch"
+                                focusPolicy: Qt.NoFocus
+                                Layout.alignment: Qt.AlignVCenter
+                                enabled: !backend.busy
+                                opacity: backend.busy ? 0.38 : 1
+                                checked: backend.sceneTransition === "dip"
+                                onClicked: backend.sceneTransition = checked ? "dip" : "off"
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -343,7 +703,7 @@ Item {
                                 width: recentCol.width
                                 enabled: !backend.busy
                                 title: modelData.list
-                                      ? modelData.name + " \u2014 " + qsTr("Movie, with its list")
+                                      ? modelData.name + " — " + qsTr("Movie, with its list")
                                       : modelData.name
                                 side: modelData.list ? qsTr("List") : ""
                                 onActivated: backend.watchRecent(modelData.path)
@@ -355,122 +715,10 @@ Item {
             }
 
             ColumnLayout {
+                id: shotsColumn
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 8
-
-                Rectangle {
-                    visible: backend.cutMode === "speech"
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: visible ? 36 : 0
-                    radius: theme.radius
-                    color: theme.surface
-                    border.width: planIntent.activeFocus ? 1 : 0
-                    border.color: theme.accent
-                    opacity: planIntent.enabled ? 1 : 0.45
-                    TextInput {
-                        id: planIntent
-                        z: 1
-                        anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
-                        verticalAlignment: Text.AlignVCenter
-                        clip: true
-                        color: theme.foreground
-                        font.pixelSize: 13
-                        selectByMouse: true
-                        enabled: !backend.busy
-                        Component.onCompleted: text = backend.intent
-                        onTextChanged: {
-                            if (backend.busy) {
-                                if (text !== backend.intent)
-                                    text = backend.intent
-                                return
-                            }
-                            if (text !== backend.intent)
-                                backend.intent = text
-                        }
-                        onVisibleChanged: {
-                            if (!visible)
-                                focus = false
-                        }
-                    }
-                    Label {
-                        anchors.fill: planIntent
-                        visible: planIntent.text === ""
-                        text: qsTr("What is this movie? One sentence.")
-                        color: theme.foreground
-                        opacity: 0.38
-                        font.pixelSize: 13
-                        verticalAlignment: Text.AlignVCenter
-                        elide: Text.ElideRight
-                    }
-                }
-
-                Column {
-                    Layout.fillWidth: true
-                    spacing: 4
-                    Item {
-                        id: paceBox
-                        width: parent.width
-                        height: paceClosed.implicitHeight + 8
-                        enabled: !backend.busy
-                        onEnabledChanged: {
-                            if (!enabled)
-                                paceBox.open = false
-                        }
-                        property bool open: false
-                        Label {
-                            id: paceClosed
-                            anchors.verticalCenter: parent.verticalCenter
-                            text: root.pacePhrase(backend.pace)
-                            color: theme.foreground
-                            opacity: paceBox.enabled ? 0.62 : 0.38
-                            font.pixelSize: 13
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            enabled: paceBox.enabled
-                            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: {
-                                if (backend.busy)
-                                    return
-                                paceBox.open = !paceBox.open
-                            }
-                        }
-                    }
-                    Column {
-                        width: parent.width
-                        visible: paceBox.open && paceBox.enabled
-                        spacing: 4
-                        Repeater {
-                            model: [
-                                { pace: "open", label: qsTr("Open \u00B7 keeps long pauses") },
-                                { pace: "measured", label: qsTr("Measured \u00B7 natural pauses") },
-                                { pace: "tight", label: qsTr("Tight \u00B7 trims most pauses") },
-                                { pace: "frenzied", label: qsTr("Frenzied \u00B7 cuts every breath") }
-                            ]
-                            delegate: Label {
-                                required property var modelData
-                                text: modelData.label
-                                color: backend.pace === modelData.pace ? theme.accent : theme.foreground
-                                opacity: backend.pace === modelData.pace ? 1 : 0.62
-                                font.pixelSize: 13
-                                MouseArea {
-                                    anchors.fill: parent
-                                    enabled: !backend.busy
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: {
-                                        if (backend.busy)
-                                            return
-                                        backend.pace = modelData.pace
-                                        paceBox.open = false
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
 
                 ListView {
                     id: shotList
@@ -527,127 +775,57 @@ Item {
                     spacing: 4
                     model: backend.selects
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+                    header: Column {
+                        width: lineList.width
+                        spacing: 0
+                        Label {
+                            text: qsTr("This movie")
+                            color: theme.foreground
+                            opacity: 0.38
+                            font.pixelSize: 12
+                        }
+                        Label {
+                            visible: backend.intent !== ""
+                            width: parent.width
+                            topPadding: 4
+                            text: backend.intent
+                            color: theme.foreground
+                            font.pixelSize: 13
+                            wrapMode: Text.WordWrap
+                        }
+                        Item { width: 1; height: 8 }
+                        Rectangle {
+                            width: parent.width
+                            height: 1
+                            color: theme.raised
+                        }
+                        Item { width: 1; height: 8 }
+                    }
                     delegate: LineRow {
                         timeText: root.clockOf(modelData)
                         reasonText: root.reasonText(modelData.reason)
                         coverText: root.coverText(modelData)
                         selected: host.viewStep === "lines" && index === host.currentLine
                         marked: host.viewStep === "movie" && index === root.playheadIndex
-                        onPicked: host.currentLine = index
+                        onPicked: {
+                            host.currentLine = index
+                            host.showLine(modelData)
+                        }
                         onPlayRequested: host.playLine(modelData)
                     }
                 }
 
-                // A chat with the cut: the last note above, the field at the bottom.
-                Item {
-                    id: reviseBlock
-                    visible: host.viewStep === "lines"
+                ReviseChat {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: visible ? reviseCol.implicitHeight : 0
-                    Rectangle {
-                        width: parent.width
-                        height: 1
-                        color: theme.raised
-                    }
-                    Column {
-                        id: reviseCol
-                        width: parent.width
-                        topPadding: 9
-                        spacing: 8
-                        Row {
-                            width: parent.width
-                            spacing: 12
-                            visible: root.lastNote !== "" || backend.canRevert
-                            Rectangle {
-                                visible: root.lastNote !== ""
-                                width: Math.min(noteText.implicitWidth + 16,
-                                                Math.max(0, parent.width - (undoChange.visible ? undoChange.width + 12 : 0)))
-                                height: noteText.implicitHeight + 8
-                                radius: theme.radius
-                                color: theme.surface
-                                Label {
-                                    id: noteText
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 8
-                                    anchors.rightMargin: 8
-                                    verticalAlignment: Text.AlignVCenter
-                                    text: root.lastNote
-                                    color: theme.foreground
-                                    opacity: 0.62
-                                    font.pixelSize: 12
-                                    elide: Text.ElideRight
-                                }
-                            }
-                            Label {
-                                id: undoChange
-                                anchors.verticalCenter: parent.verticalCenter
-                                visible: backend.canRevert
-                                text: qsTr("Undo this change")
-                                color: theme.foreground
-                                font.pixelSize: 13
-                                enabled: !backend.busy
-                                opacity: enabled ? 1 : 0.45
-                                MouseArea {
-                                    anchors.fill: parent
-                                    enabled: parent.enabled
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: backend.revertRevise()
-                                }
-                            }
-                        }
-                        Item {
-                            id: reviseRow
-                            width: parent.width
-                            height: 36
-                            Label {
-                                id: reviseLabel
-                                anchors.verticalCenter: parent.verticalCenter
-                                text: qsTr("Change this cut")
-                                color: theme.foreground
-                                font.pixelSize: 13
-                            }
-                            Rectangle {
-                                anchors.left: reviseInput.left
-                                anchors.right: reviseInput.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                height: 36
-                                radius: theme.radius
-                                color: theme.surface
-                                border.width: reviseInput.activeFocus ? 1 : 0
-                                border.color: theme.accent
-                                opacity: reviseInput.enabled ? 1 : 0.45
-                            }
-                            TextInput {
-                                id: reviseInput
-                                z: 1
-                                anchors.left: reviseLabel.right
-                                anchors.leftMargin: 12
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                height: 36
-                                leftPadding: 8
-                                rightPadding: 8
-                                verticalAlignment: Text.AlignVCenter
-                                color: theme.foreground
-                                font.pixelSize: 13
-                                clip: true
-                                selectByMouse: true
-                                enabled: !backend.busy
-                                onAccepted: root.sendNote()
-                            }
-                            Label {
-                                anchors.fill: reviseInput
-                                anchors.leftMargin: reviseInput.leftPadding
-                                anchors.rightMargin: reviseInput.rightPadding
-                                visible: reviseInput.text === ""
-                                text: qsTr("Tell BotCut what to change, like \"drop the pricing part\"")
-                                color: theme.foreground
-                                opacity: 0.38
-                                font.pixelSize: 13
-                                verticalAlignment: Text.AlignVCenter
-                                elide: Text.ElideRight
-                            }
-                        }
+                    Layout.preferredHeight: implicitHeight
+                    host: root.host
+                    onApplied: (changed, fromStep) => {
+                        lineList.contentY = 0
+                        if (!changed || fromStep !== "movie")
+                            return
+                        host.shotsPinned = false
+                        if (host.hasVideo)
+                            backend.showShots()
                     }
                 }
             }
@@ -668,6 +846,10 @@ Item {
         function onIntentChanged() {
             if (planIntent.text !== backend.intent)
                 planIntent.text = backend.intent
+        }
+        function onBusyChanged() {
+            if (backend.busy)
+                paceBox.open = false
         }
     }
     Connections {

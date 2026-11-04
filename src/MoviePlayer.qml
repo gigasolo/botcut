@@ -28,6 +28,23 @@ Item {
         property bool lineSeeked: false
         property bool lineArmed: false
         property int lineToken: 0
+        // Set only after the playing seek is assigned, so a hold does not pause first.
+        property int lineSeekPosted: -1
+
+        function pauseHeldLine() {
+            if (!root.host.lineHold || root.host.linePreview || !root.host.gathering)
+                return false;
+            if (lineSeekPosted < 0 || root.host.linePlayStart < 0
+                    || lineSeekPosted !== root.host.linePlayStart)
+                return false;
+            if (playbackState !== MediaPlayer.PlayingState)
+                return false;
+            if (Math.abs(position - root.host.linePlayStart) >= 400)
+                return false;
+            pause();
+            root.host.lineHold = false;
+            return true;
+        }
 
         function mediaReady() {
             return mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia;
@@ -37,6 +54,7 @@ Item {
             ++lineToken;
             lineArmed = false;
             lineSeeked = false;
+            lineSeekPosted = -1;
             priming = false;
             primeFallback.stop();
             playLoadedLine();
@@ -65,6 +83,9 @@ Item {
                 if (token !== lineToken || root.host.linePlayStart < 0 || !mediaReady())
                     return;
                 position = root.host.linePlayStart;
+                lineSeekPosted = root.host.linePlayStart;
+                if (root.host.lineHold)
+                    Qt.callLater(function() { pauseHeldLine(); });
             });
         }
 
@@ -99,6 +120,7 @@ Item {
             primed = false;
             lineSeeked = false;
             lineArmed = false;
+            lineSeekPosted = -1;
             ++lineToken;
         }
         onMediaStatusChanged: {
@@ -110,6 +132,34 @@ Item {
                 seekPlayingLine(lineToken);
         }
         onPositionChanged: {
+            if (pauseHeldLine())
+                return;
+            // Cut air ends on cutUntilMs. linePlayEnd is the one-line preview
+            // and the plan segment; either would stop this chain, and the chain
+            // must not use that range or it would stop Raw.
+            if (root.host.cutChain) {
+                // The filmstrip clock is display time. The player is on the source file.
+                if (lineSeekPosted === root.host.linePlayStart && !root.film.interacting
+                        && backend.planCut && !root.host.gathering) {
+                    var heard = backend.selects[root.host.cutLine];
+                    var display = root.host.planTimeForLine(heard, position / 1000);
+                    if (display >= 0)
+                        root.film.playheadSec = display;
+                }
+                if (!lineArmed && root.host.linePlayStart >= 0
+                        && root.host.cutUntilMs >= root.host.linePlayStart
+                        && position + 250 >= root.host.linePlayStart
+                        && position < root.host.cutUntilMs)
+                    lineArmed = true;
+                if (lineArmed && Format.linePlayReachedEnd(position, root.host.linePlayStart,
+                        root.host.cutUntilMs, playbackState === MediaPlayer.PlayingState)) {
+                    lineArmed = false;
+                    var jump = Format.nextKeptAir(backend.selects, root.host.cutLine, backend.maxPause);
+                    if (!jump || !root.host.playCutFrom(jump.next))
+                        root.host.endCutChain();
+                }
+                return;
+            }
             if (root.host.gathering && root.host.linePreview && root.host.linePlayStart >= 0
                     && root.host.linePlayEnd >= root.host.linePlayStart) {
                 if (!lineArmed && position + 250 >= root.host.linePlayStart && position < root.host.linePlayEnd)
@@ -118,6 +168,7 @@ Item {
                         playbackState === MediaPlayer.PlayingState)) {
                     lineArmed = false;
                     root.host.linePreview = false;
+                    root.host.lineHold = false;
                     pause();
                     root.host.linePlayStart = -1;
                     root.host.linePlayEnd = -1;
@@ -166,6 +217,21 @@ Item {
                         }
                         root.film.playheadSec = display;
                     }
+                } else if (root.host.linePlayStart >= 0 && root.host.linePlayEnd < 0
+                        && root.host.planIndex >= 0 && !root.film.interacting
+                        && lineSeekPosted === root.host.linePlayStart
+                        && playbackState === MediaPlayer.PlayingState) {
+                    // Raw has no segment end. The packed out-point is the next file, so park inside this block.
+                    var rawSource = position / 1000;
+                    var rawStart = backend.plan.edgeTime(root.host.planIndex, true);
+                    var rawEnd = backend.plan.edgeTime(root.host.planIndex, false);
+                    if (rawSource >= rawEnd)
+                        root.film.playheadSec = backend.plan.playheadForEdge(root.host.planIndex, false);
+                    else {
+                        if (rawSource < rawStart)
+                            rawSource = rawStart;
+                        root.film.playheadSec = backend.plan.displayForSource(root.host.planIndex, rawSource);
+                    }
                 }
                 return;
             }
@@ -173,6 +239,7 @@ Item {
                 root.host.linePlayStart = -1;
                 root.host.linePlayEnd = -1;
                 root.host.linePreview = false;
+                root.host.lineHold = false;
                 lineArmed = false;
             }
             if (priming && position > 0) {

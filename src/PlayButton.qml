@@ -1,20 +1,21 @@
 import QtQuick
 import QtQuick.Shapes
 
-// Play and pause as filled paths. The only icon button.
+// Play and pause as filled paths. The only icon button. A 36 px disc on
+// theme.raised, in the transport bar under the picture.
 Item {
     id: root
-    implicitWidth: 44
-    implicitHeight: 44
+    implicitWidth: 36
+    implicitHeight: 36
     property bool playing: false
     signal clicked()
 
-    opacity: enabled ? 1 : 0.45
+    opacity: enabled ? 1 : 0.38
 
     Rectangle {
         anchors.fill: parent
         radius: theme.radius
-        color: theme.raised
+        color: hit.containsMouse && root.enabled ? theme.hover : theme.raised
     }
 
     Shape {
@@ -64,8 +65,10 @@ Item {
     }
 
     MouseArea {
+        id: hit
         anchors.fill: parent
         enabled: root.enabled
+        hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: root.clicked()
     }

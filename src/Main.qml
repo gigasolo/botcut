@@ -43,6 +43,11 @@ ApplicationWindow {
     property bool shotsPinned: false
     property bool titleCardOpen: false
     property bool confirmCutOpen: false
+    property string leaveTarget: ""
+    onQuitConfirmVisibleChanged: {
+        if (!quitConfirmVisible)
+            leaveTarget = "";
+    }
     property int currentLine: -1
     property int lastSelectCount: 0
     readonly property int selectCount: backend.selects.length
@@ -129,13 +134,22 @@ ApplicationWindow {
     readonly property bool dialogUp: settingsOpen || helpVisible || titleCardOpen
                                      || confirmCutOpen || quitConfirmVisible
     readonly property bool lineKeys: viewStep === "lines" && !controlFocused && !dialogUp
-                                     && !backend.busy && !editing
+                                     && !backend.busy && !editing && !planPane.paceKeys
     readonly property bool shotKeys: viewStep === "shots" && !controlFocused && !dialogUp
                                      && !backend.busy && !editing
     property int linePlayStart: -1
     property int linePlayEnd: -1
     // Shot preview only. Plan playback reuses the markers below and must not pause a shot.
     property bool linePreview: false
+    // Show one frame at linePlayStart, then pause. Play leaves this false.
+    property bool lineHold: false
+    // Cut is the resting preview. Raw plays the file straight through.
+    property bool cutPreview: true
+    // A cut chain stops on cutUntilMs, not on linePlayEnd. That range is the
+    // one-line preview and the plan segment, and sharing it stops the other mode.
+    property bool cutChain: false
+    property int cutLine: -1
+    property int cutUntilMs: -1
     // Plan playback reuses the line seek. These stay clear for an ordinary movie.
     property bool planArmed: false
     property bool planPlaying: false
@@ -186,7 +200,8 @@ ApplicationWindow {
     function keptLineCount() {
         var n = 0;
         for (var i = 0; i < backend.selects.length; i++) {
-            if (backend.selects[i].keep)
+            var line = backend.selects[i];
+            if (line && line.keep !== false)
                 n++;
         }
         return n;
@@ -195,7 +210,7 @@ ApplicationWindow {
         var total = 0;
         for (var i = 0; i < backend.selects.length; i++) {
             var line = backend.selects[i];
-            if (!line.keep)
+            if (!line || line.keep === false)
                 continue;
             var start = Number(line.start);
             var end = Number(line.end);
@@ -220,19 +235,54 @@ ApplicationWindow {
         }
         return "";
     }
-    function playLine(line) {
-        if (!gathering)
+    function keptLine(line) {
+        if (!line || line.keep === false)
+            return false;
+        return isFinite(Number(line.start)) && isFinite(Number(line.end));
+    }
+    function clearCutChain() {
+        cutChain = false;
+        cutLine = -1;
+        cutUntilMs = -1;
+    }
+    function endCutChain() {
+        clearCutChain();
+        linePlayStart = -1;
+        linePlayEnd = -1;
+        linePreview = false;
+        lineHold = false;
+        planPlaying = false;
+        planArmed = false;
+        if (movie.player.playbackState === MediaPlayer.PlayingState)
+            movie.player.pause();
+    }
+    function playLine(line, playThrough) {
+        if (!gathering || !line)
             return;
         var clip = line.clip;
         if (clip < 0 || clip >= backend.tray.length)
             return;
+        if (playThrough === undefined)
+            playThrough = true;
+        // One line, not the chain. The chain's end must not keep running.
+        clearCutChain();
         linePlayStart = Math.max(0, Math.round(line.start * 1000));
         linePlayEnd = Math.max(linePlayStart, Math.round(line.end * 1000));
-        linePreview = true;
+        linePreview = playThrough;
+        lineHold = !playThrough;
         if (backend.trayIndex !== clip)
             backend.trayIndex = clip;
         ensureAudioOutput();
         movie.player.armLine();
+    }
+    // Play, then seek, then pause. A seek while paused clears the picture.
+    function showLine(line) {
+        if (!line || line.start === undefined || line.start === null)
+            return;
+        var start = Number(line.start);
+        if (!isFinite(start))
+            return;
+        playLine(line, false);
     }
     // Load the source under a plan-filmstrip time and seek to that source range.
     function armPlan(displayTime, play) {
@@ -247,9 +297,11 @@ ApplicationWindow {
         showPlanHit(backend.plan.sourceFor(index, sourceTime), play);
     }
     function showPlanHit(hit, play) {
+        clearCutChain();
         planPlaying = play;
         planArmed = false;
         linePreview = false;
+        lineHold = false;
         if (!hit.ok) {
             planPlaying = false;
             planArmed = false;
@@ -300,14 +352,24 @@ ApplicationWindow {
             backend.showMovie();
     }
     // Back to the recent lists. The files on disk stay where they are.
-    function closeProject() {
-        if (backend.busy)
-            return;
+    function closeProjectNow() {
         movie.player.stop();
         planPlaying = false;
         shotsPinned = false;
         currentLine = -1;
         backend.closeProject();
+    }
+    function closeProject() {
+        if (backend.busy)
+            return;
+        if (unexported) {
+            leaveTarget = "lists";
+            if (movie.player.playbackState === MediaPlayer.PlayingState)
+                movie.player.pause();
+            quitConfirmVisible = true;
+            return;
+        }
+        closeProjectNow();
     }
     function openTitleCard() {
         titleCardOpen = true;
@@ -323,7 +385,10 @@ ApplicationWindow {
             next = 0;
         if (next >= backend.selects.length)
             next = backend.selects.length - 1;
+        if (next === currentLine)
+            return;
         currentLine = next;
+        showLine(backend.selects[next]);
     }
     function toggleCurrentLine() {
         if (backend.busy || currentLine < 0 || currentLine >= backend.selects.length)
@@ -446,6 +511,164 @@ ApplicationWindow {
         movie.player.stop();
         releaseAudioOutput();
     }
+    // Display time of this source second on the plan block for the line's clip.
+    // The packed out-point is the next block's start, so park inside this one.
+    function planTimeForLine(line, sourceSec) {
+        if (!backend.planCut || !line)
+            return -1;
+        var clip = Number(line.clip);
+        var source = Number(sourceSec);
+        if (!isFinite(clip) || !isFinite(source))
+            return -1;
+        var blocks = backend.plan.clips;
+        if (!blocks)
+            return -1;
+        var best = -1;
+        var bestDist = 0;
+        var bestSource = source;
+        var bestEnd = 0;
+        for (var i = 0; i < blocks.length; ++i) {
+            var seg = backend.plan.sourceFor(i, source);
+            if (!seg || !seg.ok || Number(seg.clip) !== clip)
+                continue;
+            var clamped = Number(seg.source);
+            var dist = Math.abs(clamped - source);
+            if (best < 0 || dist < bestDist) {
+                best = i;
+                bestDist = dist;
+                bestSource = clamped;
+                bestEnd = Number(seg.end);
+            }
+        }
+        if (best < 0)
+            return -1;
+        planIndex = best;
+        if (source >= bestEnd)
+            return backend.plan.playheadForEdge(best, false);
+        return backend.plan.displayForSource(best, bestSource);
+    }
+    function playCutFrom(index) {
+        var lines = backend.selects;
+        if (!lines || index < 0 || index >= lines.length || !keptLine(lines[index]))
+            return false;
+        var line = lines[index];
+        var start = Number(line.start);
+        var end = Number(line.end);
+        var clip = Number(line.clip);
+        var path = "";
+        if (gathering) {
+            if (!isFinite(clip) || clip < 0 || clip >= backend.tray.length)
+                return false;
+        } else {
+            // cuts.json paths stay in clip-index order when the tray is reordered.
+            if (isFinite(clip) && clip >= 0 && backend.cutClips && clip < backend.cutClips.length)
+                path = String(backend.cutClips[clip] || "");
+            if (!path && isFinite(clip) && clip >= 0 && clip < backend.tray.length)
+                path = String(backend.tray[clip] || "");
+            if (!path)
+                return false;
+        }
+        var jump = Format.nextKeptAir(lines, index, backend.maxPause);
+        var air = 0;
+        if (jump && isFinite(Number(jump.air)) && Number(jump.air) > 0)
+            air = Number(jump.air);
+        // No linePlayEnd. That marker is a plan segment and a one-line preview.
+        cutChain = true;
+        cutLine = index;
+        linePreview = false;
+        lineHold = false;
+        planPlaying = false;
+        planArmed = false;
+        linePlayEnd = -1;
+        linePlayStart = Math.max(0, Math.round(start * 1000));
+        cutUntilMs = Math.max(linePlayStart, Math.round((end + air) * 1000));
+        ensureAudioOutput();
+        if (movie.player.priming)
+            movie.player.finishPriming();
+        if (gathering) {
+            if (backend.trayIndex !== clip)
+                backend.trayIndex = clip;
+            movie.player.armLine();
+            return true;
+        }
+        var shown = planTimeForLine(line, start);
+        if (shown >= 0)
+            editBar.playheadSec = shown;
+        var url = fileUrl(path);
+        if (planSource !== url)
+            planSource = url;
+        movie.player.armLine();
+        return true;
+    }
+    function beginCut(plan) {
+        var lines = backend.selects;
+        var index = -1;
+        // A resolved block stays on that clip. The first kept line is only
+        // for a playhead with no block under it and none after it.
+        var anchored = false;
+        if (plan) {
+            if (backend.planCut) {
+                var hit = backend.plan.sourceAt(editBar.playheadSec);
+                if (!hit || !hit.ok) {
+                    var nextAt = backend.plan.playableFrom(editBar.playheadSec);
+                    if (nextAt >= 0)
+                        hit = backend.plan.sourceAt(nextAt);
+                }
+                if (hit && hit.ok && hit.clip !== undefined) {
+                    anchored = true;
+                    var clip = Number(hit.clip);
+                    var source = Number(hit.source);
+                    if (isFinite(clip) && isFinite(source)) {
+                        var best = -1;
+                        var bestDist = 0;
+                        for (var p = 0; p < lines.length; ++p) {
+                            var under = lines[p];
+                            if (!keptLine(under) || Number(under.clip) !== clip)
+                                continue;
+                            var lineStart = Number(under.start);
+                            var lineEnd = Number(under.end);
+                            // The block is padded past the stored line. Distance
+                            // zero is that line; the pad is the part outside it.
+                            var dist = 0;
+                            if (source < lineStart)
+                                dist = lineStart - source;
+                            else if (source > lineEnd)
+                                dist = source - lineEnd;
+                            if (best < 0 || dist < bestDist) {
+                                best = p;
+                                bestDist = dist;
+                            }
+                        }
+                        index = best;
+                    }
+                }
+            }
+        } else {
+            var current = currentLine;
+            if (current >= 0 && current < lines.length && keptLine(lines[current]))
+                index = current;
+            else {
+                var start = current >= 0 ? current + 1 : 0;
+                for (var i = start; i < lines.length; ++i) {
+                    if (keptLine(lines[i])) {
+                        index = i;
+                        break;
+                    }
+                }
+            }
+        }
+        if (index < 0 && !anchored) {
+            for (var n = 0; n < lines.length; ++n) {
+                if (keptLine(lines[n])) {
+                    index = n;
+                    break;
+                }
+            }
+        }
+        if (index < 0)
+            return false;
+        return playCutFrom(index);
+    }
     function togglePlay() {
         if (win.gathering) {
             if (!win.previewing)
@@ -453,10 +676,27 @@ ApplicationWindow {
             ensureAudioOutput();
             if (movie.player.priming)
                 movie.player.finishPriming();
-            if (movie.player.playbackState === MediaPlayer.PlayingState)
+            if (movie.player.playbackState === MediaPlayer.PlayingState) {
                 movie.player.pause();
-            else
-                movie.player.play();
+                if (cutChain)
+                    endCutChain();
+                return;
+            }
+            if (viewStep === "lines" && backend.selects.length > 0) {
+                if (cutPreview) {
+                    beginCut(false);
+                } else {
+                    // A leftover line end, plan end, or cut end would pause Raw.
+                    endCutChain();
+                    linePlayStart = 0;
+                    linePlayEnd = -1;
+                    linePreview = false;
+                    lineHold = false;
+                    movie.player.armLine();
+                }
+                return;
+            }
+            movie.player.play();
             return;
         }
         if (backend.planCut) {
@@ -468,8 +708,42 @@ ApplicationWindow {
             if (movie.player.playbackState === MediaPlayer.PlayingState) {
                 movie.player.pause();
                 planPlaying = false;
+                if (cutChain)
+                    endCutChain();
                 return;
             }
+            if (!cutPreview) {
+                // The file under the playhead, from that source time. No segment
+                // end, so playback does not hop to the next file.
+                endCutChain();
+                var rawHit = backend.plan.sourceAt(editBar.playheadSec);
+                if (!rawHit || !rawHit.ok) {
+                    var rawFrom = backend.plan.playableFrom(editBar.playheadSec);
+                    if (rawFrom >= 0)
+                        rawHit = backend.plan.sourceAt(rawFrom);
+                }
+                if (rawHit && rawHit.ok) {
+                    var rawSource = Number(rawHit.source);
+                    planIndex = rawHit.index;
+                    linePlayEnd = -1;
+                    linePlayStart = isFinite(rawSource) ? Math.max(0, Math.round(rawSource * 1000)) : 0;
+                    if (isFinite(rawSource))
+                        editBar.playheadSec = backend.plan.displayForSource(rawHit.index, rawSource);
+                    var rawUrl = fileUrl(rawHit.path);
+                    ensureAudioOutput();
+                    if (movie.player.priming)
+                        movie.player.finishPriming();
+                    if (planSource !== rawUrl)
+                        planSource = rawUrl;
+                    movie.player.armLine();
+                    return;
+                }
+                if (movie.player.playbackState !== MediaPlayer.PlayingState)
+                    movie.player.play();
+                return;
+            }
+            if (beginCut(true))
+                return;
             var planFrom = backend.plan.playableFrom(editBar.playheadSec);
             armPlan(planFrom < 0 ? backend.plan.edgeFrom(0, -1) : planFrom, true);
             return;
@@ -563,6 +837,7 @@ ApplicationWindow {
         sequence: "Space"
         context: Qt.ApplicationShortcut
         enabled: !win.dialogUp && (win.hasVideo || win.previewing) && !win.controlFocused
+                 && !planPane.paceKeys
         onActivated: togglePlay()
     }
 
@@ -721,6 +996,10 @@ ApplicationWindow {
         sequence: "Escape"
         context: Qt.ApplicationShortcut
         onActivated: {
+            if (planPane.paceOpen) {
+                planPane.closePace();
+                return;
+            }
             if (win.settingsOpen)
                 closeSettings();
             else if (win.titleCardOpen)
@@ -753,7 +1032,7 @@ ApplicationWindow {
         onActivated: playCurrentLine()
     }
     Shortcut {
-        sequence: "X"
+        sequences: ["X", "Backspace"]
         context: Qt.ApplicationShortcut
         autoRepeat: false
         enabled: win.lineKeys
@@ -763,14 +1042,14 @@ ApplicationWindow {
         sequence: "Alt+Up"
         context: Qt.ApplicationShortcut
         autoRepeat: false
-        enabled: win.shotKeys
+        enabled: win.shotKeys && !planPane.paceOpen
         onActivated: nudgeShot(-1)
     }
     Shortcut {
         sequence: "Alt+Down"
         context: Qt.ApplicationShortcut
         autoRepeat: false
-        enabled: win.shotKeys
+        enabled: win.shotKeys && !planPane.paceOpen
         onActivated: nudgeShot(1)
     }
     Shortcut {
@@ -787,6 +1066,33 @@ ApplicationWindow {
         onActivated: actionBar.activateFilled()
     }
 
+
+    // Cut or Raw, a word on a chip in the transport bar. Not an icon.
+    component PreviewModeWord: Rectangle {
+        objectName: "cutRawChip"
+        implicitWidth: modeWord.implicitWidth + 16
+        implicitHeight: 28
+        radius: theme.radius
+        color: modeHit.containsMouse ? theme.hover : theme.raised
+        Label {
+            id: modeWord
+            anchors.centerIn: parent
+            text: win.cutPreview ? qsTr("Cut") : qsTr("Raw")
+            color: theme.foreground
+            opacity: backend.busy ? 0.38 : 1
+            font.pixelSize: 13
+        }
+        MouseArea {
+            id: modeHit
+            anchors.fill: parent
+            hoverEnabled: !backend.busy
+            cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+            onClicked: {
+                if (!backend.busy)
+                    win.cutPreview = !win.cutPreview
+            }
+        }
+    }
 
     MoviePlayer {
         id: movie
@@ -825,6 +1131,7 @@ ApplicationWindow {
                 spacing: 0
 
                 PlanPane {
+                    id: planPane
                     Layout.preferredWidth: 360
                     Layout.minimumWidth: 360
                     Layout.maximumWidth: 360
@@ -836,11 +1143,13 @@ ApplicationWindow {
                 Rectangle {
                     Layout.preferredWidth: 1
                     Layout.fillHeight: true
-                    color: theme.raised
+                    color: theme.line
                 }
 
-                // The picture, and under it the filmstrip that trims it.
+                // The stage: the picture, then one transport bar, then the filmstrip
+                // that trims it and the kept sentence, all at the picture well's width.
                 ColumnLayout {
+                    id: stage
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     spacing: 0
@@ -848,10 +1157,13 @@ ApplicationWindow {
                     Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.topMargin: 12
+                        Layout.bottomMargin: transport.visible ? 8 : 12
 
                         Rectangle {
                             anchors.fill: parent
-                            anchors.margins: 12
                             radius: theme.radius
                             color: "black"
                             clip: true
@@ -871,16 +1183,6 @@ ApplicationWindow {
                                 z: 1
                                 enabled: win.hasVideo || win.previewing
                                 cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                onClicked: togglePlay()
-                            }
-                            PlayButton {
-                                visible: win.gathering && win.previewing && !win.hasVideo
-                                z: 2
-                                anchors.left: parent.left
-                                anchors.bottom: parent.bottom
-                                anchors.margins: 12
-                                playing: movie.player.playbackState === MediaPlayer.PlayingState
-                                         && !movie.player.priming
                                 onClicked: togglePlay()
                             }
                             Column {
@@ -913,35 +1215,64 @@ ApplicationWindow {
                                     onClicked: openVideo()
                                 }
                             }
-                            // Over the picture, in the window only. Export never sees it.
-                            Row {
-                                visible: win.hasVideo && !win.gathering
-                                z: 2
-                                anchors.left: parent.left
-                                anchors.bottom: parent.bottom
-                                anchors.margins: 12
-                                spacing: 8
-                                PlayButton {
-                                    playing: movie.player.playbackState === MediaPlayer.PlayingState
-                                             && !movie.player.priming
-                                    enabled: backend.duration > 0
-                                    onClicked: togglePlay()
-                                }
-                                Rectangle {
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    width: movieClock.implicitWidth + 16
-                                    height: 28
-                                    radius: theme.radius
-                                    color: theme.raised
-                                    Label {
-                                        id: movieClock
-                                        anchors.centerIn: parent
-                                        text: lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
-                                        color: theme.foreground
-                                        font.pixelSize: 13
-                                        font.family: "monospace"
-                                    }
-                                }
+                        }
+                    }
+
+                    // The transport: play, Cut or Raw, and the clock, in one bar
+                    // under the picture. In the window only. Export never sees it.
+                    RowLayout {
+                        id: transport
+                        // The rules live here. Item.visible is effective, so reading a
+                        // child's visible back would latch the bar hidden.
+                        readonly property bool playShown: win.hasVideo ? !win.gathering : win.previewing
+                        readonly property bool modeShown: (win.viewStep === "lines" && backend.selects.length > 0)
+                                                          || (win.hasVideo && !win.gathering && backend.planCut)
+                        readonly property bool clockShown: win.hasVideo && !win.gathering
+                        visible: playShown || modeShown || clockShown
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: editBar.visible ? 8 : 12
+                        Layout.preferredHeight: 36
+                        Layout.minimumHeight: 36
+                        spacing: 8
+
+                        PlayButton {
+                            id: playButton
+                            // The shot preview while gathering, or the open movie.
+                            visible: transport.playShown
+                            enabled: win.gathering || backend.duration > 0
+                            Layout.alignment: Qt.AlignVCenter
+                            playing: movie.player.playbackState === MediaPlayer.PlayingState
+                                     && !movie.player.priming
+                            onClicked: togglePlay()
+                        }
+                        PreviewModeWord {
+                            id: modeChip
+                            // Lines, and the movie while the plan is the movie.
+                            // Not Shots, and not a plain file with no line list.
+                            visible: transport.modeShown
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                        Item {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                        }
+                        Rectangle {
+                            id: movieClockChip
+                            visible: transport.clockShown
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitWidth: movieClock.implicitWidth + 16
+                            implicitHeight: 28
+                            radius: theme.radius
+                            color: theme.raised
+                            Label {
+                                id: movieClock
+                                anchors.centerIn: parent
+                                text: lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                font.family: "monospace"
                             }
                         }
                     }
@@ -954,7 +1285,7 @@ ApplicationWindow {
                         Layout.preferredHeight: implicitHeight
                         Layout.leftMargin: 12
                         Layout.rightMargin: 12
-                        Layout.bottomMargin: editBar.zoomed ? 4 : 12
+                        Layout.bottomMargin: editBar.zoomed ? 4 : (pictureSentence.visible ? 8 : 12)
                         onScrub: (seconds, segment, source) => {
                             movie.player.pause();
                             if (backend.planCut && segment >= 0) {
@@ -978,13 +1309,90 @@ ApplicationWindow {
                         font.pixelSize: 13
                         elide: Text.ElideRight
                     }
+
+                    RowLayout {
+                        id: pictureSentence
+                        objectName: "pictureSentence"
+                        visible: backend.selects.length > 0
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: 12
+                        spacing: 0
+
+                        // Qt 6.12 StyledText ignores font face, so the clocks are their own items.
+                        readonly property bool clocks: {
+                            var lines = backend.selects
+                            for (var i = 0; i < lines.length; i++) {
+                                var line = lines[i]
+                                var start = line ? Number(line.start) : NaN
+                                var end = line ? Number(line.end) : NaN
+                                if (!isFinite(start) || !isFinite(end))
+                                    return false
+                            }
+                            return true
+                        }
+                        readonly property real allSeconds: {
+                            if (!clocks)
+                                return 0
+                            var total = 0
+                            var lines = backend.selects
+                            for (var i = 0; i < lines.length; i++) {
+                                var line = lines[i]
+                                total += Math.max(0, Number(line.end) - Number(line.start))
+                            }
+                            return total
+                        }
+                        readonly property string lineWords: {
+                            var n = keptLineCount()
+                            var count = n === 1 ? qsTr("1 line") : qsTr("%1 lines").arg(n)
+                            return qsTr("%1, %2").arg(count).arg(backend.pace)
+                        }
+
+                        Label {
+                            objectName: "keptClock"
+                            visible: pictureSentence.clocks
+                            text: lineClock(keptSpan())
+                            color: theme.foreground
+                            opacity: 0.62
+                            font.pixelSize: 13
+                            font.family: "monospace"
+                        }
+                        Label {
+                            visible: pictureSentence.clocks
+                            text: qsTr(" kept of ")
+                            color: theme.foreground
+                            opacity: 0.62
+                            font.pixelSize: 13
+                        }
+                        Label {
+                            objectName: "allClock"
+                            visible: pictureSentence.clocks
+                            text: lineClock(pictureSentence.allSeconds)
+                            color: theme.foreground
+                            opacity: 0.62
+                            font.pixelSize: 13
+                            font.family: "monospace"
+                        }
+                        Label {
+                            objectName: "sentenceWords"
+                            text: pictureSentence.clocks
+                                  ? qsTr(" \u2013 %1").arg(pictureSentence.lineWords)
+                                  : pictureSentence.lineWords
+                            Layout.fillWidth: true
+                            color: theme.foreground
+                            opacity: 0.62
+                            font.pixelSize: 13
+                            elide: Text.ElideRight
+                        }
+                    }
                 }
             }
 
             ActionBar {
                 id: actionBar
                 Layout.fillWidth: true
-                Layout.preferredHeight: 56
+                Layout.preferredHeight: actionBar.implicitHeight
                 host: win
             }
         }
@@ -1002,6 +1410,7 @@ ApplicationWindow {
     Connections {
         target: backend
         function onInfoChanged() {
+            win.clearCutChain();
             win.noticeText = "";
             noticeTimer.stop();
             movie.primeFallback.stop();
@@ -1019,6 +1428,7 @@ ApplicationWindow {
                 win.linePlayStart = -1;
                 win.linePlayEnd = -1;
                 win.linePreview = false;
+                win.lineHold = false;
             }
         }
         function onGatheringChanged() {

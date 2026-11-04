@@ -18,7 +18,7 @@ Rectangle {
     height: body.implicitHeight + 16
     radius: theme.radius
     color: selected || marked ? theme.selected : "transparent"
-    opacity: modelData && modelData.keep === false ? 0.45 : 1
+    readonly property bool dropped: modelData && modelData.keep === false
 
     Rectangle {
         visible: row.marked
@@ -38,27 +38,67 @@ Rectangle {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.leftMargin: 12
-        anchors.rightMargin: 8
+        anchors.rightMargin: 12
         anchors.topMargin: 8
         spacing: 4
 
         RowLayout {
             width: parent.width
             spacing: 8
+            // One clock column, so the words line up from row to row.
             Label {
                 text: row.timeText
                 color: theme.foreground
-                opacity: 0.62
+                opacity: row.dropped ? 0.38 : 0.62
                 font.pixelSize: 12
                 font.family: "monospace"
                 Layout.alignment: Qt.AlignTop
+                Layout.minimumWidth: 36
             }
             Label {
                 Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
                 text: row.modelData && row.modelData.text !== undefined ? row.modelData.text : ""
                 color: theme.foreground
+                opacity: row.dropped ? 0.38 : 1
                 wrapMode: Text.WordWrap
                 font.pixelSize: 13
+            }
+            Label {
+                Layout.alignment: Qt.AlignTop
+                text: row.modelData && row.modelData.keep !== false ? qsTr("Drop") : qsTr("Keep")
+                color: theme.foreground
+                opacity: backend.busy ? 0.38 : 1
+                font.pixelSize: 13
+                Rectangle {
+                    z: -1
+                    anchors.fill: parent
+                    anchors.leftMargin: -6
+                    anchors.rightMargin: -6
+                    anchors.topMargin: -4
+                    anchors.bottomMargin: -4
+                    radius: theme.radius
+                    color: theme.hover
+                    visible: keepArea.containsMouse && !backend.busy
+                }
+                MouseArea {
+                    id: keepArea
+                    anchors.fill: parent
+                    anchors.leftMargin: -6
+                    anchors.rightMargin: -6
+                    anchors.topMargin: -4
+                    anchors.bottomMargin: -4
+                    hoverEnabled: true
+                    cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
+                    onClicked: {
+                        if (backend.busy || !row.modelData)
+                            return
+                        if (row.modelData.keep !== false)
+                            backend.dropSelect(row.modelData.id)
+                        else
+                            backend.restoreSelect(row.modelData.id)
+                    }
+                }
             }
         }
         Row {
@@ -85,31 +125,15 @@ Rectangle {
             Label {
                 text: qsTr("Play")
                 color: theme.foreground
+                opacity: backend.busy ? 0.38 : 1
                 font.pixelSize: 13
                 MouseArea {
                     anchors.fill: parent
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: row.playRequested()
-                }
-            }
-            Label {
-                text: row.modelData && row.modelData.keep !== false ? qsTr("Drop") : qsTr("Keep")
-                color: theme.foreground
-                opacity: keepArea.enabled ? 1 : 0.45
-                font.pixelSize: 13
-                enabled: !backend.busy
-                MouseArea {
-                    id: keepArea
-                    anchors.fill: parent
-                    enabled: parent.enabled
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    hoverEnabled: true
+                    cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
                     onClicked: {
-                        if (!row.modelData)
-                            return
-                        if (row.modelData.keep !== false)
-                            backend.dropSelect(row.modelData.id)
-                        else
-                            backend.restoreSelect(row.modelData.id)
+                        if (!backend.busy)
+                            row.playRequested()
                     }
                 }
             }
@@ -117,17 +141,16 @@ Rectangle {
                 visible: row.coverText !== ""
                 text: qsTr("Remove B-roll")
                 color: theme.foreground
-                opacity: clearArea.enabled ? 1 : 0.45
+                opacity: backend.busy ? 0.38 : 1
                 font.pixelSize: 13
-                enabled: !backend.busy
                 MouseArea {
-                    id: clearArea
                     anchors.fill: parent
-                    enabled: parent.enabled && parent.visible
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    hoverEnabled: true
+                    cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
                     onClicked: {
-                        if (row.modelData)
-                            backend.clearCover(row.modelData.id)
+                        if (backend.busy || !row.modelData)
+                            return
+                        backend.clearCover(row.modelData.id)
                     }
                 }
             }

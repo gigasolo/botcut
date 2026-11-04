@@ -15,9 +15,11 @@ public:
     virtual void openVideos() = 0;
     virtual void openCutList() = 0;
     virtual void saveCutList(const QUrl &suggestedUrl) = 0;
-    // scaleHeights are the downscale choices to offer besides "Original"
+    // scaleHeights are the downscale choices to offer besides the source frame
     // (e.g. {1080, 720}), matched by min(width, height) of the source.
-    virtual void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) = 0;
+    // sourceWidth and sourceHeight are that frame, used to name the choice.
+    virtual void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights,
+                             int sourceWidth, int sourceHeight) = 0;
 
 signals:
     void openSelected(const QUrl &url);

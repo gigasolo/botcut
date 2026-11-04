@@ -228,7 +228,8 @@ void PortalFilePicker::saveCutList(const QUrl &suggestedUrl) {
     requestFile(QStringLiteral("SaveFile"), QStringLiteral("Save Cut List"), options, Action::SaveList);
 }
 
-void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) {
+void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights,
+                                   int sourceWidth, int sourceHeight) {
     const QFileInfo target(suggestedUrl.toLocalFile());
 
     QVariantMap options;
@@ -242,7 +243,9 @@ void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &s
     // A "Quality" combo in the save dialog, only when there's a real downscale
     // to offer — sources at or below 720p just export as they are.
     if (!scaleHeights.isEmpty()) {
-        PortalChoiceOptions qualities = {{QStringLiteral("original"), QStringLiteral("Original")}};
+        const QString original =
+            QStringLiteral("%1 x %2 (original)").arg(sourceWidth).arg(sourceHeight);
+        PortalChoiceOptions qualities = {{QStringLiteral("original"), original}};
         for (const int height : scaleHeights)
             qualities.append({QString::number(height), QStringLiteral("%1p").arg(height)});
         options.insert(QStringLiteral("choices"),
@@ -254,6 +257,25 @@ void PortalFilePicker::exportVideo(const QUrl &suggestedUrl, const QList<int> &s
 
     requestFile(QStringLiteral("SaveFile"), QStringLiteral("Save Video File"),
                 options, Action::Export);
+}
+
+QVariantMap PortalFilePicker::qualityChoice(const QVariantMap &options) {
+    const QVariant choicesVar = options.value(QStringLiteral("choices"));
+    if (!choicesVar.isValid())
+        return {};
+    const PortalChoices choices = choicesVar.value<PortalChoices>();
+    if (choices.isEmpty())
+        return {};
+    const PortalChoice &choice = choices.first();
+    QVariantList rows;
+    for (const PortalChoiceOption &option : choice.options) {
+        rows.append(QVariantMap{{QStringLiteral("id"), option.id},
+                                {QStringLiteral("label"), option.label}});
+    }
+    return {{QStringLiteral("id"), choice.id},
+            {QStringLiteral("label"), choice.label},
+            {QStringLiteral("initial"), choice.initial},
+            {QStringLiteral("options"), rows}};
 }
 
 bool PortalFilePicker::connectToRequestPath(const QString &path) {

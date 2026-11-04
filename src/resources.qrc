@@ -16,5 +16,6 @@
         <file alias="QuitDialog.qml">QuitDialog.qml</file>
         <file alias="TitleCardDialog.qml">TitleCardDialog.qml</file>
         <file alias="ConfirmDialog.qml">ConfirmDialog.qml</file>
+        <file alias="ReviseChat.qml">ReviseChat.qml</file>
     </qresource>
 </RCC>

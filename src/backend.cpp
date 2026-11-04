@@ -2,6 +2,7 @@
 
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -364,6 +365,17 @@ bool Backend::load(const QUrl &url) {
     m_gathering = false;
     adoptPlanCuts();
     loadPlanFilm();
+    // Watch Cut walks this list. A movie with no cuts file must not keep
+    // the previous movie's lines.
+    const QString cuts = cutsBesideMovie();
+    if (cuts.isEmpty()) {
+        m_selects.clear();
+        m_cutClips.clear();
+        emit selectsChanged();
+        emit cutClipsChanged();
+    } else {
+        loadSelects(cuts);
+    }
     emit infoChanged();
     if (leaveGathering)
         emit gatheringChanged();
@@ -2170,7 +2182,15 @@ void Backend::exportDialog() {
         return;
 
     m_exportDialogClips = m_timeline.clips();
-    m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(m_info.width, m_info.height));
+    m_filePicker->exportVideo(suggestedExportUrl(), exportHeights(m_info.width, m_info.height),
+                              m_info.width, m_info.height);
+}
+
+void Backend::showFile() {
+    const QString path = m_source.toLocalFile();
+    if (path.isEmpty())
+        return;
+    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
 }
 
 QList<int> Backend::exportHeights(int width, int height) {
@@ -2480,8 +2500,10 @@ void Backend::finishSavedCut(const QString &outPath) {
     if (!plan.isEmpty()) {
         m_planCuts = plan;
         m_planMovie = QFileInfo(outPath).absoluteFilePath();
-        // load() cleared the film because the saved name is not rough_cut.mp4.
+        // load() cleared the film and the lines: the saved name is not rough_cut.mp4,
+        // and the cuts path is not remembered until after this returns.
         loadPlanFilm();
+        loadSelects(plan);
         emit infoChanged();
     }
     rememberSavedCut(source, outPath);

@@ -85,9 +85,52 @@ Item {
                 required property int index
                 readonly property real from: index === 0 ? 0 : root.clips[index - 1].end
                 readonly property real to: index === root.clips.length ? root.durationSec : root.clips[index].start
+                readonly property bool droppedGap: {
+                    if (!root.plan || !root.clips || root.clips.length === 0)
+                        return false
+                    var row = index < root.clips.length ? root.clips[index] : root.clips[root.clips.length - 1]
+                    if (!row)
+                        return false
+                    var spans = index < root.clips.length ? row.holes : row.tail
+                    if (!spans || spans.length === 0)
+                        return false
+                    var lines = backend.selects
+                    if (!lines)
+                        return false
+                    for (var h = 0; h < spans.length; ++h) {
+                        var hole = spans[h]
+                        if (!hole)
+                            return false
+                        var hs = Number(hole.start)
+                        var he = Number(hole.end)
+                        var hclip = Number(hole.clip)
+                        if (!isFinite(hs) || !isFinite(he) || !isFinite(hclip))
+                            return false
+                        var overlapsDropped = false
+                        for (var n = 0; n < lines.length; ++n) {
+                            var line = lines[n]
+                            if (!line || Number(line.clip) !== hclip)
+                                continue
+                            var ls = Number(line.start)
+                            var le = Number(line.end)
+                            if (!isFinite(ls) || !isFinite(le))
+                                continue
+                            // Half-open, so a shared boundary is not this span.
+                            if (!(hs < le && ls < he))
+                                continue
+                            if (line.keep !== false)
+                                return false
+                            overlapsDropped = true
+                        }
+                        if (!overlapsDropped)
+                            return false
+                    }
+                    return true
+                }
                 visible: to > from
                 x: Math.round(root.xForTime(from)); width: Math.max(0, Math.round(root.xForTime(to)) - x); height: track.height
-                color: area.gapHovered === index ? Qt.rgba(0, 0, 0, 0.565) : Qt.rgba(0, 0, 0, 0.784)
+                color: droppedGap ? root.accent : (area.gapHovered === index ? Qt.rgba(0, 0, 0, 0.565) : Qt.rgba(0, 0, 0, 0.784))
+                opacity: droppedGap ? (root.enabled && area.gapHovered === index ? 0.38 : 0.24) : 1
             }
         }
     }
@@ -165,8 +208,10 @@ Item {
         }
     }
 
-    // Hint above the timeline: the time under a dragged handle, or what a double-click will do.
+    // The time under a dragged handle, or what a double-click will do.
+    // Inside the strip: a negative y paints over the transport.
     Rectangle {
+        objectName: "filmstripHint"
         readonly property bool dragging: root.trimming
         readonly property string hint: {
             if (area.gapHovered >= 0)
@@ -185,7 +230,7 @@ Item {
         visible: root.enabled && (dragging || (area.mode === 0 && area.containsMouse && !area.removeHovered && hint !== ""))
         width: label.implicitWidth + 20; height: dragging ? 32 : 26
         radius: 7; color: theme.raised
-        x: Math.max(0, Math.min(root.width - width, (dragging ? root.xForTime(area.activeTime) : area.mouseX) - width / 2)); y: -height - 8
+        x: Math.max(0, Math.min(root.width - width, (dragging ? root.xForTime(area.activeTime) : area.mouseX) - width / 2)); y: 8
         Text {
             id: label; anchors.centerIn: parent; color: "white"
             text: parent.dragging ? Format.fmt(area.activeTime) : parent.hint

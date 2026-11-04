@@ -77,11 +77,15 @@ Item {
 
             Label {
                 text: backend.busy ? qsTr("Stop the render and quit?")
-                        : (host.looseCut ? qsTr("Save your movie before you quit?")
-                           : qsTr("Export your trim before you quit?"))
+                        : (host.leaveTarget === "lists"
+                           ? qsTr("Export your trim before you go to Lists?")
+                           : (host.looseCut ? qsTr("Save your movie before you quit?")
+                              : qsTr("Export your trim before you quit?")))
                 color: theme.foreground
                 font.pixelSize: 16
                 font.weight: Font.DemiBold
+                wrapMode: Text.WordWrap
+                width: 420
             }
             Label {
                 text: backend.busy
@@ -112,14 +116,22 @@ Item {
                 DialogButton {
                     id: quitQuitButton
                     text: backend.busy ? qsTr("Stop and quit")
-                            : (host.looseCut ? qsTr("Quit without saving")
-                               : qsTr("Quit without exporting"))
+                            : (host.leaveTarget === "lists" ? qsTr("Go to Lists without exporting")
+                               : (host.looseCut ? qsTr("Quit without saving")
+                                  : qsTr("Quit without exporting")))
                     focus: true
                     KeyNavigation.left: quitCancelButton
                     KeyNavigation.right: quitExportButton.visible ? quitExportButton : quitCancelButton
                     KeyNavigation.tab: quitExportButton.visible ? quitExportButton : quitCancelButton
                     KeyNavigation.backtab: quitCancelButton
-                    onClicked: host.forceQuit()
+                    onClicked: {
+                        var toLists = host.leaveTarget === "lists"
+                        host.quitConfirmVisible = false
+                        if (toLists)
+                            host.closeProjectNow()
+                        else
+                            host.forceQuit()
+                    }
                 }
                 DialogButton {
                     id: quitExportButton

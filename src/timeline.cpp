@@ -245,10 +245,39 @@ bool PlanFilm::unexported() const {
 QVariantList PlanFilm::clipList() const {
     QVariantList result;
     // relayout() keeps m_view in the same order as m_current, including mid-drag.
-    for (int i = 0; i < m_view.size(); ++i) {
-        result.append(QVariantMap{{QStringLiteral("start"), m_view.at(i).start},
-                                  {QStringLiteral("end"), m_view.at(i).end},
-                                  {QStringLiteral("text"), m_current.at(i).text}});
+    QHash<int, int> at;
+    for (int i = 0; i < m_current.size(); ++i)
+        at.insert(m_current.at(i).origin, i);
+    // A removed segment is only a hole in the strip. Its source span rides on
+    // the clip after that hole, because the gap rectangle cannot see m_captured.
+    QList<QVariantList> before;
+    before.reserve(m_current.size());
+    for (int i = 0; i < m_current.size(); ++i)
+        before.append(QVariantList());
+    QVariantList pending;
+    QVariantList after;
+    for (int origin = 0; origin < m_captured.size(); ++origin) {
+        const auto found = at.constFind(origin);
+        if (found == at.cend()) {
+            const Segment &seg = m_captured.at(origin);
+            pending.append(QVariantMap{{QStringLiteral("clip"), seg.clip},
+                                       {QStringLiteral("start"), seg.start},
+                                       {QStringLiteral("end"), seg.end}});
+            continue;
+        }
+        before[found.value()] = pending;
+        pending.clear();
+    }
+    after = pending;
+    for (int i = 0; i < m_view.size() && i < m_current.size(); ++i) {
+        QVariantMap row{{QStringLiteral("start"), m_view.at(i).start},
+                        {QStringLiteral("end"), m_view.at(i).end},
+                        {QStringLiteral("text"), m_current.at(i).text}};
+        if (!before.at(i).isEmpty())
+            row.insert(QStringLiteral("holes"), before.at(i));
+        if (i + 1 == m_view.size() && !after.isEmpty())
+            row.insert(QStringLiteral("tail"), after);
+        result.append(row);
     }
     return result;
 }
@@ -406,7 +435,8 @@ QVariantMap PlanFilm::sourceFor(int index, double sourceTime) const {
             {QStringLiteral("path"), seg.path},
             {QStringLiteral("source"), std::clamp(sourceTime, seg.start, seg.end)},
             {QStringLiteral("end"), seg.end},
-            {QStringLiteral("index"), index}};
+            {QStringLiteral("index"), index},
+            {QStringLiteral("clip"), seg.clip}};
 }
 
 QVariantMap PlanFilm::sourceAt(double displayTime) const {

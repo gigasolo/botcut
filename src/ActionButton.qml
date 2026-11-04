@@ -28,15 +28,16 @@ Button {
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
-        opacity: button.enabled ? 1 : 0.4
+        opacity: button.progress >= 0 || button.enabled ? 1 : 0.38
     }
     background: Rectangle {
         radius: theme.radius
         clip: true
         color: button.progress >= 0 ? theme.raised
+                : !button.enabled && button.filled ? theme.raised
                 : button.filled ? theme.accent
                 : button.hovered && button.enabled ? theme.hover : "transparent"
-        opacity: button.enabled ? 1 : 0.45
+        opacity: 1
         border.width: button.activeFocus ? 2 : 0
         border.color: theme.accent
         Rectangle {
@@ -44,7 +45,7 @@ Button {
             width: parent.width * Math.max(0, Math.min(1, button.progress))
             height: parent.height
             color: theme.accent
-            opacity: 0.55
+            opacity: 0.38
         }
     }
     HoverHandler { cursorShape: button.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }

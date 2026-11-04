@@ -2,15 +2,16 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
+// The footer: one sentence, Settings and "?", this step's quiet tools, and one
+// filled button that is the next action. A theme.surface band under the stage.
 Rectangle {
     id: bar
     property var host
-    color: theme.background
-    implicitHeight: 56
+    color: theme.surface
+    implicitHeight: Math.max(56, sentence.implicitHeight + 20)
 
     readonly property string step: host ? host.displayStep : ""
     readonly property bool running: backend.job !== ""
-    readonly property bool movieStep: step === "movieSaved" || step === "movieUnsaved" || step === "trimmed"
 
     function activateFilled() {
         if (!host || backend.busy || running)
@@ -40,7 +41,7 @@ Rectangle {
         anchors.top: parent.top
         width: parent.width
         height: 1
-        color: theme.raised
+        color: theme.line
     }
 
     RowLayout {
@@ -50,13 +51,15 @@ Rectangle {
         spacing: 8
 
         Label {
+            id: sentence
             Layout.fillWidth: true
-            Layout.minimumWidth: 24
+            Layout.minimumWidth: 240
+            Layout.alignment: Qt.AlignVCenter
             text: host ? host.actionSentence : ""
             color: host && (host.actionNeedsYou || host.noticeText !== "") ? theme.accent : theme.foreground
             opacity: host && (host.noticeText !== "" || host.actionNeedsYou) ? 1 : 0.62
             font.pixelSize: 13
-            elide: Text.ElideRight
+            wrapMode: Text.WordWrap
             verticalAlignment: Text.AlignVCenter
         }
 
@@ -64,7 +67,8 @@ Rectangle {
             objectName: "settingsButton"
             Layout.preferredWidth: settingsText.implicitWidth + 16
             Layout.minimumWidth: Layout.preferredWidth
-            Layout.fillHeight: true
+            Layout.preferredHeight: 36
+            Layout.alignment: Qt.AlignVCenter
             Label {
                 id: settingsText
                 anchors.centerIn: parent
@@ -87,7 +91,8 @@ Rectangle {
         Item {
             Layout.preferredWidth: 32
             Layout.minimumWidth: 32
-            Layout.fillHeight: true
+            Layout.preferredHeight: 36
+            Layout.alignment: Qt.AlignVCenter
             Label {
                 anchors.centerIn: parent
                 text: "?"
@@ -108,6 +113,7 @@ Rectangle {
             enabled: !backend.busy
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.openCutListDialog()
         }
         ActionButton {
@@ -116,6 +122,7 @@ Rectangle {
             enabled: !backend.busy
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.cutMode = "assemble"
         }
         ActionButton {
@@ -128,6 +135,7 @@ Rectangle {
             enabled: backend.tray.length > 0 && !backend.busy && !backend.trayMissing
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: {
                 if (backend.selects.length > 0)
                     host.confirmCutOpen = true
@@ -136,21 +144,34 @@ Rectangle {
             }
         }
         ActionButton {
+            objectName: "showFileButton"
+            text: qsTr("Show the file")
+            filled: false
+            visible: !bar.running && bar.step === "movieSaved" && backend.roughCut
+            enabled: !backend.busy
+            Layout.minimumWidth: implicitWidth
+            Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
+            onClicked: backend.showFile()
+        }
+        ActionButton {
             objectName: "captionsButton"
             text: qsTr("Captions")
-            visible: !bar.running && backend.roughCut && bar.movieStep
+            visible: !bar.running && bar.step === "movieSaved" && backend.roughCut
             enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.writeCaptions()
         }
         ActionButton {
             objectName: "shortButton"
             text: qsTr("Vertical short")
-            visible: !bar.running && backend.roughCut && bar.movieStep
+            visible: !bar.running && bar.step === "movieSaved" && backend.roughCut
             enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.makeShort()
         }
         ActionButton {
@@ -160,6 +181,7 @@ Rectangle {
             enabled: !backend.busy && (backend.planCut ? backend.plan.duration : backend.duration) > 0
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: host.exportVideo()
         }
         ActionButton {
@@ -170,6 +192,7 @@ Rectangle {
                      && (bar.step !== "lines" || (host && host.keptLineCount() > 0))
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.renderSelects()
         }
         ActionButton {
@@ -179,6 +202,7 @@ Rectangle {
             enabled: !backend.busy
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: backend.addVideosDialog()
         }
         ActionButton {
@@ -188,6 +212,7 @@ Rectangle {
             enabled: !backend.busy
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: {
                 host.openSettings()
                 Qt.callLater(function() { host.focusApiKey() })
@@ -200,6 +225,7 @@ Rectangle {
             enabled: !backend.busy
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: host.exportVideo()
         }
         ActionButton {
@@ -210,6 +236,7 @@ Rectangle {
             enabled: !backend.busy && (backend.planCut ? backend.plan.duration : backend.duration) > 0
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
             onClicked: host.exportVideo()
         }
         ActionButton {
@@ -219,6 +246,7 @@ Rectangle {
             enabled: false
             Layout.minimumWidth: implicitWidth
             Layout.maximumWidth: implicitWidth
+            Layout.alignment: Qt.AlignVCenter
         }
     }
 }

@@ -14,12 +14,10 @@ public:
     void openVideos() override;
     void openCutList() override;
     void saveCutList(const QUrl &suggestedUrl) override;
-    void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights) override;
+    void exportVideo(const QUrl &suggestedUrl, const QList<int> &scaleHeights,
+                     int sourceWidth, int sourceHeight) override;
 
-private slots:
-    void handleResponse(uint response, const QVariantMap &results);
-
-private:
+protected:
     enum class Action {
         None,
         Open,
@@ -29,8 +27,15 @@ private:
         Export
     };
 
-    void requestFile(const QString &method, const QString &title,
-                     QVariantMap options, Action action);
+    virtual void requestFile(const QString &method, const QString &title,
+                             QVariantMap options, Action action);
+    // Quality combo from a submitted export request. Empty when the request offers none.
+    static QVariantMap qualityChoice(const QVariantMap &options);
+
+private slots:
+    void handleResponse(uint response, const QVariantMap &results);
+
+private:
     bool connectToRequestPath(const QString &path);
     void clearPending();
 

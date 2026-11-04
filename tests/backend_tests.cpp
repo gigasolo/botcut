@@ -309,8 +309,22 @@ public:
             return;
         }
     }
-    Q_INVOKABLE void restoreSelect(int id) { lastRestoreId = id; }
-    Q_INVOKABLE void renderSelects() {}
+    Q_INVOKABLE void restoreSelect(int id) {
+        lastRestoreId = id;
+        for (int i = 0; i < m_selects.size(); ++i) {
+            QVariantMap row = m_selects.at(i).toMap();
+            if (row.value(QStringLiteral("id")).toInt() != id)
+                continue;
+            // A missing keep is already kept. The row reads keep, so a dropped line has to flip.
+            if (!row.contains(QStringLiteral("keep")) || row.value(QStringLiteral("keep")).toBool())
+                return;
+            row.insert(QStringLiteral("keep"), true);
+            m_selects[i] = row;
+            emit selectsChanged();
+            return;
+        }
+    }
+    Q_INVOKABLE void renderSelects() { ++renderCount; }
     Q_INVOKABLE void writeCaptions() {}
     Q_INVOKABLE void makeShort() {}
     Q_INVOKABLE bool sendRevise(const QString &note) {
@@ -395,6 +409,7 @@ public:
     double lastThumbEnd = 0;
     int lastDropId = -1;
     int lastRestoreId = -1;
+    int renderCount = 0;
 
 signals:
     void infoChanged();
@@ -2136,14 +2151,102 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QVERIFY(garageRow->property("selected").toBool());
     QVERIFY(!secondRow->property("selected").toBool());
     QVERIFY(!shopsRow->property("selected").toBool());
-    QCOMPARE(wordsOn(garageRow, QStringLiteral("Drop")).size(), 1);
-    QVERIFY(wordsOn(garageRow, QStringLiteral("Keep")).isEmpty());
-    QCOMPARE(wordsOn(secondRow, QStringLiteral("Drop")).size(), 1);
-    QVERIFY(wordsOn(secondRow, QStringLiteral("Keep")).isEmpty());
-    QCOMPARE(wordsOn(shopsRow, QStringLiteral("Keep")).size(), 1);
-    QVERIFY(wordsOn(shopsRow, QStringLiteral("Drop")).isEmpty());
-    QVERIFY(wordsOn(garageRow, QStringLiteral("Drop")).first()->opacity() > 0.5);
-    QVERIFY(wordsOn(shopsRow, QStringLiteral("Keep")).first()->opacity() > 0.5);
+    const auto oneWord = [](const QList<QQuickItem *> &found) -> QQuickItem * {
+        return found.size() == 1 ? found.first() : nullptr;
+    };
+    const QColor accent = window->property("accent").value<QColor>();
+    QVERIFY(accent.isValid());
+    const auto filled = [&](QQuickItem *label) {
+        if (!label || !label->parentItem())
+            return false;
+        const QColor color = label->parentItem()->property("color").value<QColor>();
+        return qAbs(color.red() - accent.red()) <= 1 && qAbs(color.green() - accent.green()) <= 1
+               && qAbs(color.blue() - accent.blue()) <= 1 && color.alpha() > 200;
+    };
+    const auto inForce = [](QQuickItem *label) {
+        return label && label->parentItem() && label->parentItem()->property("active").toBool();
+    };
+    // Both words on every row. The filled word is the state, and it does not act.
+    QQuickItem *garageKeep = oneWord(wordsOn(garageRow, QStringLiteral("Keep")));
+    QQuickItem *garageDrop = oneWord(wordsOn(garageRow, QStringLiteral("Drop")));
+    QQuickItem *secondKeep = oneWord(wordsOn(secondRow, QStringLiteral("Keep")));
+    QQuickItem *secondDrop = oneWord(wordsOn(secondRow, QStringLiteral("Drop")));
+    QQuickItem *shopsKeep = oneWord(wordsOn(shopsRow, QStringLiteral("Keep")));
+    QQuickItem *shopsDrop = oneWord(wordsOn(shopsRow, QStringLiteral("Drop")));
+    QVERIFY(garageKeep);
+    QVERIFY(garageDrop);
+    QVERIFY(secondKeep);
+    QVERIFY(secondDrop);
+    QVERIFY(shopsKeep);
+    QVERIFY(shopsDrop);
+    QVERIFY(inForce(garageKeep));
+    QVERIFY(filled(garageKeep));
+    QVERIFY(!inForce(garageDrop));
+    QVERIFY(!filled(garageDrop));
+    QVERIFY(inForce(secondKeep));
+    QVERIFY(filled(secondKeep));
+    QVERIFY(!inForce(secondDrop));
+    QVERIFY(!filled(secondDrop));
+    QVERIFY(inForce(shopsDrop));
+    QVERIFY(filled(shopsDrop));
+    QVERIFY(!inForce(shopsKeep));
+    QVERIFY(!filled(shopsKeep));
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageKeep));
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsDrop));
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QCOMPARE(window->property("currentLine").toInt(), 0);
+
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageDrop));
+    QCOMPARE(backend.lastDropId, 1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        sentenceRow(garage) && sentenceRow(garage)->property("dropped").toBool(), 3000);
+    garageRow = sentenceRow(garage);
+    garageKeep = oneWord(wordsOn(garageRow, QStringLiteral("Keep")));
+    QVERIFY(garageKeep);
+    QVERIFY(!inForce(garageKeep));
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageKeep));
+    QCOMPARE(backend.lastRestoreId, 1);
+    QCOMPARE(backend.lastDropId, -1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        sentenceRow(garage) && !sentenceRow(garage)->property("dropped").toBool(), 3000);
+
+    shopsRow = sentenceRow(shops);
+    shopsKeep = oneWord(wordsOn(shopsRow, QStringLiteral("Keep")));
+    QVERIFY(shopsKeep);
+    QVERIFY(!inForce(shopsKeep));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsKeep));
+    QCOMPARE(backend.lastRestoreId, 3);
+    QCOMPARE(backend.lastDropId, -1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        sentenceRow(shops) && !sentenceRow(shops)->property("dropped").toBool(), 3000);
+    shopsRow = sentenceRow(shops);
+    shopsDrop = oneWord(wordsOn(shopsRow, QStringLiteral("Drop")));
+    QVERIFY(shopsDrop);
+    QVERIFY(!inForce(shopsDrop));
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsDrop));
+    QCOMPARE(backend.lastDropId, 3);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QTRY_VERIFY_WITH_TIMEOUT(
+        sentenceRow(shops) && sentenceRow(shops)->property("dropped").toBool(), 3000);
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    QCOMPARE(window->property("currentLine").toInt(), 0);
+    garageRow = sentenceRow(garage);
+    secondRow = sentenceRow(second);
+    shopsRow = sentenceRow(shops);
+    QVERIFY(garageRow);
+    QVERIFY(secondRow);
+    QVERIFY(shopsRow);
+    QVERIFY(garageRow->property("selected").toBool());
 
     QList<QQuickItem *> plays;
     collectVisibleText(window->contentItem(), QStringLiteral("Play"), &plays);
@@ -2200,16 +2303,44 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
 
     QList<QQuickItem *> shopLines;
     collectVisibleText(window->contentItem(), shops, &shopLines);
-    QCOMPARE(shopLines.size(), 1);
-    QVERIFY(qAbs(shopLines.first()->opacity() - 0.38) < 0.01);
+    QQuickItem *shopLine = nullptr;
+    for (QQuickItem *item : shopLines) {
+        if (lineRowItem(item)) {
+            shopLine = item;
+            break;
+        }
+    }
+    QVERIFY(shopLine);
+    // Restored, so this is the kept look. 0.38 and strikeout are the dropped line.
+    QVERIFY(!QQmlProperty::read(shopLine, QStringLiteral("font.strikeout")).toBool());
+    QVERIFY(qAbs(shopLine->opacity() - 1.0) < 0.01);
     plays.clear();
     collectVisibleText(window->contentItem(), QStringLiteral("Play"), &plays);
     QCOMPARE(plays.size(), 1);
     // dropSelect rebuilds the rows, so the pointer taken before X is gone.
-    shopsRow = lineRowItem(shopLines.first());
+    shopsRow = lineRowItem(shopLine);
     QVERIFY(shopsRow);
     QCOMPARE(lineRowItem(plays.first()), shopsRow);
     QVERIFY(plays.first()->opacity() > 0.5);
+
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    QTest::keyClick(window, Qt::Key_K);
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QTest::keyClick(window, Qt::Key_D);
+    QCOMPARE(backend.lastDropId, 3);
+    QCOMPARE(backend.lastRestoreId, -1);
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    QTest::keyClick(window, Qt::Key_D);
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QTest::keyClick(window, Qt::Key_K);
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, 3);
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
 
     backend.setBusy(true);
     QTest::qWait(20);
@@ -2217,9 +2348,8 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QList<QQuickItem *> keeps;
     collectVisibleText(window->contentItem(), QStringLiteral("Drop"), &drops);
     collectVisibleText(window->contentItem(), QStringLiteral("Keep"), &keeps);
-    // X on the first row dropped it, so only the second row still says Drop.
-    QCOMPARE(drops.size(), 1);
-    QCOMPARE(keeps.size(), 2);
+    QCOMPARE(drops.size(), 3);
+    QCOMPARE(keeps.size(), 3);
     for (QQuickItem *item : drops)
         QVERIFY(qAbs(item->opacity() - 0.38) < 0.01);
     for (QQuickItem *item : keeps)
@@ -2251,6 +2381,37 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(removeBroll.first()));
     QCOMPARE(backend.covers().size(), 0);
     QCOMPARE(backend.timeline.clips(), clips);
+
+    QQuickItem *searchHint = visibleItemWithText(window, QStringLiteral("Search lines"));
+    QVERIFY(searchHint);
+    QVERIFY(searchHint->parentItem());
+    QQuickItem *search = nullptr;
+    const auto searchKids = searchHint->parentItem()->childItems();
+    for (QQuickItem *child : searchKids) {
+        if (child->inherits("QQuickTextInput"))
+            search = child;
+    }
+    QVERIFY(search);
+    search->forceActiveFocus();
+    QVERIFY(search->hasActiveFocus());
+    QCOMPARE(search->setProperty("text", QStringLiteral("garage")), true);
+    QTest::qWait(20);
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    const int rendersWhileSearching = backend.renderCount;
+    QTest::keyClick(window, Qt::Key_Escape);
+    QCOMPARE(search->property("text").toString(), QString());
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    QVERIFY(search->hasActiveFocus());
+    QTest::keyClick(window, Qt::Key_R, Qt::ControlModifier);
+    QCOMPARE(backend.renderCount, rendersWhileSearching);
+    // The window content item is a focus scope, so it would hand focus back to the field.
+    searchHint->parentItem()->forceActiveFocus();
+    QVERIFY(!search->hasActiveFocus());
+    QVERIFY(!window->property("controlFocused").toBool());
+    QTest::keyClick(window, Qt::Key_R, Qt::ControlModifier);
+    QCOMPARE(backend.renderCount, rendersWhileSearching + 1);
 }
 
 void BackendTests::reviseChatStates() {
@@ -2696,38 +2857,49 @@ void BackendTests::cutRawWord() {
         }
         return nullptr;
     };
-    const auto wordOn = [](QQuickItem *chip) -> QQuickItem * {
-        if (!chip)
-            return nullptr;
-        const auto kids = chip->childItems();
-        for (QQuickItem *child : kids) {
-            const QString text = child->property("text").toString();
-            if (text == QLatin1String("Cut") || text == QLatin1String("Raw"))
-                return child;
-        }
-        return nullptr;
+    const auto labelOn = [](QQuickItem *chip, const QString &word) -> QQuickItem * {
+        QList<QQuickItem *> found;
+        if (chip)
+            collectVisibleText(chip, word, &found);
+        return found.size() == 1 ? found.first() : nullptr;
     };
 
     QTRY_VERIFY_WITH_TIMEOUT(visibleChip() != nullptr, 3000);
     QQuickItem *chip = visibleChip();
     QCOMPARE(chip->objectName(), QStringLiteral("cutRawChip"));
     QCOMPARE(chip->height(), 28.0);
-    QQuickItem *word = wordOn(chip);
-    QVERIFY(word);
-    QCOMPARE(word->parentItem(), chip);
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Cut"));
-    QVERIFY(word->opacity() > 0.9);
+    QQuickItem *cutWord = labelOn(chip, QStringLiteral("Cut"));
+    QQuickItem *originalWord = labelOn(chip, QStringLiteral("Original"));
+    QVERIFY(cutWord);
+    QVERIFY(originalWord);
+    QVERIFY(cutWord->parentItem() != chip);
+    QVERIFY(originalWord->parentItem() != chip);
+    QVERIFY(cutWord->parentItem()->property("active").toBool());
+    QVERIFY(!originalWord->parentItem()->property("active").toBool());
+    QCOMPARE(window->property("cutPreview").toBool(), true);
+    QVERIFY(cutWord->opacity() > 0.9);
     QQuickItem *footer = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
     QVERIFY(footer);
     QVERIFY(footer->isVisible());
-    QCOMPARE(footer->property("text").toString(), QStringLiteral("Cut again\u2026"));
+    QCOMPARE(footer->property("text").toString(), QStringLiteral("Render"));
 
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(chip));
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Raw"));
-    QCOMPARE(footer->property("text").toString(), QStringLiteral("Cut again\u2026"));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(chip));
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Cut"));
-    QCOMPARE(footer->property("text").toString(), QStringLiteral("Cut again\u2026"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(cutWord));
+    QCOMPARE(window->property("cutPreview").toBool(), true);
+    QVERIFY(cutWord->parentItem()->property("active").toBool());
+    QVERIFY(!originalWord->parentItem()->property("active").toBool());
+    QCOMPARE(footer->property("text").toString(), QStringLiteral("Render"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(originalWord));
+    QCOMPARE(window->property("cutPreview").toBool(), false);
+    QVERIFY(!cutWord->parentItem()->property("active").toBool());
+    QVERIFY(originalWord->parentItem()->property("active").toBool());
+    QCOMPARE(cutWord->property("text").toString(), QStringLiteral("Cut"));
+    QCOMPARE(originalWord->property("text").toString(), QStringLiteral("Original"));
+    QCOMPARE(footer->property("text").toString(), QStringLiteral("Render"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(cutWord));
+    QCOMPARE(window->property("cutPreview").toBool(), true);
+    QVERIFY(cutWord->parentItem()->property("active").toBool());
+    QVERIFY(!originalWord->parentItem()->property("active").toBool());
+    QCOMPARE(footer->property("text").toString(), QStringLiteral("Render"));
 
     QVERIFY(window->setProperty("shotsPinned", true));
     QTest::qWait(30);
@@ -2754,17 +2926,22 @@ void BackendTests::cutRawWord() {
     QTest::qWait(30);
     chip = visibleChip();
     QVERIFY(chip);
-    word = wordOn(chip);
-    QVERIFY(word);
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Cut"));
+    cutWord = labelOn(chip, QStringLiteral("Cut"));
+    originalWord = labelOn(chip, QStringLiteral("Original"));
+    QVERIFY(cutWord);
+    QVERIFY(originalWord);
+    QVERIFY(cutWord->parentItem()->property("active").toBool());
+    QCOMPARE(window->property("cutPreview").toBool(), true);
     backend.setBusy(true);
     QTest::qWait(30);
     QVERIFY(chip->isVisible());
-    QVERIFY(qAbs(word->opacity() - 0.38) < 0.01);
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Cut"));
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(chip));
-    QCOMPARE(word->property("text").toString(), QStringLiteral("Cut"));
-    QVERIFY(qAbs(word->opacity() - 0.38) < 0.01);
+    QVERIFY(qAbs(cutWord->opacity() - 0.38) < 0.01);
+    QVERIFY(qAbs(originalWord->opacity() - 0.38) < 0.01);
+    QCOMPARE(cutWord->property("text").toString(), QStringLiteral("Cut"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(originalWord));
+    QCOMPARE(window->property("cutPreview").toBool(), true);
+    QCOMPARE(cutWord->property("text").toString(), QStringLiteral("Cut"));
+    QVERIFY(qAbs(cutWord->opacity() - 0.38) < 0.01);
 
     const auto visibleCount = [](QQuickWindow *watch) {
         int shown = 0;
@@ -2825,9 +3002,11 @@ void BackendTests::cutRawWord() {
         QVERIFY(movieChip);
         QCOMPARE(movieChip->objectName(), QStringLiteral("cutRawChip"));
         QCOMPARE(visibleCount(watchWindow), 1);
-        QQuickItem *movieWord = wordOn(movieChip);
+        QQuickItem *movieWord = labelOn(movieChip, QStringLiteral("Cut"));
         QVERIFY(movieWord);
         QCOMPARE(movieWord->property("text").toString(), QStringLiteral("Cut"));
+        QVERIFY(movieWord->parentItem()->property("active").toBool());
+        QVERIFY(labelOn(movieChip, QStringLiteral("Original")));
         QQuickItem *movieFooter = watchWindow->findChild<QQuickItem *>(QStringLiteral("cutButton"));
         QVERIFY(movieFooter);
         QVERIFY(movieChip != movieFooter);
@@ -2978,22 +3157,51 @@ void BackendTests::pictureSentenceUnderThePicture() {
             continue;
         QVERIFY(qAbs(child->opacity() - 0.62) < 0.01);
     }
-    // Layout attached margins are the item's position in the column, not a QObject property.
-    QVERIFY2(qAbs(sentence->x() - 12.0) < 1.0, qPrintable(QString::number(sentence->x())));
-    QVERIFY(qAbs(sentence->parentItem()->width() - sentence->width() - sentence->x() - 12.0) < 2.0);
-    QVERIFY(qAbs(sentence->parentItem()->height() - sentence->y() - sentence->height() - 12.0) < 2.0);
+    QCOMPARE(window->width(), 960);
+    QCOMPARE(window->height(), 640);
+    const QPointF sentenceAt = sentence->mapToScene(QPointF(0, 0));
+    QVERIFY2(sentenceAt.x() >= -0.5 && sentenceAt.y() >= -0.5
+                 && sentenceAt.x() + sentence->width() <= window->width() + 1.0
+                 && sentenceAt.y() + sentence->height() <= window->height() + 1.0,
+             qPrintable(QStringLiteral("%1,%2 %3x%4")
+                            .arg(sentenceAt.x())
+                            .arg(sentenceAt.y())
+                            .arg(sentence->width())
+                            .arg(sentence->height())));
 
     QQuickItem *cut = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
     QVERIFY(cut);
     QVERIFY(sentence != cut);
     QQuickItem *linesStep = window->findChild<QQuickItem *>(QStringLiteral("linesStep"));
     QVERIFY(linesStep);
-    QQuickItem *common = sentence;
-    while (common && !itemIsUnder(common, cut))
-        common = common->parentItem();
-    QVERIFY(common);
-    QVERIFY2(itemIsUnder(common, linesStep), "pictureSentence is inside the footer");
-    QVERIFY(!itemIsUnder(cut->parentItem(), sentence));
+    QQuickItem *planPane = nullptr;
+    QQuickItem *topBar = nullptr;
+    QList<QQuickItem *> visual;
+    collectVisual(window->contentItem(), &visual);
+    for (QQuickItem *item : visual) {
+        if (!planPane && item->property("decisions").isValid())
+            planPane = item;
+        if (!topBar && item->property("filledText").isValid())
+            topBar = item;
+    }
+    QVERIFY(planPane);
+    QVERIFY(topBar);
+    QObject *decisions = planPane->property("decisions").value<QObject *>();
+    QQuickItem *inspector = qobject_cast<QQuickItem *>(decisions);
+    QVERIFY(inspector);
+    QVERIFY2(itemIsUnder(inspector, sentence), "pictureSentence is outside the inspector");
+    QVERIFY2(!itemIsUnder(planPane, sentence), "pictureSentence is in the lines column");
+    QVERIFY2(!itemIsUnder(topBar, sentence), "pictureSentence is in the top bar");
+    QVERIFY(itemIsUnder(topBar, cut));
+    QVERIFY(itemIsUnder(topBar, linesStep));
+    // Lines meets the sentence above the top bar, not inside a footer that owns both.
+    QQuickItem *meet = sentence;
+    while (meet && !itemIsUnder(meet, linesStep))
+        meet = meet->parentItem();
+    QVERIFY(meet);
+    QVERIFY(meet != topBar);
+    QVERIFY(!itemIsUnder(topBar, meet));
+    QVERIFY2(itemIsUnder(meet, topBar), "linesStep is under a footer that owns the sentence");
 
     QVERIFY(window->setProperty("shotsPinned", true));
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
@@ -3033,6 +3241,41 @@ void BackendTests::pictureSentenceUnderThePicture() {
                               QStringLiteral("0:07 kept of 0:14 \u2013 2 lines, tight"), 3000);
     QCOMPARE(keptClock->property("text").toString(), QStringLiteral("0:07"));
     QCOMPARE(allClock->property("text").toString(), QStringLiteral("0:14"));
+
+    QVariantMap marked = dropped;
+    marked.insert(QStringLiteral("reason"), QStringLiteral("unique?"));
+    QCOMPARE(marked.value(QStringLiteral("keep")).toBool(), false);
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
+    backend.setSelects({first, omitted, third, marked});
+    QCOMPARE(window->property("lineFilter").toString(), QStringLiteral("all"));
+    QQuickItem *unsureChip = nullptr;
+    QList<QQuickItem *> filterItems;
+    collectVisual(window->contentItem(), &filterItems);
+    for (QQuickItem *item : filterItems) {
+        if (item->isVisible() && item->property("key").toString() == QStringLiteral("unsure")) {
+            unsureChip = item;
+            break;
+        }
+    }
+    QVERIFY(unsureChip);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(unsureChip));
+    QCOMPARE(window->property("lineFilter").toString(), QStringLiteral("unsure"));
+    QCOMPARE(backend.lastDropId, -1);
+    QCOMPARE(backend.lastRestoreId, -1);
+    bool markedKeep = true;
+    bool markedFound = false;
+    const QVariantList markedRows = backend.selects();
+    for (const QVariant &row : markedRows) {
+        const QVariantMap map = row.toMap();
+        if (map.value(QStringLiteral("id")).toInt() != 4)
+            continue;
+        markedFound = true;
+        markedKeep = map.value(QStringLiteral("keep")).toBool();
+        QCOMPARE(map.value(QStringLiteral("reason")).toString(), QStringLiteral("unique?"));
+    }
+    QVERIFY(markedFound);
+    QCOMPARE(markedKeep, false);
 
     QVariantMap only;
     only.insert(QStringLiteral("id"), 5);
@@ -3077,6 +3320,20 @@ void BackendTests::pictureSentenceUnderThePicture() {
     noEnd.insert(QStringLiteral("clip"), 0);
     backend.setSelects({hasEnd, alsoKept, noEnd});
     QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), QStringLiteral("2 lines, measured"), 3000);
+    QVERIFY(!keptClock->isVisible());
+    QVERIFY(!allClock->isVisible());
+
+    // The only timeless line has an end and no start. A missing-end check would still show clocks.
+    QVariantMap noStart;
+    noStart.insert(QStringLiteral("id"), 10);
+    noStart.insert(QStringLiteral("keep"), false);
+    noStart.insert(QStringLiteral("text"), QStringLiteral("No start."));
+    noStart.insert(QStringLiteral("end"), 12.0);
+    noStart.insert(QStringLiteral("clip"), 0);
+    backend.setSelects({hasEnd, alsoKept, noStart});
+    const QString plainLines = QStringLiteral("2 lines, measured");
+    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), plainLines, 3000);
+    QVERIFY(!sentencePlain(sentence).contains(QStringLiteral("kept of")));
     QVERIFY(!keptClock->isVisible());
     QVERIFY(!allClock->isVisible());
 

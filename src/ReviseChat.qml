@@ -161,15 +161,6 @@ Item {
         spacing: 8
 
         Label {
-            visible: root.shownNote === ""
-            width: parent.width
-            text: qsTr("Like \"drop the pricing part\" or \"make it tighter\"")
-            color: theme.foreground
-            opacity: 0.38
-            font.pixelSize: 12
-            wrapMode: Text.WordWrap
-        }
-        Label {
             visible: root.shownNote !== ""
             width: parent.width
             text: "\u201C" + root.shownNote + "\u201D"
@@ -198,11 +189,51 @@ Item {
             }
         }
 
+        // Three notes to start from. A chip only fills the field. Sending is
+        // still the word in the field or Enter.
+        Flow {
+            width: parent.width
+            spacing: 6
+            Repeater {
+                model: [qsTr("Make it tighter"), qsTr("Drop the pricing part"), qsTr("Under 90 seconds")]
+                delegate: Rectangle {
+                    id: chip
+                    required property string modelData
+                    width: chipText.implicitWidth + 16
+                    height: 24
+                    radius: theme.radius
+                    color: chipHover.hovered && chip.enabled ? theme.hover : "transparent"
+                    border.width: 1
+                    border.color: theme.line
+                    enabled: !backend.busy
+                    HoverHandler { id: chipHover; enabled: chip.enabled }
+                    Label {
+                        id: chipText
+                        anchors.centerIn: parent
+                        text: chip.modelData
+                        color: theme.foreground
+                        opacity: !chip.enabled ? 0.38 : (chipHover.hovered ? 1 : 0.62)
+                        font.pixelSize: 12
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        enabled: chip.enabled
+                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                        onClicked: {
+                            field.text = chip.modelData
+                            field.cursorPosition = field.text.length
+                            field.forceActiveFocus()
+                        }
+                    }
+                }
+            }
+        }
+
         Rectangle {
             width: parent.width
             height: 36
             radius: theme.radius
-            color: theme.surface
+            color: theme.raised
             border.width: field.activeFocus ? 1 : 0
             border.color: theme.accent
 

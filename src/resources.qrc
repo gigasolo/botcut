@@ -7,6 +7,7 @@
         <file alias="EditBar.qml">EditBar.qml</file>
         <file alias="Format.js">Format.js</file>
         <file alias="PlanPane.qml">PlanPane.qml</file>
+        <file alias="Inspector.qml">Inspector.qml</file>
         <file alias="ShotRow.qml">ShotRow.qml</file>
         <file alias="LineRow.qml">LineRow.qml</file>
         <file alias="ActionBar.qml">ActionBar.qml</file>

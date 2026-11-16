@@ -160,6 +160,8 @@ ApplicationWindow {
             return backend.jobText !== "" ? backend.jobText : backend.status;
         if (noticeText !== "")
             return noticeText;
+        if (backend.lastError !== "")
+            return backend.lastError;
         var step = displayStep;
         if (step === "needsKey")
             return qsTr("Spoken cuts need an xAI key.");
@@ -168,8 +170,10 @@ ApplicationWindow {
         if (step === "shotsReady") {
             var count = backend.tray.length;
             if (backend.cutMode !== "speech")
-                return qsTr("Cut joins all %1 shots in this order.").arg(count);
-            return qsTr("%1 shots, in this order. Cut finds the lines worth keeping.").arg(count);
+                return count === 1 ? qsTr("Cut makes this one shot the movie.")
+                                   : qsTr("Cut joins all %1 shots in this order.").arg(count);
+            return count === 1 ? qsTr("1 shot. Cut finds the lines worth keeping.")
+                               : qsTr("%1 shots, in this order. Cut finds the lines worth keeping.").arg(count);
         }
         if (step === "lines") {
             var span = keptSpan();
@@ -198,6 +202,7 @@ ApplicationWindow {
         return "";
     }
     readonly property bool actionNeedsYou: displayStep === "needsKey" || displayStep === "missingShot"
+                                           || (!running && backend.lastError !== "")
                                            || displayStep === "allDropped"
     readonly property bool dialogUp: settingsOpen || helpVisible || titleCardOpen
                                      || confirmCutOpen || quitConfirmVisible
@@ -223,7 +228,6 @@ ApplicationWindow {
     property bool planPlaying: false
     property int planIndex: -1
     property string planSource: ""
-    readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
     readonly property var timeline: backend.planCut ? backend.plan : backend.timeline
     // Quitting only warns about unexported cuts. Clips spanning the whole
@@ -513,6 +517,8 @@ ApplicationWindow {
         settingsFromMovie = hasVideo && !gathering;
         if (movie.player.playbackState === MediaPlayer.PlayingState)
             movie.player.pause();
+        // Settings says what xAI thinks of the key. An older failure is not about that.
+        backend.dismissError();
         settingsOpen = true;
     }
     function closeSettings() {
@@ -1828,6 +1834,16 @@ ApplicationWindow {
                         onClicked: win.activateFilled()
                     }
                     ActionButton {
+                        objectName: "stopButton"
+                        raised: true
+                        text: qsTr("Stop")
+                        visible: win.running && backend.busy
+                        Layout.minimumWidth: implicitWidth
+                        Layout.maximumWidth: implicitWidth
+                        Layout.alignment: Qt.AlignVCenter
+                        onClicked: backend.cancelJob()
+                    }
+                    ActionButton {
                         id: jobButton
                         visible: win.running
                         text: backend.jobText
@@ -1883,6 +1899,9 @@ ApplicationWindow {
         }
         function onExportDone(path) {
             win.showNotice("Saved " + path);
+        }
+        function onNotice(message) {
+            win.showNotice(message);
         }
         function onExportFailed(message) {
             win.showNotice("Export failed: " + message);

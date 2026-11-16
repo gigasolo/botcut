@@ -29,7 +29,7 @@ CutLaunch launchTool(const QStringList &tail, const QString &botcutCli, const QS
         return launch;
     }
     launch.error = QStringLiteral(
-        "botcut-cli was not found. Install it, or put uv on PATH with ~/code/botcut/cli.");
+        "botcut-cli was not found. Install it, or set BOTCUT_CLI to where it is.");
     return launch;
 }
 
@@ -105,6 +105,10 @@ CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, c
         return {QString(), {}, QStringLiteral("No cuts.json")};
     const QStringList tail{QStringLiteral("captions"), cutsPath};
     return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+CutLaunch cutKeyLaunch(const QString &botcutCli, const QString &uv, const QString &cliProject) {
+    return launchTool({QStringLiteral("key")}, botcutCli, uv, cliProject);
 }
 
 CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,

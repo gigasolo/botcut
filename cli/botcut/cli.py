@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from botcut import net
 from botcut.broll import beats_from_cuts, choose_covers, fake_beats, is_broll
 from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
@@ -45,6 +46,16 @@ from botcut.review import build_master, keep_list, launch, offsets, source_clips
 from botcut.revise import apply_proposal, revise
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
+
+
+def check_key() -> None:
+    """Exit 0 when xAI accepts the key. BOTCUT_FAKE accepts any key, offline."""
+    key = os.environ.get("XAI_API_KEY")
+    if not key:
+        raise SystemExit("XAI_API_KEY is not set")
+    if os.environ.get("BOTCUT_FAKE") != "1":
+        net.check_key(os.environ.get("BOTCUT_LLM_BASE_URL") or "https://api.x.ai/v1", key)
+    print("Key works", flush=True)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -130,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
     card_p = sub.add_parser("card", help="make a 3 second card from a sentence")
     card_p.add_argument("--out", required=True, help="mp4 to write, named botcut-card-…")
     card_p.add_argument("sentence", help="the sentence on the card")
+    sub.add_parser("key", help="check that xAI accepts XAI_API_KEY")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -175,6 +187,8 @@ def main(argv: list[str] | None = None) -> None:
                 )
         elif args.cmd == "card":
             make_card(args.sentence, args.out)
+        elif args.cmd == "key":
+            check_key()
     except BrokenPipeError:
         sys.exit(0)
 

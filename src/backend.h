@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
 #include <QSet>
 #include <QString>
@@ -35,6 +36,9 @@ class Backend : public QObject {
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    // What went wrong with the last thing asked for, while nothing is running.
+    // It stays until the next job starts or the person moves on.
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     // Where the founder is on shots → lines → movie. The window's one sentence.
     Q_PROPERTY(QString step READ step NOTIFY stepChanged)
     // The running job, empty when idle. progress is -1 when idle and 0..1 while it runs.
@@ -90,6 +94,7 @@ public:
     int thumbRevision() const { return m_thumbRevision; }
     bool busy() const { return m_busy; }
     QString status() const { return m_status; }
+    QString lastError() const { return m_lastError; }
     QString step() const { return m_step; }
     QString job() const { return m_job; }
     QString jobText() const { return m_jobText; }
@@ -155,7 +160,14 @@ public:
     Q_INVOKABLE void reopenList(const QString &path);
     Q_INVOKABLE void watchRecent(const QString &path);
     Q_INVOKABLE void setApiKey(const QString &key);
+    // Asks xAI whether it accepts the saved key. A refused key is forgotten and
+    // lastError says so. A network failure keeps the key.
+    Q_INVOKABLE void checkApiKey();
     Q_INVOKABLE void startCut();
+    // Stops the running job and everything it started. The window goes back to
+    // the step it was on, with no error.
+    Q_INVOKABLE void cancelJob();
+    Q_INVOKABLE void dismissError();
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void clearCover(int lineId);
@@ -203,6 +215,9 @@ signals:
     void thumbsChanged();
     void busyChanged();
     void statusChanged();
+    void lastErrorChanged();
+    // A short good-news line, such as "Wrote the captions".
+    void notice(const QString &message);
     void stepChanged();
     void jobChanged();
     void trayChanged();
@@ -229,6 +244,15 @@ signals:
 private:
     void setBusy(bool busy);
     void setStatus(const QString &status);
+    void setLastError(const QString &error);
+    // How to run botcut-cli: the program itself, or uv with a source checkout.
+    struct CliTool {
+        QString cli;
+        QString uv;
+        QString project;
+    };
+    CliTool cliTool() const;
+    void watchSideProcess(QProcess *proc);
     void refreshStep();
     QString computeStep() const;
     void failExport(const QString &tmpPath, const QString &message);
@@ -318,6 +342,10 @@ private:
     bool m_thumbWorkerDone = false;
     bool m_busy = false;
     QString m_status;
+    QString m_lastError;
+    bool m_cancelled = false;
+    // The cp or ffmpeg of a save or export, while it runs.
+    QPointer<QProcess> m_sideProcess;
     QString m_step = QStringLiteral("empty");
     QString m_job;
     QString m_jobText;
@@ -360,7 +388,7 @@ private:
     QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Propose, Revise, Card };
+    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Propose, Revise, Card, Key };
     CutStage m_cutStage = CutStage::Idle;
     QString m_cardPath;
     QString m_cardPlace;

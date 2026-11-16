@@ -2,6 +2,7 @@
 #include <functional>
 
 #include <algorithm>
+#include <csignal>
 
 #include <QColor>
 #include <QDateTime>
@@ -121,6 +122,7 @@ class ShortcutBackend : public QObject {
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    Q_PROPERTY(QString lastError READ lastError NOTIFY statusChanged)
     Q_PROPERTY(QString step READ step NOTIFY infoChanged)
     Q_PROPERTY(QString job READ job NOTIFY infoChanged)
     Q_PROPERTY(QString jobText READ jobText NOTIFY infoChanged)
@@ -148,9 +150,21 @@ public:
         emit busyChanged();
     }
     QString status() const { return {}; }
+    QString lastError() const { return m_lastError; }
+    void setLastError(const QString &error) {
+        m_lastError = error;
+        emit statusChanged();
+    }
+    Q_INVOKABLE void cancelJob() { ++cancelCount; }
+    Q_INVOKABLE void dismissError() { setLastError(QString()); }
+    int cancelCount = 0;
     QString step() const { return {}; }
-    QString job() const { return {}; }
-    QString jobText() const { return {}; }
+    QString job() const { return m_job; }
+    QString jobText() const { return m_job; }
+    void setJob(const QString &job) {
+        m_job = job;
+        emit infoChanged();
+    }
     qreal progress() const { return -1; }
     QObject *timelineObject() { return &timeline; }
     bool planCut() const { return m_planCut; }
@@ -374,7 +388,10 @@ public:
     Q_INVOKABLE void saveCutListDialog() {}
     Q_INVOKABLE void reopenList(const QString &) {}
     Q_INVOKABLE void watchRecent(const QString &) {}
-    Q_INVOKABLE void setApiKey(const QString &) {}
+    Q_INVOKABLE void setApiKey(const QString &key) { savedKeys.append(key); }
+    Q_INVOKABLE void checkApiKey() { ++keyCheckCount; }
+    QStringList savedKeys;
+    int keyCheckCount = 0;
     Q_INVOKABLE void moveTray(int delta) {
         lastMoveDelta = delta;
         ++moveCount;
@@ -451,10 +468,13 @@ signals:
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void loadError(const QString &message);
+    void notice(const QString &message);
     void chatChanged();
     void selectsChanged();
 
 private:
+    QString m_lastError;
+    QString m_job;
     QUrl m_source;
     QUrl m_previewUrl;
     double m_duration;
@@ -700,6 +720,14 @@ private slots:
     void themeReadsAccentForegroundAndRounding();
     void stepFollowsTheTrayAndTheLines();
     void jobFollowsTheStatusLine();
+    void failedJobLeavesItsReasonOnScreen();
+    void stopEndsTheJobAndItsChildrenQuietly();
+    void restoreSelectSavesTheList();
+    void captionsLandBesideTheSavedMovie();
+    void qmlSentenceShowsTheLastError();
+    void qmlStopButtonCancelsTheJob();
+    void refusedKeyIsForgotten();
+    void qmlSettingsSavesOnlyATypedKey();
     void qmlQuitAsksWhileAJobIsRunning();
     void grabWindowScreens();
 
@@ -7734,6 +7762,295 @@ void BackendTests::grabWindowScreens() {
             QVERIFY2(editBar->isVisible(), "edit bar hidden on the movie screen");
         }
     }
+}
+
+namespace {
+QString writeStubScript(const QString &path, const QByteArray &body) {
+    QFile script(path);
+    if (!script.open(QIODevice::WriteOnly | QIODevice::Truncate) || script.write(body) <= 0)
+        return {};
+    script.close();
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    return path;
+}
+
+// A cut folder with one line in cuts.json, ready for Render.
+QString writeOneLineCut(const QString &dir, bool keep) {
+    QDir().mkpath(dir);
+    QJsonObject line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("keep"), keep);
+    QJsonObject root;
+    root.insert(QStringLiteral("lines"), QJsonArray{line});
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    QFile file(cuts);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return {};
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    return cuts;
+}
+}
+
+void BackendTests::failedJobLeavesItsReasonOnScreen() {
+    const QString stub = writeStubScript(m_dir.filePath(QStringLiteral("fail-stub.sh")),
+                                         "#!/bin/sh\necho 'Rendering 10%'\necho 'xAI connection failed' >&2\nexit 1\n");
+    QVERIFY(!stub.isEmpty());
+    const QString dir = m_dir.filePath(QStringLiteral("fail-cut"));
+    QVERIFY(!writeOneLineCut(dir, true).isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("keep"), true);
+    backend.m_selects = {line};
+    backend.m_cutOut = dir;
+    backend.m_launchProgram = stub;
+    QSignalSpy noticeSpy(&backend, &Backend::notice);
+
+    backend.renderSelects();
+    QVERIFY(backend.busy());
+    QVERIFY(backend.lastError().isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    // The tool's last line is the reason, and it stays after the job is gone.
+    QCOMPARE(backend.lastError(), QStringLiteral("xAI connection failed"));
+    QCOMPARE(backend.job(), QString());
+    QCOMPARE(noticeSpy.count(), 0);
+
+    // Trying again clears it while the job runs, and the same failure says so again.
+    backend.renderSelects();
+    QVERIFY(backend.lastError().isEmpty());
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.lastError(), QStringLiteral("xAI connection failed"));
+
+    backend.dismissError();
+    QVERIFY(backend.lastError().isEmpty());
+
+    // Good news is a passing notice, never an error.
+    backend.setStatus(QStringLiteral("Wrote the captions"));
+    QVERIFY(backend.lastError().isEmpty());
+    QCOMPARE(noticeSpy.count(), 1);
+    QCOMPARE(noticeSpy.at(0).at(0).toString(), QStringLiteral("Wrote the captions"));
+}
+
+void BackendTests::stopEndsTheJobAndItsChildrenQuietly() {
+    const QString pidFile = m_dir.filePath(QStringLiteral("stop-child.pid"));
+    QFile::remove(pidFile);
+    const QByteArray body = "#!/bin/sh\necho 'Rendering 5%'\nsleep 60 &\necho $! > '" + pidFile.toUtf8()
+                            + "'\nwait\n";
+    const QString stub = writeStubScript(m_dir.filePath(QStringLiteral("stop-stub.sh")), body);
+    QVERIFY(!stub.isEmpty());
+    const QString dir = m_dir.filePath(QStringLiteral("stop-cut"));
+    QVERIFY(!writeOneLineCut(dir, true).isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("keep"), true);
+    backend.m_selects = {line};
+    backend.m_cutOut = dir;
+    backend.m_launchProgram = stub;
+
+    // Nothing running: Stop does nothing.
+    backend.cancelJob();
+    QVERIFY(!backend.busy());
+
+    backend.renderSelects();
+    QVERIFY(backend.busy());
+    QTRY_VERIFY_WITH_TIMEOUT(QFileInfo(pidFile).size() > 0, 5000);
+    QFile pids(pidFile);
+    QVERIFY(pids.open(QIODevice::ReadOnly));
+    const pid_t child = pid_t(pids.readAll().trimmed().toLongLong());
+    QVERIFY(child > 0);
+    QCOMPARE(::kill(child, 0), 0);
+
+    backend.cancelJob();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    // Stop is not a failure, and the lines are still there to render.
+    QCOMPARE(backend.lastError(), QString());
+    QCOMPARE(backend.status(), QString());
+    QCOMPARE(backend.job(), QString());
+    QCOMPARE(backend.selects().size(), 1);
+    QCOMPARE(backend.step(), QStringLiteral("empty"));
+    // The sleep the script started is gone too, not left running behind the window.
+    QTRY_VERIFY_WITH_TIMEOUT(::kill(child, 0) != 0, 5000);
+}
+
+void BackendTests::restoreSelectSavesTheList() {
+    const QString dir = m_dir.filePath(QStringLiteral("restore-cut"));
+    const QString cuts = writeOneLineCut(dir, false);
+    QVERIFY(!cuts.isEmpty());
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("keep"), false);
+    backend.m_selects = {line};
+    backend.m_cutOut = dir;
+
+    backend.restoreSelect(1);
+    QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
+    QFile file(cuts);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QJsonArray lines = QJsonDocument::fromJson(file.readAll()).object().value(QStringLiteral("lines")).toArray();
+    QCOMPARE(lines.size(), 1);
+    // The file follows the list at once, as it does for a drop.
+    QCOMPARE(lines.at(0).toObject().value(QStringLiteral("keep")).toBool(), true);
+}
+
+void BackendTests::captionsLandBesideTheSavedMovie() {
+    // The tool writes rough_cut.srt beside cuts.json. The movie was saved somewhere else.
+    const QString stub = writeStubScript(
+        m_dir.filePath(QStringLiteral("captions-stub.sh")),
+        "#!/bin/sh\nprintf '1\\n00:00:00,000 --> 00:00:01,000\\nhello\\n' > \"$(dirname \"$2\")/rough_cut.srt\"\nexit 0\n");
+    QVERIFY(!stub.isEmpty());
+    const QString dir = m_dir.filePath(QStringLiteral("captions-cut"));
+    const QString cuts = writeOneLineCut(dir, true);
+    QVERIFY(!cuts.isEmpty());
+    const QString savedDir = m_dir.filePath(QStringLiteral("captions-saved"));
+    QVERIFY(QDir().mkpath(savedDir));
+    const QString movie = QDir(savedDir).filePath(QStringLiteral("ride.mp4"));
+    QVERIFY(QFile(movie).open(QIODevice::WriteOnly));
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_path = movie;
+    backend.m_planMovie = QFileInfo(movie).absoluteFilePath();
+    backend.m_planCuts = cuts;
+    backend.m_launchProgram = stub;
+    QSignalSpy noticeSpy(&backend, &Backend::notice);
+
+    backend.writeCaptions();
+    QVERIFY(backend.busy());
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.lastError(), QString());
+    QCOMPARE(noticeSpy.count(), 1);
+    QCOMPARE(noticeSpy.at(0).at(0).toString(), QStringLiteral("Wrote the captions"));
+    const QString beside = QDir(savedDir).filePath(QStringLiteral("ride.srt"));
+    QVERIFY(QFileInfo(beside).isFile());
+    QVERIFY(QFileInfo(beside).size() > 0);
+}
+
+void BackendTests::qmlSentenceShowsTheLastError() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({QStringLiteral("/tmp/talk.mp4")});
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QQuickItem *sentence = window->findChild<QQuickItem *>(QStringLiteral("actionSentence"));
+    QVERIFY(sentence);
+    const QString usual = sentence->property("text").toString();
+    QVERIFY(!usual.isEmpty());
+    // The stub has no key, so this step already asks for something.
+    const bool usualNeeds = window->property("actionNeedsYou").toBool();
+
+    backend.setLastError(QStringLiteral("xAI connection failed"));
+    QTRY_COMPARE(sentence->property("text").toString(), QStringLiteral("xAI connection failed"));
+    QCOMPARE(window->property("actionNeedsYou").toBool(), true);
+
+    backend.setLastError(QString());
+    QTRY_COMPARE(sentence->property("text").toString(), usual);
+    QCOMPARE(window->property("actionNeedsYou").toBool(), usualNeeds);
+}
+
+void BackendTests::qmlStopButtonCancelsTheJob() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({QStringLiteral("/tmp/talk.mp4")});
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QQuickItem *stop = window->findChild<QQuickItem *>(QStringLiteral("stopButton"));
+    QVERIFY(stop);
+    QVERIFY(!stop->isVisible());
+
+    backend.setBusy(true);
+    backend.setJob(QStringLiteral("Transcribing 1 of 3"));
+    QTRY_VERIFY(stop->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(stop));
+    QTRY_COMPARE(backend.cancelCount, 1);
+
+    backend.setJob(QString());
+    backend.setBusy(false);
+    QTRY_VERIFY(!stop->isVisible());
+}
+
+void BackendTests::refusedKeyIsForgotten() {
+    const QString refused = writeStubScript(m_dir.filePath(QStringLiteral("key-refused.sh")),
+                                            "#!/bin/sh\necho 'xAI did not accept that key.' >&2\nexit 1\n");
+    const QString offline = writeStubScript(m_dir.filePath(QStringLiteral("key-offline.sh")),
+                                            "#!/bin/sh\necho 'Could not reach xAI to check the key.' >&2\nexit 1\n");
+    const QString accepted = writeStubScript(m_dir.filePath(QStringLiteral("key-accepted.sh")),
+                                             "#!/bin/sh\necho 'Key works'\nexit 0\n");
+    QVERIFY(!refused.isEmpty() && !offline.isEmpty() && !accepted.isEmpty());
+
+    ThumbProvider provider;
+    MemoryKeyStore keys;
+    Backend backend(&provider, new FakeFilePicker, &keys);
+    // With no key there is nothing to ask about.
+    backend.m_launchProgram = accepted;
+    backend.checkApiKey();
+    QVERIFY(!backend.busy());
+
+    backend.setApiKey(QStringLiteral("supersecret"));
+    backend.checkApiKey();
+    QVERIFY(backend.busy());
+    QCOMPARE(backend.job(), QStringLiteral("key"));
+    QCOMPARE(backend.m_cutProcess->arguments(), QStringList{QStringLiteral("key")});
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.lastError(), QString());
+    QVERIFY(!backend.m_apiKey.isEmpty());
+
+    // The network being down says nothing about the key, so it stays.
+    backend.m_launchProgram = offline;
+    backend.checkApiKey();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.lastError(), QStringLiteral("Could not reach xAI to check the key."));
+    QVERIFY(!backend.m_apiKey.isEmpty());
+
+    backend.m_launchProgram = refused;
+    backend.checkApiKey();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.lastError(), QStringLiteral("xAI did not accept that key."));
+    QVERIFY(backend.m_apiKey.isEmpty());
+    QVERIFY(keys.load().isEmpty());
+}
+
+void BackendTests::qmlSettingsSavesOnlyATypedKey() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QVERIFY(window->setProperty("settingsOpen", true));
+    QTest::qWait(50);
+    QQuickItem *save = window->findChild<QQuickItem *>(QStringLiteral("saveKeyButton"));
+    QQuickItem *field = window->findChild<QQuickItem *>(QStringLiteral("keyField"));
+    QVERIFY(save && field);
+    // An empty field has nothing to save, so it cannot wipe the saved key.
+    QCOMPARE(save->property("enabled").toBool(), false);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(save));
+    QTest::qWait(20);
+    QVERIFY(backend.savedKeys.isEmpty());
+
+    QVERIFY(field->setProperty("text", QStringLiteral("  xai-typed  ")));
+    QTRY_COMPARE(save->property("enabled").toBool(), true);
+    // Done keeps a key that was typed and not yet saved, and has xAI check it.
+    QQuickItem *done = visibleItemWithText(window, QStringLiteral("Done"));
+    QVERIFY(done);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(done));
+    QTRY_COMPARE(backend.savedKeys.size(), 1);
+    QCOMPARE(backend.savedKeys.first().trimmed(), QStringLiteral("xai-typed"));
+    QCOMPARE(backend.keyCheckCount, 1);
+    QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
 }
 
 QTEST_MAIN(BackendTests)

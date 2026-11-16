@@ -1,6 +1,6 @@
 import requests
 
-from botcut.net import post
+from botcut.net import check_key, post
 
 
 class _Response:
@@ -127,3 +127,56 @@ def test_retry_after_is_capped_at_thirty_seconds(monkeypatch):
         send=lambda: {},
     )
     assert sleeps == [30.0]
+
+
+def _patch_get(monkeypatch, func):
+    monkeypatch.setattr("botcut.net.requests.get", func)
+
+
+def test_check_key_accepts_a_200(monkeypatch):
+    seen = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["auth"] = headers["Authorization"]
+        return _Response(200)
+
+    _patch_get(monkeypatch, fake_get)
+    check_key("https://api.x.ai/v1/", "secret")
+    assert seen == {"url": "https://api.x.ai/v1/models", "auth": "Bearer secret"}
+
+
+def test_check_key_says_a_bad_key_was_not_accepted(monkeypatch):
+    # xAI answers a wrong key with 400, not 401.
+    for status in (400, 401, 403):
+        _patch_get(monkeypatch, lambda *_a, status=status, **_k: _Response(status, text="secret"))
+        try:
+            check_key("https://api.x.ai/v1", "secret")
+        except SystemExit as exc:
+            assert str(exc) == "xAI did not accept that key."
+        else:
+            raise AssertionError("a rejected key must stop")
+
+
+def test_check_key_does_not_blame_the_key_for_the_network(monkeypatch):
+    def down(*_args, **_kwargs):
+        raise requests.ConnectionError("down")
+
+    for fake_get in (down, lambda *_a, **_k: _Response(503)):
+        _patch_get(monkeypatch, fake_get)
+        try:
+            check_key("https://api.x.ai/v1", "secret")
+        except SystemExit as exc:
+            assert str(exc) == "Could not reach xAI to check the key."
+        else:
+            raise AssertionError("an unreachable service must stop")
+
+
+def test_key_command_is_offline_under_fake(monkeypatch, capsys):
+    from botcut.cli import main
+
+    monkeypatch.setenv("BOTCUT_FAKE", "1")
+    monkeypatch.setenv("XAI_API_KEY", "secret")
+    _patch_get(monkeypatch, lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no network")))
+    main(["key"])
+    assert capsys.readouterr().out.strip() == "Key works"

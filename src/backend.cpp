@@ -1,5 +1,6 @@
 #include "backend.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -21,7 +22,9 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <csignal>
 #include <cstdio>
+#include <unistd.h>
 #include <memory>
 
 #include "filepicker.h"
@@ -72,6 +75,21 @@ QString captionCopyError(const QString &movieSrc, const QString &movieDst) {
     QFile::remove(srtDst);
     if (!QFile::copy(srtSrc, srtDst))
         return QStringLiteral("Could not copy the captions.");
+    return {};
+}
+
+// Puts a file the tool made beside the saved movie, named after it: movie.srt or
+// movie_short.mp4. Empty when it landed, or when the movie is the rough cut itself.
+QString besideMovieCopyError(const QString &made, const QString &movie, bool captions) {
+    const QFileInfo movieInfo(movie);
+    if (movieInfo.absolutePath() == QFileInfo(made).absolutePath())
+        return {};
+    const QString dst = movieInfo.dir().filePath(
+        movieInfo.completeBaseName() + (captions ? QStringLiteral(".srt") : QStringLiteral("_short.mp4")));
+    QFile::remove(dst);
+    if (!QFile::copy(made, dst))
+        return captions ? QStringLiteral("Could not copy the captions.")
+                        : QStringLiteral("Could not copy the short.");
     return {};
 }
 
@@ -170,6 +188,11 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
 }
 
 Backend::~Backend() {
+    // A job runs in its own process group, so its ffmpeg must not outlive the window.
+    for (QProcess *proc : {m_cutProcess, m_sideProcess.data()}) {
+        if (proc != nullptr && proc->state() != QProcess::NotRunning && proc->processId() > 0)
+            ::kill(-pid_t(proc->processId()), SIGKILL);
+    }
     stopTrayThumbs();
     stopThumbs();
     if (m_ownsKeys)
@@ -214,6 +237,10 @@ void Backend::setBusy(bool busy) {
         return;
     m_busy = busy;
     emit busyChanged();
+    if (busy) {
+        m_cancelled = false;
+        setLastError(QString());
+    }
     if (busy)
         stopTrayThumbs();
     else
@@ -237,10 +264,69 @@ void Backend::setStatus(const QString &status) {
     if (!same)
         emit jobChanged();
     refreshStep();
+    // A line that names no job, said while nothing runs, is for the person.
+    QString error;
+    if (!m_busy && job.isEmpty() && !status.isEmpty()) {
+        if (status == QLatin1String("Saved the list") || status == QLatin1String("Wrote the captions")
+            || status == QLatin1String("Wrote the short"))
+            emit notice(status);
+        else if (!status.startsWith(QLatin1String("Ready ")))
+            error = status;
+    }
+    setLastError(error);
+}
+
+void Backend::setLastError(const QString &error) {
+    if (m_lastError == error)
+        return;
+    m_lastError = error;
+    emit lastErrorChanged();
+}
+
+void Backend::dismissError() {
+    if (!m_busy && !m_lastError.isEmpty())
+        setStatus(QString());
+}
+
+namespace {
+// Each job is its own session, so one signal reaches uv, Python, and ffmpeg.
+void ownProcessGroup(QProcess *proc) {
+    proc->setChildProcessModifier([] { ::setsid(); });
+}
+}
+
+void Backend::watchSideProcess(QProcess *proc) {
+    ownProcessGroup(proc);
+    m_sideProcess = proc;
+}
+
+void Backend::cancelJob() {
+    if (!m_busy)
+        return;
+    QProcess *proc = m_cutProcess != nullptr && m_cutProcess->state() != QProcess::NotRunning
+                         ? m_cutProcess
+                         : m_sideProcess.data();
+    if (proc == nullptr || proc->state() == QProcess::NotRunning)
+        return;
+    m_cancelled = true;
+    const pid_t pid = pid_t(proc->processId());
+    if (pid <= 0 || ::kill(-pid, SIGTERM) != 0) {
+        proc->kill();
+        return;
+    }
+    QPointer<QProcess> guard(proc);
+    QTimer::singleShot(2000, this, [guard, pid] {
+        if (guard && guard->state() != QProcess::NotRunning && guard->processId() == pid)
+            ::kill(-pid, SIGKILL);
+    });
 }
 
 bool Backend::describeJob(const QString &status, QString *job, qreal *progress, QString *text) {
     if (status == QLatin1String("Trying again"))
+        return false;
+    // The count of kept lines is a result, not a job. The job that printed it runs on.
+    static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));
+    if (decided.match(status).hasMatch())
         return false;
     auto fill = [&](const QString &name, qreal value, const QString &words) {
         *job = name;
@@ -273,10 +359,12 @@ bool Backend::describeJob(const QString &status, QString *job, qreal *progress, 
     }
     // Ellipsis is not Latin-1, so these compare as QString.
     if (status == QStringLiteral("Reading files") || status == QStringLiteral("Reading pictures")
-            || status == QStringLiteral("Cutting…"))
+            || status == QStringLiteral("Reading beats") || status == QStringLiteral("Cutting…"))
         return fill(QStringLiteral("reading"), 0, tr("Reading shots"));
     if (status == QStringLiteral("Choosing takes"))
         return fill(QStringLiteral("choosing"), 0, tr("Choosing lines"));
+    if (status == QStringLiteral("Choosing covers"))
+        return fill(QStringLiteral("covering"), 0, tr("Laying B-roll"));
     if (status == QStringLiteral("Revising") || status == QStringLiteral("Changing…"))
         return fill(QStringLiteral("changing"), 0, tr("Changing the list"));
     if (status == QStringLiteral("Making the card…"))
@@ -285,6 +373,8 @@ bool Backend::describeJob(const QString &status, QString *job, qreal *progress, 
         return fill(QStringLiteral("captions"), 0, tr("Writing captions"));
     if (status == QStringLiteral("Cutting a short"))
         return fill(QStringLiteral("short"), 0, tr("Making the short"));
+    if (status == QStringLiteral("Checking the key…"))
+        return fill(QStringLiteral("key"), 0, tr("Checking the key"));
     if (status == QStringLiteral("Saving…"))
         return fill(QStringLiteral("saving"), 0, tr("Saving…"));
     if (status == QStringLiteral("Opening…"))
@@ -387,6 +477,7 @@ bool Backend::load(const QUrl &url) {
 }
 
 void Backend::showShots() {
+    dismissError();
     if (m_gathering)
         return;
     m_gathering = true;
@@ -394,6 +485,7 @@ void Backend::showShots() {
 }
 
 void Backend::showMovie() {
+    dismissError();
     if (m_source.isEmpty())
         return;
     if (!m_gathering)
@@ -405,6 +497,7 @@ void Backend::showMovie() {
 void Backend::closeProject() {
     if (m_busy)
         return;
+    dismissError();
     const bool wasUnsaved = renderedUnsaved();
     m_tray.clear();
     m_brollFiles.clear();
@@ -576,6 +669,21 @@ void Backend::setApiKey(const QString &key) {
     // An environment key is never written here. Only a key the user applies is.
     if (!m_keys || !m_keys->save(trimmed))
         setStatus(QStringLiteral("Could not save the key."));
+}
+
+void Backend::checkApiKey() {
+    if (m_busy || !apiKeySet())
+        return;
+    const CliTool tool = cliTool();
+    const CutLaunch launch = cutKeyLaunch(tool.cli, tool.uv, tool.project);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        return;
+    }
+    setBusy(true);
+    setStatus(QStringLiteral("Checking the key…"));
+    m_cutStage = CutStage::Key;
+    startCutProcess(launch);
 }
 
 void Backend::setIntent(const QString &intent) {
@@ -922,6 +1030,42 @@ QString findTool(const QString &name) {
     const QString local = QDir::home().filePath(QStringLiteral(".local/bin/") + name);
     return QFileInfo::exists(local) ? local : QString();
 }
+
+// The cli folder of a source checkout, for running botcut-cli through uv.
+// BOTCUT_CLI_PROJECT names it. Otherwise it is looked for beside the binary,
+// then in the checkout this binary was built from.
+QString cliProjectDir() {
+    QStringList places;
+    const QString named = qEnvironmentVariable("BOTCUT_CLI_PROJECT");
+    if (!named.isEmpty())
+        places << named;
+    const QDir app(QCoreApplication::applicationDirPath());
+    places << app.filePath(QStringLiteral("../cli")) << app.filePath(QStringLiteral("../../cli"));
+#ifdef BOTCUT_SOURCE_DIR
+    places << QDir(QStringLiteral(BOTCUT_SOURCE_DIR)).filePath(QStringLiteral("cli"));
+#endif
+    for (const QString &place : places) {
+        if (QFileInfo::exists(QDir(place).filePath(QStringLiteral("pyproject.toml"))))
+            return QDir(place).absolutePath();
+    }
+    return {};
+}
+}
+
+Backend::CliTool Backend::cliTool() const {
+    if (!m_launchProgram.isEmpty())
+        return {m_launchProgram, QString(), QString()};
+    const QString named = qEnvironmentVariable("BOTCUT_CLI");
+    if (!named.isEmpty())
+        return {named, QString(), QString()};
+    const QString cli = findTool(QStringLiteral("botcut-cli"));
+    if (!cli.isEmpty())
+        return {cli, QString(), QString()};
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = cliProjectDir();
+    if (uv.isEmpty() || project.isEmpty())
+        return {};
+    return {QString(), uv, project};
 }
 
 void Backend::openCutListDialog() {
@@ -1237,15 +1381,11 @@ void Backend::startCut() {
         setStatus(QStringLiteral("Set an xAI key for spoken cuts."));
         return;
     }
-    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
-    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CliTool tool = cliTool();
     const QString out = QDir::temp().filePath(
         QStringLiteral("botcut-cut-%1").arg(QDateTime::currentMSecsSinceEpoch()));
     const bool decide = m_cutMode == QLatin1String("speech");
-    const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, cli, projectOk ? uv : QString(),
-                                          projectOk ? project : QString(), intentForCut(), decide,
+    const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, tool.cli, tool.uv, tool.project, intentForCut(), decide,
                                           m_sceneTransition, maxPause(), brollFiles(), m_brollMix);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
@@ -1268,14 +1408,22 @@ void Backend::startCut() {
 void Backend::restoreSelect(int id) {
     if (m_busy)
         return;
+    dismissError();
     for (int i = 0; i < m_selects.size(); ++i) {
         QVariantMap row = m_selects.at(i).toMap();
         if (row.value(QStringLiteral("id")).toInt() != id || row.value(QStringLiteral("keep")).toBool())
             continue;
+        const QVariantMap previousRow = row;
         row.insert(QStringLiteral("keep"), true);
         row.insert(QStringLiteral("reason"), QStringLiteral("restored"));
         m_selects[i] = row;
         emit selectsChanged();
+        // The file follows the list, as it does for a drop.
+        if (!storeCovers(true)) {
+            m_selects[i] = previousRow;
+            emit selectsChanged();
+            setStatus(QStringLiteral("Could not save the line list"));
+        }
         return;
     }
 }
@@ -1283,6 +1431,7 @@ void Backend::restoreSelect(int id) {
 void Backend::dropSelect(int id) {
     if (m_busy)
         return;
+    dismissError();
     for (int i = 0; i < m_selects.size(); ++i) {
         QVariantMap row = m_selects.at(i).toMap();
         if (row.value(QStringLiteral("id")).toInt() != id || !row.value(QStringLiteral("keep")).toBool())
@@ -1929,12 +2078,8 @@ void Backend::startBesideCut(CutStage stage, const QString &running,
     const QString cuts = cutsBesideMovie();
     if (cuts.isEmpty())
         return;
-    const QString cli = findTool(QStringLiteral("botcut-cli"));
-    const QString uv = findTool(QStringLiteral("uv"));
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    const CutLaunch launch = make(cuts, cli, projectOk ? uv : QString(),
-                                  projectOk ? project : QString());
+    const CliTool tool = cliTool();
+    const CutLaunch launch = make(cuts, tool.cli, tool.uv, tool.project);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -2021,10 +2166,7 @@ bool Backend::sendRevise(const QString &note) {
         setStatus(QStringLiteral("Could not save the line list"));
         return false;
     }
-    const QString cli = findTool(QStringLiteral("botcut-cli"));
-    const QString uv = findTool(QStringLiteral("uv"));
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CliTool tool = cliTool();
     // A new note replaces any proposal still waiting.
     const QString stale = proposalFile();
     if (!stale.isEmpty() && QFileInfo::exists(stale))
@@ -2032,8 +2174,7 @@ bool Backend::sendRevise(const QString &note) {
     m_proposalPending = false;
     m_pendingChange.clear();
     const QString history = writeChatHistory() ? chatHistoryFile() : QString();
-    const CutLaunch launch = cutReviseLaunch(cuts, trimmed, cli, projectOk ? uv : QString(),
-                                             projectOk ? project : QString(), m_pace, m_sceneTransition,
+    const CutLaunch launch = cutReviseLaunch(cuts, trimmed, tool.cli, tool.uv, tool.project, m_pace, m_sceneTransition,
                                              true, history);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
@@ -2063,12 +2204,8 @@ bool Backend::applyProposal() {
         setStatus(QStringLiteral("Could not save the line list"));
         return false;
     }
-    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
-    const QString uv = findTool(QStringLiteral("uv"));
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    const CutLaunch launch = cutApplyLaunch(cuts, cli, projectOk ? uv : QString(),
-                                            projectOk ? project : QString());
+    const CliTool tool = cliTool();
+    const CutLaunch launch = cutApplyLaunch(cuts, tool.cli, tool.uv, tool.project);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return false;
@@ -2142,12 +2279,8 @@ bool Backend::makeCard(const QString &place, const QString &sentence) {
     }
     const QString dest = QDir(dir).filePath(QStringLiteral("botcut-card-%1-%2.mp4")
                                                 .arg(QUuid::createUuid().toString(QUuid::WithoutBraces), place));
-    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
-    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    const CutLaunch launch = cutCardLaunch(dest, trimmed, cli, projectOk ? uv : QString(),
-                                           projectOk ? project : QString());
+    const CliTool tool = cliTool();
+    const CutLaunch launch = cutCardLaunch(dest, trimmed, tool.cli, tool.uv, tool.project);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return false;
@@ -2179,13 +2312,8 @@ void Backend::renderSelects() {
         setStatus(QStringLiteral("Could not save the line list"));
         return;
     }
-    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
-    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = m_launchProgram.isEmpty()
-                           && QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    const CutLaunch launch = cutRenderLaunch(m_cutOut, cli, projectOk ? uv : QString(),
-                                             projectOk ? project : QString(), m_sceneTransition,
+    const CliTool tool = cliTool();
+    const CutLaunch launch = cutRenderLaunch(m_cutOut, tool.cli, tool.uv, tool.project, m_sceneTransition,
                                              m_brollMix);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
@@ -2210,13 +2338,8 @@ void Backend::exportPlan() {
         return;
     }
     const QString outDir = QFileInfo(cuts).absolutePath();
-    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
-    const QString uv = m_launchProgram.isEmpty() ? findTool(QStringLiteral("uv")) : QString();
-    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
-    const bool projectOk = m_launchProgram.isEmpty()
-                           && QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
-    const CutLaunch launch = cutRenderLaunch(outDir, cli, projectOk ? uv : QString(),
-                                             projectOk ? project : QString(), m_sceneTransition,
+    const CliTool tool = cliTool();
+    const CutLaunch launch = cutRenderLaunch(outDir, tool.cli, tool.uv, tool.project, m_sceneTransition,
                                              m_brollMix);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
@@ -2233,6 +2356,7 @@ void Backend::startCutProcess(const CutLaunch &launch) {
     if (m_cutProcess == nullptr) {
         m_cutProcess = new QProcess(this);
         m_cutProcess->setProcessChannelMode(QProcess::MergedChannels);
+        ownProcessGroup(m_cutProcess);
         connect(m_cutProcess, &QProcess::readyRead, this, &Backend::readCutOutput);
         connect(m_cutProcess, &QProcess::finished, this, &Backend::cutProcessFinished);
         connect(m_cutProcess, &QProcess::started, this, [this] {
@@ -2312,6 +2436,7 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
     if (status != QProcess::NormalExit || code != 0) {
         if (m_cutStage == CutStage::Propose)
             dropLastYouTurn();
+        const bool keyCheck = m_cutStage == CutStage::Key;
         m_cutStage = CutStage::Idle;
         m_reviseNote.clear();
         m_reviseStamp.clear();
@@ -2319,7 +2444,20 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         m_cardPlace.clear();
         setBusy(false);
         const QString tail = lastLine();
-        setStatus(tail.isEmpty() ? QStringLiteral("Cut failed") : tail);
+        // A key xAI refuses is not kept. One it could not be asked about is.
+        if (keyCheck && !m_cancelled && tail == QLatin1String("xAI did not accept that key.")
+            && !m_apiKey.isEmpty()) {
+            if (m_keys)
+                m_keys->forget();
+            m_apiKey.clear();
+            emit apiKeyChanged();
+        }
+        // Stop is not a failure. It says nothing.
+        if (m_cancelled)
+            setStatus(QString());
+        else
+            setStatus(tail.isEmpty() ? QStringLiteral("Cut failed") : tail);
+        m_cancelled = false;
         return;
     }
     if (m_cutStage == CutStage::Propose) {
@@ -2502,10 +2640,18 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         const bool captions = m_cutStage == CutStage::Captions;
         m_cutStage = CutStage::Idle;
         setBusy(false);
-        const QString side = QDir(QFileInfo(m_path).absolutePath())
-                                 .filePath(captions ? QStringLiteral("rough_cut.srt")
+        // The tool writes beside cuts.json. The person wants it beside the movie they saved.
+        const QString cuts = cutsBesideMovie();
+        const QDir made(cuts.isEmpty() ? QFileInfo(m_path).absolutePath()
+                                       : QFileInfo(cuts).absolutePath());
+        const QString side = made.filePath(captions ? QStringLiteral("rough_cut.srt")
                                                     : QStringLiteral("short.mp4"));
         if (QFileInfo::exists(side) && QFileInfo(side).isFile()) {
+            const QString copyError = besideMovieCopyError(side, m_path, captions);
+            if (!copyError.isEmpty()) {
+                setStatus(copyError);
+                return;
+            }
             setStatus(captions ? QStringLiteral("Wrote the captions")
                                : QStringLiteral("Wrote the short"));
             return;
@@ -2804,6 +2950,7 @@ void Backend::copyCut(const QUrl &dst) {
     setBusy(true);
     setStatus(QStringLiteral("Saving…"));
     auto *proc = new QProcess(this);
+    watchSideProcess(proc);
     auto completed = std::make_shared<bool>(false);
     connect(proc, &QProcess::finished, this, [this, proc, outPath, completed](int code, QProcess::ExitStatus exitStatus) {
         if (*completed)
@@ -2812,9 +2959,13 @@ void Backend::copyCut(const QUrl &dst) {
         const QString err = QString::fromUtf8(proc->readAllStandardError()).trimmed();
         proc->deleteLater();
         if (exitStatus != QProcess::NormalExit || code != 0) {
+            const bool cancelled = m_cancelled;
             setBusy(false);
             setStatus(QString());
-            emit exportFailed(err.isEmpty() ? QStringLiteral("Could not save the movie.") : err);
+            if (cancelled)
+                QFile::remove(outPath);
+            else
+                emit exportFailed(err.isEmpty() ? QStringLiteral("Could not save the movie.") : err);
             return;
         }
         finishSavedCut(outPath);
@@ -2911,6 +3062,7 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
                                               m_info.width, m_info.height, m_info.rotation, m_info.frameRate);
 
     auto *proc = new QProcess(this);
+    watchSideProcess(proc);
     auto completed = std::make_shared<bool>(false);
 
     // ffmpeg -progress writes key=value blocks to stdout as it encodes;
@@ -2975,8 +3127,10 @@ void Backend::exportClips(const QUrl &dst, const edit::Clips &clips, int scaleHe
 }
 
 void Backend::failExport(const QString &tmpPath, const QString &message) {
+    const bool cancelled = m_cancelled;
     setBusy(false);
     setStatus(QString());
     QFile::remove(tmpPath);
-    emit exportFailed(message);
+    if (!cancelled)
+        emit exportFailed(message);
 }

@@ -60,6 +60,8 @@ uv run botcut-cli revise out/cuts.json --apply
 uv run botcut-cli card --out /path/botcut-card-open.mp4 -- "The movie in one sentence"
 ```
 
+`key` asks xAI for its model list with `XAI_API_KEY` and exits 0 when the key is accepted. A refused key stops with "xAI did not accept that key." A network failure stops with "Could not reach xAI to check the key." `BOTCUT_FAKE=1` accepts any key and does not call the network.
+
 `card` writes a 3 second 16:9 mp4. The destination file name starts with `botcut-card-` and ends in `.mp4`, and the directory is the app card directory. The sentence is the argument after `--`. `BOTCUT_FAKE=1` writes a tiny movie and does not call the network. A spoken cut keeps that file as one line with reason `card` and does not transcribe it.
 
 ## Captions

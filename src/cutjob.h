@@ -37,6 +37,8 @@ CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, c
 
 CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
                          const QString &cliProject);
+// Asks xAI whether it accepts the key in the environment. No files.
+CutLaunch cutKeyLaunch(const QString &botcutCli, const QString &uv, const QString &cliProject);
 
 // Pace is a name. --max-pause is applied by the next Cut or Render, not here.
 // With propose, the CLI writes proposal.json beside cuts.json and leaves the

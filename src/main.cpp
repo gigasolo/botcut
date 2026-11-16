@@ -51,7 +51,9 @@ int main(int argc, char *argv[]) {
     const QStringList args = app.arguments();
     if (args.size() > 1) {
         const QString arg = args.at(1);
-        if (arg.endsWith(".json", Qt::CaseInsensitive))
+        if (arg.endsWith(".botcut.json", Qt::CaseInsensitive))
+            backend.reopenList(arg);
+        else if (arg.endsWith(".json", Qt::CaseInsensitive))
             backend.loadKeepList(QUrl::fromLocalFile(arg));
         else
             backend.load(QUrl::fromLocalFile(arg));

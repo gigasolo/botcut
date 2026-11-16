@@ -13,6 +13,14 @@ Item {
     function focusKey() {
         keyField.forceActiveFocus()
     }
+    // An empty field saves nothing. Forgetting a key is its own button.
+    function saveTypedKey() {
+        if (keyField.text.trim() === "")
+            return
+        backend.setApiKey(keyField.text)
+        keyField.text = ""
+        backend.checkApiKey()
+    }
 
     Material.theme: Material.Dark
     Material.accent: theme.accent
@@ -80,11 +88,19 @@ Item {
             }
             Label {
                 width: parent.width
-                text: backend.apiKeySet
-                      ? qsTr("Saved on this computer.")
-                      : qsTr("Not set. Spoken cuts can't run without it.")
-                color: backend.apiKeySet ? theme.foreground : theme.accent
-                opacity: backend.apiKeySet ? 0.62 : 1
+                objectName: "keyNote"
+                // What xAI said about the key comes before where it is kept.
+                readonly property bool problem: backend.job !== "key"
+                                                && (backend.lastError !== "" || !backend.apiKeySet)
+                text: backend.job === "key"
+                      ? qsTr("Checking the key with xAI…")
+                      : backend.lastError !== ""
+                        ? backend.lastError
+                        : backend.apiKeySet
+                          ? qsTr("Saved on this computer.")
+                          : qsTr("Not set. Spoken cuts can't run without it.")
+                color: problem ? theme.accent : theme.foreground
+                opacity: problem ? 1 : 0.62
                 font.pixelSize: 13
                 wrapMode: Text.WordWrap
             }
@@ -97,6 +113,7 @@ Item {
                 border.color: theme.accent
                 TextInput {
                     id: keyField
+                    objectName: "keyField"
                     anchors.fill: parent
                     anchors.leftMargin: 12
                     anchors.rightMargin: 12
@@ -133,12 +150,20 @@ Item {
                 }
                 Item { Layout.fillWidth: true }
                 ActionButton {
-                    text: qsTr("Save key")
+                    objectName: "forgetKeyButton"
+                    text: qsTr("Forget key")
+                    visible: backend.apiKeySet
                     enabled: !backend.busy
                     onClicked: {
-                        backend.setApiKey(keyField.text)
+                        backend.setApiKey("")
                         keyField.text = ""
                     }
+                }
+                ActionButton {
+                    objectName: "saveKeyButton"
+                    text: qsTr("Save key")
+                    enabled: !backend.busy && keyField.text.trim() !== ""
+                    onClicked: root.saveTypedKey()
                 }
             }
             CheckBox {
@@ -165,7 +190,11 @@ Item {
                 ActionButton {
                     text: qsTr("Done")
                     filled: true
-                    onClicked: host.closeSettings()
+                    onClicked: {
+                        // A key left in the field is one the person meant to keep.
+                        root.saveTypedKey()
+                        host.closeSettings()
+                    }
                 }
             }
         }

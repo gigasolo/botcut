@@ -2,6 +2,16 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-11-15
+
+- A job that fails now says why and keeps saying it. The reason stays in the action bar, in the accent color, until you try again or move on. Before, a bad key, no network, or a failed cut fell back to the usual sentence with no word of what happened.
+- Stop sits beside the progress button and ends the running job, along with any ffmpeg it started. It is not a failure and says nothing.
+- Saving an xAI key asks xAI whether it accepts it. A refused key is forgotten and Settings says so. With no network the key is kept. Save key does nothing with an empty field, Forget key is its own button, and Done keeps a key you typed but did not save.
+- Captions and the vertical short land beside the movie you saved, as `movie.srt` and `movie_short.mp4`. They were written to the temporary cut folder and reported as failed.
+- Keeping a dropped line saves the list at once, as dropping one does.
+- `botcut some.botcut.json` opens that list.
+- The window finds `botcut-cli` through `BOTCUT_CLI`, then `PATH`, then `uv` with the `cli` folder of the checkout it was built from. The path `~/code/botcut/cli` is no longer written into the app.
+
 ## 2026-11-06
 
 - A full-range B-roll clip, such as a HoverAir file, renders beside the DJI shots. Each branch brings a full-range source to limited range before the join, where VA-API frames could not be converted. A failed render now names ffmpeg's actual complaint instead of its last line.

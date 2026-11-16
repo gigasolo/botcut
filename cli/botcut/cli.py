@@ -430,6 +430,7 @@ def _write_cut(
     if not segs:
         raise SystemExit("No segments to render")
     dst = os.path.join(out, "rough_cut.mp4")
+    _level_clips(os.path.join(out, "work"), clips)
     render_with_progress(
         segs,
         clips,
@@ -577,6 +578,31 @@ def _drop_stale_caches(work: str, index: int, clip: dict, stt_label: str) -> Non
             if name.startswith(prefix) and name != os.path.basename(stamp_path):
                 os.remove(os.path.join(work, name))
     Path(stamp_path).write_text(json.dumps(stamp) + "\n")
+
+
+def _level_clips(work: str, clips: list[dict]) -> None:
+    """Note how loud each spoken shot is, once, so the render can match them to each other."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from botcut.media import loudness
+
+    os.makedirs(work, exist_ok=True)
+
+    def heard(numbered: tuple[int, dict]) -> None:
+        index, clip = numbered
+        if is_card(clip["path"]) or is_broll(clip) or not clip.get("audio", True):
+            return
+        cache = os.path.join(work, f"{index}-{Path(clip['path']).stem}.loudness.json")
+        try:
+            value = json.loads(Path(cache).read_text())["i"]
+        except (OSError, ValueError, KeyError, TypeError):
+            value = loudness(clip["path"])
+            Path(cache).write_text(json.dumps({"i": value}) + "\n")
+        if value is not None:
+            clip["loudness"] = value
+
+    with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
+        list(pool.map(heard, enumerate(clips)))
 
 
 def _beats_for_clip(work: str, index: int, stem: str, clip: dict) -> list:

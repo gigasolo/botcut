@@ -409,3 +409,189 @@ def test_ffmpeg_error_detail_names_the_cause_not_the_thread_exits():
     assert ffmpeg_error_detail(log).startswith("Impossible to convert between the formats")
     assert ffmpeg_error_detail("") == "ffmpeg failed"
     assert ffmpeg_error_detail("[in#1] stream 0, timescale not set\nx\n") == "x"
+
+
+def _graph(args):
+    return args[args.index("-filter_complex") + 1]
+
+
+def test_clean_sound_runs_over_the_joined_cut_and_is_what_gets_written():
+    from botcut.media import CLEAN_FILTER
+
+    clips = [{"path": "/tmp/a.mp4", "width": 640, "height": 360, "fps": 30.0}]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 1.5, "reason": "a"},
+        {"clip": 0, "start": 3.0, "end": 4.5, "reason": "b"},
+    ]
+    plain = render_args(segs, clips, "/tmp/out.mp4", polish=True)
+    assert "loudnorm" not in _graph(plain) and "afftdn" not in _graph(plain)
+    assert "[a]" in plain
+
+    measured = {"i": -27.3, "tp": -9.1, "lra": 4.2, "thresh": -37.8, "offset": 0.4}
+    args = render_args(segs, clips, "/tmp/out.mp4", polish=True, clean_sound=True, measured=measured)
+    last = _graph(args).split(";")[-1]
+    # One chain after the join, so the noise floor and the gain do not change at every cut.
+    assert last.startswith(f"[a]{CLEAN_FILTER},loudnorm=I=-16.0:TP=-1.5:LRA=11.0")
+    assert "measured_I=-27.3" in last and "measured_thresh=-37.8" in last and "linear=true" in last
+    assert last.endswith("aresample=osr=48000[sound]")
+    assert "[sound]" in args and "[a]" not in args
+
+    # With nothing measured, the sound is cleaned and left at its own level.
+    unmeasured = _graph(render_args(segs, clips, "/tmp/out.mp4", clean_sound=True)).split(";")[-1]
+    assert unmeasured == f"[a]{CLEAN_FILTER}[sound]"
+
+
+def test_the_measuring_pass_has_no_picture_and_no_file():
+    clips = [{"path": "/tmp/a.mp4", "width": 640, "height": 360, "fps": 30.0}]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 1.5, "reason": "a"},
+        {"clip": 0, "start": 3.0, "end": 4.5, "reason": "b"},
+    ]
+    args = render_args(
+        segs, clips, "-", encoder="vaapi", device="/dev/dri/renderD128", polish=True, measure=True
+    )
+    graph = _graph(args)
+    assert "[0:v]" not in graph and "[v]" not in graph
+    assert "concat=n=2:v=0:a=1[a]" in graph
+    assert "print_format=json" in graph
+    assert args[-3:] == ["-f", "null", "-"]
+    assert "-hwaccel" not in args and "-init_hw_device" not in args and "-c:v" not in args
+
+
+def test_parse_loudness_reads_the_last_report_and_refuses_silence():
+    from botcut.media import parse_loudness
+
+    report = (
+        "[Parsed_loudnorm_2 @ 0x1] \n"
+        '{\n\t"input_i" : "-27.31",\n\t"input_tp" : "-9.10",\n\t"input_lra" : "4.20",\n'
+        '\t"input_thresh" : "-37.80",\n\t"output_i" : "-16.1",\n\t"target_offset" : "0.40"\n}\n'
+    )
+    assert parse_loudness(report) == {"i": -27.31, "tp": -9.1, "lra": 4.2, "thresh": -37.8, "offset": 0.4}
+    # A card, or a shot with the mic off, has no level to bring up.
+    assert parse_loudness(report.replace("-27.31", "-inf")) is None
+    assert parse_loudness(report.replace("-27.31", "-70.00")) is None
+    assert parse_loudness("ffmpeg said nothing useful") is None
+
+
+def _loudness_of(path) -> float:
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-af", "ebur128", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr[-400:]
+    summary = proc.stderr[proc.stderr.rindex("Integrated loudness:") :]
+    return float(summary.split("I:")[1].split("LUFS")[0])
+
+
+def test_a_quiet_recording_and_a_hot_one_both_leave_at_the_same_level(tmp_path, capsys):
+    from botcut.media import render_with_progress
+
+    def shot(path, volume):
+        # Pink noise is closer to a voice in a room than a pure tone is.
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=30:d=6",
+                "-f", "lavfi", "-i", f"anoisesrc=color=pink:sample_rate=48000:amplitude={volume}:duration=6",
+                "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr[-400:]
+
+    results = {}
+    for name, volume in (("quiet", 0.02), ("hot", 0.8)):
+        src = tmp_path / f"{name}.mp4"
+        shot(src, volume)
+        clips = [{"path": str(src), "width": 64, "height": 64, "fps": 30.0, "duration": 6.0}]
+        segs = [
+            {"clip": 0, "start": 0.2, "end": 2.6, "reason": "a"},
+            {"clip": 0, "start": 3.0, "end": 5.6, "reason": "b"},
+        ]
+        out = tmp_path / f"{name}-out.mp4"
+        render_with_progress(segs, clips, str(out), "Rendering", "Render failed", polish=True)
+        results[name] = (_loudness_of(src), _loudness_of(out))
+    # They went in more than 20 LU apart and come out within 1 LU of the target.
+    assert results["hot"][0] - results["quiet"][0] > 20
+    for before, after in results.values():
+        assert abs(after - (-16.0)) <= 1.0, results
+    assert "Rendering 0%" in capsys.readouterr().out
+
+
+def test_each_shot_is_matched_before_the_join_and_the_bed_is_left_alone():
+    from botcut.media import level_gain
+
+    assert level_gain({"loudness": -32.3}) == 16.3
+    assert level_gain({"loudness": -10.0}) == -6.0
+    # A whisper is not lifted without limit, and a shot with no sound is left alone.
+    assert level_gain({"loudness": -50.0}) == 20.0
+    assert level_gain({"loudness": -75.0}) == 0.0
+    assert level_gain({}) == 0.0
+
+    clips = [
+        {"path": "/tmp/quiet.mp4", "width": 640, "height": 360, "fps": 30.0, "duration": 9.0, "loudness": -32.3},
+        {"path": "/tmp/room.mp4", "width": 640, "height": 360, "fps": 30.0, "duration": 9.0, "role": "broll"},
+    ]
+    segs = [{"clip": 0, "start": 0.0, "end": 8.0, "reason": "a"}]
+    lines = [
+        {"id": 0, "clip": 0, "start": 0.0, "end": 2.0, "keep": True, "text": "a"},
+        {"id": 1, "clip": 0, "start": 2.0, "end": 6.0, "keep": True, "text": "b"},
+        {"id": 2, "clip": 0, "start": 6.0, "end": 8.0, "keep": True, "text": "c"},
+    ]
+    covers = [{"clip": 1, "line": 1, "through": 1, "start": 0.0, "end": 4.0, "reason": "shows it"}]
+    graph = _graph(render_args(segs, clips, "/tmp/o.mp4", clean_sound=True, covers=covers, lines=lines))
+    # The voice gets the gain, alone and under the B-roll. The B-roll's own sound stays at its bed level.
+    assert "[0:a]volume=16.3dB,aresample" in graph
+    assert "volume=16.3dB[g1]" in graph and "[g1][b1]amix" in graph
+    assert graph.count("volume=0.25") == 1
+    # Without the clean pass nothing is touched.
+    assert "volume=16.3dB" not in _graph(render_args(segs, clips, "/tmp/o.mp4", covers=covers, lines=lines))
+
+
+def test_a_quiet_shot_and_a_loud_one_sound_alike_in_the_movie(tmp_path):
+    from botcut import cli
+    from botcut.media import render_with_progress
+
+    clips = []
+    # About 15 LU apart, like a lapel mic beside a camera mic. Both are inside what a gain can match.
+    for name, volume in (("quiet", 0.09), ("hot", 0.5)):
+        src = tmp_path / f"{name}.mp4"
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=gray:s=64x64:r=30:d=6",
+                "-f", "lavfi", "-i", f"anoisesrc=color=pink:sample_rate=48000:amplitude={volume}:duration=6",
+                "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr[-400:]
+        clips.append({"path": str(src), "width": 64, "height": 64, "fps": 30.0, "duration": 6.0})
+    cli._level_clips(str(tmp_path / "work"), clips)
+    assert 12 < clips[1]["loudness"] - clips[0]["loudness"] < 19
+    # Measured once: the second call reads what the first wrote.
+    assert (tmp_path / "work" / "0-quiet.loudness.json").exists()
+
+    segs = [
+        {"clip": 0, "start": 0.5, "end": 5.5, "reason": "a"},
+        {"clip": 1, "start": 0.5, "end": 5.5, "reason": "b"},
+    ]
+    out = tmp_path / "out.mp4"
+    render_with_progress(segs, clips, str(out), "Rendering", "Render failed", scene_transition="off")
+
+    def part(start):
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostats", "-ss", str(start), "-t", "4", "-i", str(out),
+             "-af", "ebur128", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+        )
+        summary = proc.stderr[proc.stderr.rindex("Integrated loudness:") :]
+        return float(summary.split("I:")[1].split("LUFS")[0])
+
+    first, second = part(0.5), part(5.5)
+    assert abs(first - second) <= 2.0, (first, second)
+    assert abs(_loudness_of(out) - (-16.0)) <= 1.5

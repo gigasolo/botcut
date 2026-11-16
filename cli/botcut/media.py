@@ -210,6 +210,7 @@ def render_with_progress(
     covers=None,
     lines=None,
     broll_sound: str = "mix",
+    clean_sound: bool = True,
 ) -> None:
     """Encode segments and print '<label> N%' as ffmpeg advances.
 
@@ -218,6 +219,20 @@ def render_with_progress(
     """
     kept_s = sum(float(seg["end"]) - float(seg["start"]) for seg in segments)
     encoder, device = resolve_encoder()
+    print(f"{label} 0%", flush=True)
+    # The sound is listened to once before the encode, so the level is set by
+    # one steady gain and not by a compressor riding the voice.
+    measured = None
+    if clean_sound:
+        measured = measure_loudness(
+            segments,
+            clips,
+            polish=polish,
+            scene_transition=scene_transition,
+            covers=covers,
+            lines=lines,
+            broll_sound=broll_sound,
+        )
     # args[0] is the leading -y. The progress flags replace it so one ffmpeg
     # process still reports Rendering N% / Opening N%.
     args = render_args(
@@ -231,6 +246,8 @@ def render_with_progress(
         covers=covers,
         lines=lines,
         broll_sound=broll_sound,
+        clean_sound=clean_sound,
+        measured=measured,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -242,7 +259,6 @@ def render_with_progress(
 
     thread = threading.Thread(target=drain, daemon=True)
     thread.start()
-    print(f"{label} 0%", flush=True)
     last = 0
     try:
         if proc.stdout is None:
@@ -319,6 +335,129 @@ def vaapi_device() -> str | None:
 
 # Picture bookends, and the dip on each side of a file change. Audio at a
 # file change is longer than the click-guard used inside one file.
+# Every movie leaves at the same level, the one streaming speech is mixed to.
+LOUDNESS_I = -16.0
+LOUDNESS_TP = -1.5
+LOUDNESS_LRA = 11.0
+# Rumble below the voice goes, and steady hiss comes down a little. This is
+# meant to be heard as a quieter room, not as processing.
+CLEAN_FILTER = "highpass=f=70,afftdn=nr=8:nf=-50:tn=1"
+# Quieter than this is silence or a card. There is no level to bring up.
+QUIETEST_SOUND = -60.0
+
+
+# A shot is brought toward the target by this much at most. Past that, the
+# gain would mostly be lifting the room.
+LEVEL_UP_MAX = 20.0
+LEVEL_DOWN_MAX = 12.0
+
+
+def loudness(path: str) -> float | None:
+    """How loud a file's sound is over its whole length, in LUFS. None when it has none to measure."""
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", path, "-vn", "-af", "ebur128", "-f", "null", "-"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return parse_integrated(proc.stderr or "")
+
+
+def parse_integrated(stderr: str) -> float | None:
+    at = stderr.rfind("Integrated loudness:")
+    if at < 0:
+        return None
+    found = re.search(r"I:\s*(-?\d+(?:\.\d+)?) LUFS", stderr[at:])
+    if not found:
+        return None
+    value = float(found.group(1))
+    return value if value >= QUIETEST_SOUND else None
+
+
+def level_gain(clip: dict) -> float:
+    """Decibels that bring this shot's voice to the level every shot is matched to."""
+    try:
+        heard = float(clip.get("loudness"))
+    except (TypeError, ValueError):
+        return 0.0
+    if heard != heard or heard < QUIETEST_SOUND:
+        return 0.0
+    return round(max(-LEVEL_DOWN_MAX, min(LEVEL_UP_MAX, LOUDNESS_I - heard)), 1)
+
+
+def parse_loudness(stderr: str) -> dict | None:
+    """The numbers loudnorm prints after a measuring pass, or None when there is nothing to level."""
+    end = stderr.rfind("}")
+    start = stderr.rfind("{", 0, end)
+    if start < 0 or end < 0:
+        return None
+    try:
+        raw = json.loads(stderr[start : end + 1])
+        found = {
+            "i": float(raw["input_i"]),
+            "tp": float(raw["input_tp"]),
+            "lra": float(raw["input_lra"]),
+            "thresh": float(raw["input_thresh"]),
+            "offset": float(raw["target_offset"]),
+        }
+    except (ValueError, KeyError, TypeError):
+        return None
+    if any(value != value or value in (float("inf"), float("-inf")) for value in found.values()):
+        return None
+    if found["i"] < QUIETEST_SOUND:
+        return None
+    return found
+
+
+def measure_loudness(
+    segments: list[dict],
+    clips: list[dict],
+    polish: bool = False,
+    scene_transition: str = "dip",
+    covers=None,
+    lines=None,
+    broll_sound: str = "mix",
+) -> dict | None:
+    """Play the cut's sound through once, with no picture, and measure it.
+
+    A pass that fails is not a reason to lose the movie. It renders cleaned
+    and at its own level.
+    """
+    args = render_args(
+        segments,
+        clips,
+        "-",
+        polish=polish,
+        scene_transition=scene_transition,
+        covers=covers,
+        lines=lines,
+        broll_sound=broll_sound,
+        clean_sound=True,
+        measure=True,
+    )
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", *args], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return None
+    return parse_loudness(proc.stderr or "")
+
+
+def _sound_chain(measured: dict | None, measure: bool) -> str:
+    target = f"loudnorm=I={LOUDNESS_I}:TP={LOUDNESS_TP}:LRA={LOUDNESS_LRA}"
+    if measure:
+        return f"{CLEAN_FILTER},{target}:print_format=json"
+    if measured is None:
+        return CLEAN_FILTER
+    return (
+        f"{CLEAN_FILTER},{target}"
+        f":measured_I={measured['i']}:measured_TP={measured['tp']}:measured_LRA={measured['lra']}"
+        f":measured_thresh={measured['thresh']}:offset={measured['offset']}:linear=true"
+        ",aresample=osr=48000"
+    )
+
+
 OPEN_FADE = 0.50
 CLOSE_FADE = 0.80
 DIP_FADE = 0.18
@@ -399,16 +538,24 @@ def _audio_filter(
     fade_in: float,
     fade_out: float,
     mix_index: int | None = None,
+    gain_db: float = 0.0,
 ) -> str:
+    # The gain is on the voice alone. A B-roll shot's own sound stays a quiet bed under it.
+    level = f"volume={gain_db:.1f}dB," if abs(gain_db) >= 0.1 else ""
     if mix_index is not None:
         # duration=first follows the voice, the first input, so a short clip does not end the window.
+        voice = f"[{mix_index}:a]"
+        lead = ""
+        if level:
+            lead = f"[{mix_index}:a]{level[:-1]}[g{out_index}];"
+            voice = f"[g{out_index}]"
         chain = (
-            f"[{in_index}:a]volume=0.25[b{out_index}];"
-            f"[{mix_index}:a][b{out_index}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+            f"{lead}[{in_index}:a]volume=0.25[b{out_index}];"
+            f"{voice}[b{out_index}]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
             f"aresample=osr=48000"
         )
     else:
-        chain = f"[{in_index}:a]aresample=osr=48000"
+        chain = f"[{in_index}:a]{level}aresample=osr=48000"
     if polish and fade_in > 0:
         chain += f",afade=t=in:st=0:d={fade_in:.3f}"
     if polish and fade_out > 0:
@@ -473,7 +620,16 @@ def render_args(
     covers=None,
     lines=None,
     broll_sound: str = "mix",
+    clean_sound: bool = False,
+    measured: dict | None = None,
+    measure: bool = False,
 ) -> list[str]:
+    """ffmpeg arguments for the cut.
+
+    `clean_sound` cleans the joined sound and, with `measured`, brings it to
+    the target level. `measure` builds the sound alone, with no picture, and
+    has loudnorm print what it hears.
+    """
     if not segments:
         raise SystemExit("No segments to render")
     if encoder not in ("x264", "vaapi"):
@@ -494,6 +650,9 @@ def render_args(
     if width <= 0 or height <= 0 or fps <= 0:
         raise SystemExit(f"Clip has no video to render: {ref['path']}")
     args = ["-y"]
+    if measure:
+        # Listening needs no picture, so nothing here touches the GPU or the encoder.
+        encoder = "x264"
     if encoder == "vaapi":
         args += ["-init_hw_device", f"vaapi=va:{device}", "-filter_hw_device", "va"]
     fps_s = _fps(fps)
@@ -598,26 +757,43 @@ def render_args(
                 voice_in = in_i
                 in_i += 1
             picture = _picture_suffix(shown, fade_in, fade_out) if polish else ""
-            filters.append(
-                _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture)
-            )
+            if not measure:
+                filters.append(
+                    _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture)
+                )
+            # Each shot's voice is matched to the others before the join, so a
+            # quiet take is not left quiet beside a loud one.
+            speaker = clips[int(piece["voice"])] if "voice" in piece else video
+            gain = level_gain(speaker) if clean_sound or measure else 0.0
             if voice_in is None:
-                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out))
+                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
             elif broll_sound == "mix" and video.get("audio", True):
-                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in))
+                filters.append(
+                    _audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in, gain_db=gain)
+                )
             else:
                 # Voice only. A silent B-roll file has no [N:a] to mix, so it lands here too.
-                filters.append(_audio_filter(voice_in, out_i, polish, shown, a_in, a_out))
+                filters.append(_audio_filter(voice_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
             out_i += 1
-    concat_in = "".join(f"[v{i}][a{i}]" for i in range(out_i))
-    filters.append(f"{concat_in}concat=n={out_i}:v=1:a=1[v][a]")
+    sound = "[a]"
+    if measure:
+        concat_in = "".join(f"[a{i}]" for i in range(out_i))
+        filters.append(f"{concat_in}concat=n={out_i}:v=0:a=1[a]")
+    else:
+        concat_in = "".join(f"[v{i}][a{i}]" for i in range(out_i))
+        filters.append(f"{concat_in}concat=n={out_i}:v=1:a=1[v][a]")
+    if clean_sound or measure:
+        filters.append(f"[a]{_sound_chain(measured, measure)}[sound]")
+        sound = "[sound]"
+    if measure:
+        return [*args, "-filter_complex", ";".join(filters), "-map", sound, "-f", "null", "-"]
     args += [
         "-filter_complex",
         ";".join(filters),
         "-map",
         "[v]",
         "-map",
-        "[a]",
+        sound,
     ]
     if encoder == "vaapi":
         args += ["-c:v", "h264_vaapi", "-qp", "20"]

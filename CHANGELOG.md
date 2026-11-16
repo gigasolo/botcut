@@ -4,6 +4,7 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 
 ## 2026-11-15
 
+- Every movie comes out with clean, level sound, and there is nothing to set. Each shot's voice is matched to the others before the join, so a quiet take does not sit quiet beside a loud one. Low rumble is removed and steady hiss is brought down a little. The whole movie is then set to -16 LUFS with one steady gain, measured in a quick listening pass before the encode. Three camera clips at -32, -17, and -19 LUFS come out at -17, -16, and -16.
 - One press makes the movie. **Cut** transcribes, chooses the lines, lays the B-roll, renders, and puts the movie in `~/Videos/BotCut`, named after the first shot. It opens on Movie, playing. There is no stop at Lines, no Render press, and no save dialog on the way.
 - Lines and the chat are where you change it afterwards. After a line, the pace, the fade, or a handle changes, the filled button reads **Update movie** on Lines and on Movie, and it renders over the same file. When the movie already has the lines, Lines has no filled button.
 - A cut is kept as a project under `~/.local/share/botcut/projects`, not in `/tmp`. A movie opened from Recents after a restart comes back with its lines, its shots, and its chat history file, and can be changed again. A project whose movie has been deleted is cleaned up after a day.

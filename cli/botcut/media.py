@@ -211,6 +211,7 @@ def render_with_progress(
     lines=None,
     broll_sound: str = "mix",
     clean_sound: bool = True,
+    punch_in: bool = True,
 ) -> None:
     """Encode segments and print '<label> N%' as ffmpeg advances.
 
@@ -248,6 +249,7 @@ def render_with_progress(
         broll_sound=broll_sound,
         clean_sound=clean_sound,
         measured=measured,
+        punch_in=punch_in,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -583,13 +585,16 @@ def _video_filter(
     encoder: str,
     on_gpu: bool,
     picture: str,
+    punch: str = "",
 ) -> str:
     # Limited range, like the cameras. A full-range clip is converted in its
     # own branch, before it meets the others.
     range_opts = ":in_range=pc:out_range=tv" if _full_range(clip) else ""
     if not on_gpu:
+        # A punch-in is a crop around the speaker, scaled back up to the frame.
+        tight = f"{punch}," if punch else ""
         return (
-            f"[{in_index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease{range_opts},"
+            f"[{in_index}:v]{tight}scale={width}:{height}:force_original_aspect_ratio=decrease{range_opts},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps_s}"
             + picture
             + (",format=nv12,hwupload" if encoder == "vaapi" else "")
@@ -623,8 +628,12 @@ def render_args(
     clean_sound: bool = False,
     measured: dict | None = None,
     measure: bool = False,
+    punch_in: bool = False,
 ) -> list[str]:
     """ffmpeg arguments for the cut.
+
+    `punch_in` shows every other piece of a shot a little tighter, around the
+    speaker, so a cut inside the shot reads as a change of framing.
 
     `clean_sound` cleans the joined sound and, with `measured`, brings it to
     the target level. `measure` builds the sound alone, with no picture, and
@@ -669,6 +678,17 @@ def render_args(
                 durations.append(0.0)
         for window in cover_windows(covers, lines or [], segments, durations):
             by_segment.setdefault(int(window["segment"]), []).append(window)
+    tight = [False] * len(segments)
+    if punch_in and not measure:
+        from botcut.frame import punched
+
+        tight = punched(
+            segments,
+            clips,
+            lambda clip: not is_card(str(clip.get("path") or ""))
+            and str(clip.get("role") or "") != "broll"
+            and not _rotated(clip),
+        )
     filters = []
     out_i = 0
     in_i = 0
@@ -737,7 +757,16 @@ def render_args(
                 raw_in = aud_in if j == 0 else 0.0
                 raw_out = aud_out if j == last_piece else 0.0
                 a_in, a_out = _fit_pair(shown, raw_in, raw_out) if polish else (0.0, 0.0)
-            on_gpu = encoder == "vaapi" and not _rotated(video) and _vaapi_decodable(video)
+            # Only the speaker's own picture is punched in. B-roll over the line is left as shot.
+            punch = ""
+            if tight[i] and int(piece["clip"]) == spoken:
+                from botcut.frame import punch_crop
+
+                punch = punch_crop(video)
+            # The crop runs on software frames, so a punched-in piece is decoded there.
+            on_gpu = (
+                encoder == "vaapi" and not punch and not _rotated(video) and _vaapi_decodable(video)
+            )
             if on_gpu:
                 args += [
                     "-hwaccel",
@@ -759,7 +788,9 @@ def render_args(
             picture = _picture_suffix(shown, fade_in, fade_out) if polish else ""
             if not measure:
                 filters.append(
-                    _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture)
+                    _video_filter(
+                        v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture, punch
+                    )
                 )
             # Each shot's voice is matched to the others before the join, so a
             # quiet take is not left quiet beside a loud one.

@@ -4,6 +4,9 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 
 ## 2026-11-15
 
+- A cut inside one shot is shown as a change of framing. Every other piece of the same shot is punched in by 12 percent around the speaker's face, so a jump cut reads as wide, tight, wide. A cut to another shot starts wide. B-roll and title cards are never punched in, and neither is a shot under 1080 lines tall, where the enlargement would look soft.
+- The vertical short is cropped around the speaker, not around the middle of the frame.
+- The model is shown one still of each spoken shot and returns where the face is, as fractions of the picture. It is asked once per shot and remembered in the project. With no answer, the frame holds on the middle, a little above center.
 - BotCut cuts inside a line now, not only whole lines. An "um" or "uh", and words said twice in a row as a stumbled restart, are found from the word timings and offered to the model by number. It says which come out and leaves a repeat that was meant, like "no, no". It never returns a time.
 - A kept line shows its cuts in place: struck through when taken out, underlined when left in. Click one to flip it, then **Update movie**. In the chat, "leave the ums in" or "take out every um" changes them all at once, as a proposal to apply.
 - Captions follow the cuts, so a word that was cut is not in the subtitles.

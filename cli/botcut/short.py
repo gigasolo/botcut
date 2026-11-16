@@ -143,14 +143,21 @@ def short_args(
     srt_name: str = "short.srt",
     encoder: str = "x264",
     device: str | None = None,
+    center: float | None = None,
 ) -> list[str]:
+    """`center` is where the speaker is across the frame, 0 to 1. The crop follows it."""
     if encoder not in ("x264", "vaapi"):
         raise SystemExit(f"Unknown encoder {encoder}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
     filters = []
     if needs_crop(width, height):
-        filters.append("crop=ih*9/16:ih")
+        if center is None:
+            filters.append("crop=ih*9/16:ih")
+        else:
+            from botcut.frame import vertical_left
+
+            filters.append(f"crop=ih*9/16:ih:{vertical_left(width, height, center)}:0")
     filters.append("scale=1080:1920")
     filters.append(subtitles_filter(srt_name))
     video_filter = ",".join(filters)

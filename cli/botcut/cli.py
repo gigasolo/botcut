@@ -43,6 +43,7 @@ from botcut.pick import (
     unknown_warnings,
     utterances,
 )
+from botcut.frame import find_faces, focus
 from botcut.revise import apply_proposal, revise
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
@@ -307,6 +308,7 @@ def run(
     movie = intent.strip() or DEFAULT_INTENT
     if speech:
         _attach_stills(utts, clips, os.path.join(work, "stills"))
+        find_faces(work, clips, lambda clip: not is_card(clip["path"]) and not is_broll(clip))
         print("Choosing takes", flush=True)
         chosen = pick(utts, movie)
     else:
@@ -369,6 +371,9 @@ def _clip_row(index: int, clip: dict) -> dict:
     row = {"index": index, "path": clip["path"], "duration": clip["duration"]}
     if is_broll(clip):
         row["role"] = "broll"
+    # Where the speaker is, so a later render and the short frame them the same way.
+    if clip.get("face"):
+        row["face"] = clip["face"]
     return row
 
 
@@ -472,6 +477,8 @@ def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "m
         clip = probe(row["path"], need_audio=not broll)
         if broll:
             clip["role"] = "broll"
+        if row.get("face"):
+            clip["face"] = row["face"]
         clips.append(clip)
     lines = doc.get("lines") or []
     # A hand trim on Watch owns the segments. Rebuilding from lines would undo it.
@@ -665,6 +672,16 @@ def captions(cuts_path: str, burn: bool = False) -> None:
     print(f"Wrote {os.path.abspath(os.path.join(out_dir, 'rough_cut.captioned.mp4'))}")
 
 
+def _short_center(doc: dict, start_id: int) -> float | None:
+    """Where the speaker of the highlight is across the frame. None keeps the crop in the middle."""
+    clip_of = {int(line["id"]): int(line["clip"]) for line in doc.get("lines") or [] if "id" in line}
+    wanted = clip_of.get(start_id)
+    for row in doc.get("clips") or []:
+        if int(row.get("index", -1)) == wanted and row.get("face"):
+            return focus(row)[0]
+    return None
+
+
 def make_short(cuts_path: str) -> None:
     out_dir, doc = load_cuts(cuts_path)
     segments = doc.get("segments") or []
@@ -706,6 +723,7 @@ def make_short(cuts_path: str) -> None:
                 int(info["height"]),
                 encoder=encoder,
                 device=device,
+                center=_short_center(doc, int(choice["start_id"])),
             ),
         ],
         cwd=out_dir,

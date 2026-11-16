@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from botcut.net import post
+from botcut.llm import ask
 
 # Punched-in pieces show this much of the frame, around the speaker.
 PUNCH_IN = 1.12
@@ -71,34 +71,25 @@ def ask_face(still: str) -> dict | None:
     key = os.environ.get("XAI_API_KEY")
     if not key or not os.path.isfile(still):
         return None
-    from botcut.pick import _jpeg_data_url, chat_fields, llm_url
+    from botcut.pick import _jpeg_data_url
 
-    body = {
-        **chat_fields(),
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": FACE_PROMPT},
-                    {"type": "image_url", "image_url": {"url": _jpeg_data_url(still)}},
-                ],
-            }
-        ],
-        "response_format": FACE_SCHEMA,
-    }
     try:
-        response = post(
-            llm_url(),
-            key=key,
-            label="LLM",
+        return ask(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": FACE_PROMPT},
+                        {"type": "image_url", "image_url": {"url": _jpeg_data_url(still)}},
+                    ],
+                }
+            ],
+            FACE_SCHEMA,
+            what="a face",
+            parse=parse_face,
             read_timeout=60,
-            send=lambda: {
-                "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                "json": body,
-            },
         )
-        return parse_face(json.loads(response.json()["choices"][0]["message"]["content"]))
-    except (SystemExit, ValueError, KeyError, TypeError, IndexError):
+    except SystemExit:
         # Framing is a nicety. A cut is never lost for want of it.
         return None
 

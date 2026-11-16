@@ -25,8 +25,7 @@ from botcut.broll import (
     collect_beats,
     kept_covers,
 )
-from botcut.net import post
-from botcut.pick import chat_fields, llm_url
+from botcut.llm import ask
 
 # The offscreen revise test expects these sentences.
 FAKE_INTENT = "A frenzied cut."
@@ -384,29 +383,16 @@ def _plan(
                 parts.append({"type": "text", "text": f"Still for beat {int(beat['id'])}"})
                 parts.append({"type": "image_url", "image_url": {"url": _jpeg_data_url(still)}})
             content = parts
-    body = {
-        **chat_fields(),
-        "messages": [
+    return ask(
+        [
             {"role": "system", "content": REVISE_SYSTEM},
             *(history or []),
             {"role": "user", "content": content},
         ],
-        "response_format": REVISE_SCHEMA,
-    }
-    response = post(
-        llm_url(),
-        key=key,
-        label="LLM",
-        read_timeout=120,
-        send=lambda: {
-            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            "json": body,
-        },
+        REVISE_SCHEMA,
+        what="a revise",
+        parse=parse_revise,
     )
-    try:
-        return parse_revise(json.loads(response.json()["choices"][0]["message"]["content"]))
-    except (ValueError, KeyError, TypeError, IndexError):
-        raise SystemExit("LLM response was not a revise")
 
 
 def _fake(lines: list[dict], covers: list[dict] | None = None) -> dict:

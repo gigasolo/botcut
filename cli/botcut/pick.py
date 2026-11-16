@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-from botcut.net import post
+from botcut.llm import ask, chat_fields, llm_url, model_name, reasoning_effort  # noqa: F401
 
 UTTERANCE_GAP = 0.5
 MERGE_GAP = 1.0
@@ -211,12 +211,10 @@ CHUNK_WORKERS = 3
 def pick(utts: list[dict], intent: str = "") -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return [_kept(u["id"], "fake", range(len(u.get("cuts") or []))) for u in utts]
-    key = os.environ.get("XAI_API_KEY")
-    if not key:
-        raise SystemExit("XAI_API_KEY is not set")
+    # The key is asked for where the request is made, so a replayed answer needs none.
     parts = chunks(utts)
     if len(parts) == 1:
-        return _ask_keep(utts, intent, key)
+        return _ask_keep(utts, intent)
     from concurrent.futures import ThreadPoolExecutor
 
     def ask(numbered: tuple[int, dict]) -> list[dict]:
@@ -225,7 +223,7 @@ def pick(utts: list[dict], intent: str = "") -> list[dict]:
             f"\nThese lines are part {number} of {len(parts)} of the movie. "
             "Lines before or after them exist and are judged separately."
         )
-        kept = _ask_keep(part["lines"], intent, key, note)
+        kept = _ask_keep(part["lines"], intent, note)
         return [item for item in kept if item["id"] in part["owned"]]
 
     with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
@@ -271,37 +269,20 @@ def chunks(utts: list[dict], size: int = CHUNK_LINES, overlap: int = CHUNK_OVERL
         start += step
 
 
-def _ask_keep(utts: list[dict], intent: str, key: str, note: str = "") -> list[dict]:
-    body = {
-        **chat_fields(),
-        "messages": [
+def _ask_keep(utts: list[dict], intent: str, note: str = "") -> list[dict]:
+    # A reply that is not the schema is asked for once more before the cut stops.
+    return ask(
+        [
             {"role": "system", "content": system_prompt(intent) + note},
             {"role": "user", "content": user_content(utts)},
         ],
-        "response_format": KEEP_SCHEMA,
-    }
-    # A reply that is not the schema is asked for once more before the cut stops.
-    for attempt in range(2):
-        response = post(
-            llm_url(),
-            key=key,
-            label="LLM",
-            read_timeout=120,
-            send=lambda: {
-                "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                "json": body,
-            },
-        )
-        try:
-            content = response.json()["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            return [
-                _kept(item["id"], item["reason"], item.get("cuts") or []) for item in parsed["keep"]
-            ]
-        except (ValueError, KeyError, TypeError, IndexError):
-            if attempt == 0:
-                print("Trying again", flush=True)
-    raise SystemExit("LLM response was not a keep list")
+        KEEP_SCHEMA,
+        what="a keep list",
+        parse=lambda parsed: [
+            _kept(item["id"], item["reason"], item.get("cuts") or []) for item in parsed["keep"]
+        ],
+        tries=2,
+    )
 
 
 def segments(utts: list[dict], keep: list[dict], durations: list[float]) -> tuple[list[dict], list[int]]:
@@ -490,35 +471,6 @@ def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
             ]
         rows.append(row)
     return rows
-
-
-def model_name() -> str:
-    return os.environ.get("BOTCUT_LLM_MODEL") or "grok-4.7"
-
-
-def reasoning_effort(model: str) -> str | None:
-    """Low effort for Grok 4.5 and newer. Older chat models omit the field."""
-    name = model.split("/")[-1]
-    if not name.startswith("grok-4."):
-        return None
-    minor = name.removeprefix("grok-4.").split("-", 1)[0]
-    if minor.isdigit() and int(minor) >= 5:
-        return "low"
-    return None
-
-
-def chat_fields(model: str | None = None) -> dict:
-    chosen = model_name() if model is None else model
-    fields: dict = {"model": chosen}
-    effort = reasoning_effort(chosen)
-    if effort:
-        fields["reasoning_effort"] = effort
-    return fields
-
-
-def llm_url() -> str:
-    base = os.environ.get("BOTCUT_LLM_BASE_URL") or "https://api.x.ai/v1"
-    return base.rstrip("/") + "/chat/completions"
 
 
 def _utt(uid: int, clip: int, start: float, end: float, text: str) -> dict:

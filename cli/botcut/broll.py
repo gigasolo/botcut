@@ -11,8 +11,8 @@ import json
 import os
 
 from botcut.card import is_card
-from botcut.net import post
-from botcut.pick import MAX_STILLS, _jpeg_data_url, chat_fields, llm_url
+from botcut.llm import ask
+from botcut.pick import MAX_STILLS, _jpeg_data_url
 
 # A run of B-roll is at least RUN_MIN and at most RUN_MAX seconds in the cut.
 RUN_MIN = 3.0
@@ -473,37 +473,27 @@ def beat_stills(clips: list[dict], beats: list[dict], still_dir: str) -> dict[in
 def _ask(
     clips: list[dict], beats: list[dict], lines: list[dict], still_dir: str, *, intent: str, segments
 ) -> tuple[list, str]:
-    key = os.environ.get("XAI_API_KEY")
-    if not key:
+    if not os.environ.get("XAI_API_KEY"):
         raise SystemExit("XAI_API_KEY is not set")
     stills = beat_stills(clips, beats, still_dir)
-    body = {
-        **chat_fields(),
-        "messages": [
+
+    def read(payload):
+        if not isinstance(payload, dict) or not isinstance(payload.get("covers"), list):
+            raise ValueError("not a cover list")
+        return payload
+
+    payload = ask(
+        [
             {"role": "system", "content": COVER_SYSTEM},
             {
                 "role": "user",
                 "content": cover_user_content(beats, lines, stills, intent=intent, segments=segments),
             },
         ],
-        "response_format": COVER_SCHEMA,
-    }
-    response = post(
-        llm_url(),
-        key=key,
-        label="LLM",
-        read_timeout=120,
-        send=lambda: {
-            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            "json": body,
-        },
+        COVER_SCHEMA,
+        what="a cover list",
+        parse=read,
     )
-    try:
-        payload = json.loads(response.json()["choices"][0]["message"]["content"])
-    except (ValueError, KeyError, TypeError, IndexError, AttributeError):
-        raise SystemExit("LLM response was not a cover list")
-    if not isinstance(payload, dict) or not isinstance(payload.get("covers"), list):
-        raise SystemExit("LLM response was not a cover list")
     reply = payload.get("reply")
     reply = " ".join(reply.split()) if isinstance(reply, str) else ""
     return payload["covers"], reply

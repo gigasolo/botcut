@@ -289,7 +289,7 @@ def test_only_marked_clips_are_broll_and_a_cover_needs_a_spoken_line(monkeypatch
     def boom(*_args, **_kwargs):
         raise AssertionError("network")
 
-    monkeypatch.setattr("botcut.broll.post", boom)
+    monkeypatch.setattr("botcut.llm.post", boom)
     clips = [
         {"path": "/tmp/botcut-card-1-open.mp4", "duration": 3, "role": "broll"},
         {"path": "/tmp/talk.mp4", "duration": 10},
@@ -370,7 +370,7 @@ def test_ask_hands_back_the_reply_and_only_runs_the_editor_may_lay(monkeypatch, 
         seen["body"] = send()["json"]
         return Resp()
 
-    monkeypatch.setattr("botcut.broll.post", fake_post)
+    monkeypatch.setattr("botcut.llm.post", fake_post)
     monkeypatch.setattr("botcut.media.grab_still", lambda *_args: False)
     covers, reply = choose_covers(
         clips, lines, str(tmp_path), {1: [(0.0, 4.0), (4.0, 8.0)]}, intent="A ride", segments=None
@@ -387,7 +387,7 @@ def test_ask_hands_back_the_reply_and_only_runs_the_editor_may_lay(monkeypatch, 
         def json(self):
             return {"choices": [{"message": {"content": json.dumps({"reply": "Nothing earns it.", "covers": []})}}]}
 
-    monkeypatch.setattr("botcut.broll.post", lambda *_a, **_k: Quiet())
+    monkeypatch.setattr("botcut.llm.post", lambda *_a, **_k: Quiet())
     assert choose_covers(clips, lines, str(tmp_path), {1: [(0.0, 4.0)]}) == ([], "")
 
 
@@ -437,7 +437,7 @@ def test_ask_sends_a_still_per_beat_and_a_bad_body_stays_hidden(monkeypatch, tmp
         Path(dest).write_bytes(b"jpeg-bytes")
         return True
 
-    monkeypatch.setattr("botcut.broll.post", fake_post)
+    monkeypatch.setattr("botcut.llm.post", fake_post)
     monkeypatch.setattr("botcut.media.grab_still", grab)
     assert choose_covers(clips, lines, str(tmp_path), beats) == (
         [
@@ -473,7 +473,7 @@ def test_ask_sends_a_still_per_beat_and_a_bad_body_stays_hidden(monkeypatch, tmp
         return Resp()
 
     monkeypatch.setattr("botcut.media.grab_still", miss)
-    monkeypatch.setattr("botcut.broll.post", miss_post)
+    monkeypatch.setattr("botcut.llm.post", miss_post)
     assert choose_covers(clips, lines, str(tmp_path / "miss"), beats) == (
         [{"clip": 1, "line": 4, "through": 4, "start": 0.0, "end": 3.5, "reason": "fits"}],
         "One run.",
@@ -492,7 +492,7 @@ def test_ask_sends_a_still_per_beat_and_a_bad_body_stays_hidden(monkeypatch, tmp
 
         return Broken()
 
-    monkeypatch.setattr("botcut.broll.post", bad_post)
+    monkeypatch.setattr("botcut.llm.post", bad_post)
     with pytest.raises(SystemExit, match="not a cover list") as exc:
         choose_covers(clips, lines, str(tmp_path), beats)
     assert "secret-key" not in str(exc.value)

@@ -8028,6 +8028,11 @@ QString writeCutStub(const QString &path, const QString &talk, bool failRender =
     root.insert(QStringLiteral("segments"), segments);
     root.insert(QStringLiteral("lines"), lines);
     root.insert(QStringLiteral("covers_reply"), QStringLiteral("I stayed on you throughout."));
+    QJsonObject usage;
+    usage.insert(QStringLiteral("requests"), 3);
+    usage.insert(QStringLiteral("input"), 12000);
+    usage.insert(QStringLiteral("output"), 340);
+    root.insert(QStringLiteral("usage"), usage);
     const QString cutsTemplate = path + QStringLiteral(".cuts.json");
     QFile file(cutsTemplate);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
@@ -8092,6 +8097,9 @@ void BackendTests::cutMakesTheMovieInOnePress() {
     QCOMPARE(backend.chat().size(), 1);
     QCOMPARE(backend.chat().first().toMap().value(QStringLiteral("text")).toString(),
              QStringLiteral("I stayed on you throughout."));
+    // What the cut cost in tokens is said once, under that sentence.
+    QCOMPARE(backend.chat().first().toMap().value(QStringLiteral("change")).toString(),
+             QStringLiteral("Used 12,340 tokens in 3 requests."));
     // The project is kept where a reboot does not take it.
     const QString projects = m_dir.filePath(QStringLiteral("data/botcut/projects"));
     QVERIFY2(backend.m_cutOut.startsWith(projects), qPrintable(backend.m_cutOut));

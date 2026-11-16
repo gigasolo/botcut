@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from botcut import net
+from botcut import llm, net
 from botcut.broll import beats_from_cuts, choose_covers, fake_beats, is_broll
 from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
@@ -144,6 +144,17 @@ def main(argv: list[str] | None = None) -> None:
     card_p.add_argument("--out", required=True, help="mp4 to write, named botcut-card-…")
     card_p.add_argument("sentence", help="the sentence on the card")
     sub.add_parser("key", help="check that xAI accepts XAI_API_KEY")
+    bench_p = sub.add_parser("bench", help="score the prompts against cuts finished by hand")
+    bench_sub = bench_p.add_subparsers(dest="bench_cmd", required=True)
+    bench_save = bench_sub.add_parser("save", help="keep a finished cut as a case")
+    bench_save.add_argument("cuts", help="path to cuts.json, or its folder")
+    bench_save.add_argument("name", help="a short name for the case")
+    bench_run = bench_sub.add_parser("run", help="ask the model again and score it")
+    bench_run.add_argument("names", nargs="*", help="cases to run; all of them when none is named")
+    bench_run.add_argument(
+        "--replay", action="store_true", help="use the answers recorded last time; no network"
+    )
+    bench_sub.add_parser("list", help="name the saved cases")
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
@@ -189,6 +200,16 @@ def main(argv: list[str] | None = None) -> None:
             make_card(args.sentence, args.out)
         elif args.cmd == "key":
             check_key()
+        elif args.cmd == "bench":
+            from botcut import bench
+
+            if args.bench_cmd == "save":
+                bench.save(args.cuts, args.name)
+            elif args.bench_cmd == "run":
+                bench.run(args.names, replay=args.replay)
+            else:
+                for name in bench.case_names():
+                    print(name)
     except BrokenPipeError:
         sys.exit(0)
 
@@ -241,6 +262,7 @@ def run(
 
     fake = os.environ.get("BOTCUT_FAKE") == "1"
     backend = "local" if stt == "local" else "xai"
+    llm.reset_usage()
     work = os.path.join(out, "work")
     os.makedirs(work, exist_ok=True)
     words_by_clip: list[list] = [[] for _ in clips]
@@ -359,6 +381,11 @@ def run(
         doc["covers"] = covers
     if covers_reply:
         doc["covers_reply"] = covers_reply
+    # What this cut asked of the model, so the window can say so once.
+    tally = llm.usage()
+    if tally["requests"]:
+        doc["usage"] = tally
+        print(llm.usage_line(tally), flush=True)
     if decide:
         _write_doc(out, doc)
         kept_n = sum(1 for line in doc["lines"] if line["keep"])

@@ -4,6 +4,9 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 
 ## 2026-11-15
 
+- `botcut-cli bench` scores the prompts against cuts you finished by hand. `bench save MOVIE NAME` keeps a finished movie's project as a case, with what was heard and the lines as you left them. `bench run` asks the model to choose again and prints, per case, how much of what it kept you kept too, how much of what you kept it kept, the lines that differ, the cuts inside lines that agree, the tokens, and the seconds. Each run is added to a history, and the next run says what changed. `bench run --replay` uses the answers recorded last time and needs no network or key.
+- After a cut, the chat says once what it asked of the model: "Used 12,340 tokens in 3 requests." Dollars are added when `BOTCUT_PRICE_IN` and `BOTCUT_PRICE_OUT` give the price per million tokens. No price is written into the program.
+- Every request to the model goes through one place, `cli/botcut/llm.py`.
 - A cut inside one shot is shown as a change of framing. Every other piece of the same shot is punched in by 12 percent around the speaker's face, so a jump cut reads as wide, tight, wide. A cut to another shot starts wide. B-roll and title cards are never punched in, and neither is a shot under 1080 lines tall, where the enlargement would look soft.
 - The vertical short is cropped around the speaker, not around the middle of the frame.
 - The model is shown one still of each spoken shot and returns where the face is, as fractions of the picture. It is asked once per shot and remembered in the project. With no answer, the frame holds on the middle, a little above center.

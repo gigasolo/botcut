@@ -82,3 +82,20 @@ uv run botcut-cli short out/cuts.json
 `run` also asks the model where the speaker's face is in each spoken shot: one still, a third of the way in, answered as `{found, x, y, w, h}` in fractions of the picture, and kept in `work/<n>-<name>.face.json` and on the clip in `cuts.json` as `face`. A failed or missing answer is not an error. `render` uses it to punch in: across a cut inside one shot, every other piece is cropped to 1/1.12 of the frame around the face and scaled back up. A cut to another shot starts wide, and B-roll, cards, rotated shots, and shots under 1080 lines are left as shot. `BOTCUT_FAKE=1` uses a fixed box.
 
 `short` asks for one contiguous highlight and writes `out/short.mp4` at 1080×1920 with those captions burned in. It prints `Wrote <path> "<title>" (<len>s)`. Landscape frames are cropped to 9:16 around the speaker of the highlight's first line, or around the center when that shot has no face on record, and then scaled. A frame that is already 9:16 or taller is only scaled. `BOTCUT_FAKE=1` uses the first three kept lines and does not call the network. A real highlight is asked to land between 30 and 60 seconds; a shorter range is still used when that is what comes back.
+
+## Bench
+
+```bash
+uv run botcut-cli bench save ~/Videos/BotCut/ride.mp4 ride
+uv run botcut-cli bench run
+uv run botcut-cli bench run ride --replay
+uv run botcut-cli bench list
+```
+
+`bench save` keeps a finished cut as a case under `~/.local/share/botcut/bench/<name>/`: its `cuts.json` as you left it, the word and silence caches, and the line stills. It takes a movie, a project folder, or a `cuts.json`. Save a case after you have dropped, kept, and flipped what the model got wrong, because that list is what the model is scored against.
+
+`bench run` builds the lines again from the saved words, asks the model to choose, and compares. Lines are weighed by their length. `precision` is the share of the seconds the model kept that you kept too. `recall` is the share of the seconds you kept that the model kept. `flipped` counts lines kept by one and not the other. `cuts` counts the cuts inside lines, on lines both kept, where the model and you agree. One row per run is appended to `bench/history.jsonl` with the model, a short hash of the prompt wording, and every case's numbers, and the Overall line says what the last run over the same cases scored.
+
+Each real answer is saved under the case's `replies/`, filed by the exact question that got it. `--replay` reads those and calls nothing. A prompt that has changed is a different question, so a replay of it stops with "The prompt changed since it was recorded" and needs a real run.
+
+`run` prints `Used N tokens in M requests.` and stores the counts in `cuts.json` as `usage`. Set `BOTCUT_PRICE_IN` and `BOTCUT_PRICE_OUT`, in dollars per million tokens, to add the cost.

@@ -6,8 +6,7 @@ import json
 import os
 
 from botcut.captions import subtitles_filter
-from botcut.net import post
-from botcut.pick import chat_fields, llm_url
+from botcut.llm import ask
 
 HIGHLIGHT_SCHEMA = {
     "type": "json_schema",
@@ -35,12 +34,10 @@ def pick_highlight(utts: list[dict]) -> dict:
             raise SystemExit("No utterances to highlight")
         chosen = ids[:3]
         return {"start_id": chosen[0], "end_id": chosen[-1], "title": "Fake highlight"}
-    key = os.environ.get("XAI_API_KEY")
-    if not key:
+    if not os.environ.get("XAI_API_KEY"):
         raise SystemExit("XAI_API_KEY is not set")
-    body = {
-        **chat_fields(),
-        "messages": [
+    return ask(
+        [
             {
                 "role": "system",
                 "content": (
@@ -50,27 +47,14 @@ def pick_highlight(utts: list[dict]) -> dict:
             },
             {"role": "user", "content": _user_message(utts)},
         ],
-        "response_format": HIGHLIGHT_SCHEMA,
-    }
-    response = post(
-        llm_url(),
-        key=key,
-        label="LLM",
-        read_timeout=120,
-        send=lambda: {
-            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            "json": body,
-        },
-    )
-    try:
-        parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-        return {
+        HIGHLIGHT_SCHEMA,
+        what="a highlight",
+        parse=lambda parsed: {
             "start_id": int(parsed["start_id"]),
             "end_id": int(parsed["end_id"]),
             "title": str(parsed["title"]).strip(),
-        }
-    except (ValueError, KeyError, TypeError, IndexError):
-        raise SystemExit("LLM response was not a highlight")
+        },
+    )
 
 
 def kept_on_cut(utts: list[dict], segments: list[dict]) -> list[dict]:

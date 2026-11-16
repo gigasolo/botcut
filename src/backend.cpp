@@ -11,6 +11,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QVariantMap>
 #include <QPair>
 #include <QPointer>
@@ -2820,18 +2821,41 @@ void Backend::touchMovie() {
         setMovieStale(true);
 }
 
+namespace {
+// "Used 12,340 tokens in 3 requests, about $0.04." Empty when the model was not asked.
+QString usageSentence(const QJsonObject &usage) {
+    const int requests = usage.value(QStringLiteral("requests")).toInt();
+    if (requests <= 0)
+        return {};
+    const qint64 tokens = qint64(usage.value(QStringLiteral("input")).toDouble())
+                          + qint64(usage.value(QStringLiteral("output")).toDouble());
+    QString line = requests == 1
+                       ? QCoreApplication::translate("Backend", "Used %1 tokens in 1 request")
+                             .arg(QLocale(QLocale::English).toString(tokens))
+                       : QCoreApplication::translate("Backend", "Used %1 tokens in %2 requests")
+                             .arg(QLocale(QLocale::English).toString(tokens))
+                             .arg(requests);
+    if (usage.contains(QStringLiteral("usd")))
+        line += QCoreApplication::translate("Backend", ", about $%1")
+                    .arg(usage.value(QStringLiteral("usd")).toDouble(), 0, 'f', 2);
+    return line + QLatin1Char('.');
+}
+}
+
 void Backend::sayCovers(const QString &cutsPath) {
     // The editor says what B-roll it laid and why. It is not a proposal: nothing waits on Apply.
     QFile file(cutsPath);
     if (!file.open(QIODevice::ReadOnly))
         return;
-    const QString reply = QJsonDocument::fromJson(file.readAll())
-                              .object()
-                              .value(QStringLiteral("covers_reply"))
-                              .toString()
-                              .simplified();
-    if (!reply.isEmpty())
-        appendChat(QStringLiteral("bot"), reply, describeCovers());
+    const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+    const QString reply = root.value(QStringLiteral("covers_reply")).toString().simplified();
+    // What the cut asked of the model is said once, here, and nowhere else.
+    const QString used = usageSentence(root.value(QStringLiteral("usage")).toObject());
+    if (reply.isEmpty() && used.isEmpty())
+        return;
+    const QString change = QStringList{describeCovers(), used}.filter(QRegularExpression(QStringLiteral(".")))
+                               .join(QLatin1Char(' '));
+    appendChat(QStringLiteral("bot"), reply.isEmpty() ? tr("Your movie is cut.") : reply, change);
 }
 
 void Backend::updateMovie() {

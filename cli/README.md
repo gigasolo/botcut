@@ -1,6 +1,6 @@
 # botcut-cli
 
-Rough-cut one ordered list of shots. The Qt app calls `run`, `render`, `revise`, `card`, `captions`, and `short`. It does not run `review` after a cut.
+Rough-cut one ordered list of shots. The Qt app calls `run`, `render`, `revise`, `card`, `captions`, and `short`.
 
 ```bash
 cd cli
@@ -35,7 +35,7 @@ uv sync --extra local
 
 Speech-to-text is `grok-voice-transcribe-2.0` with filler words kept. The model chooses utterance ids. It does not choose timestamps. One JPEG from the middle of each line is sent with the transcript, and stored under `out/work/stills/`. A missed frame does not stop the cut. The reason may mention the picture. A dropped connection, a timeout, or a brief server error is tried again. A rejected key or body is not.
 
-Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.25 seconds before and 0.40 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range. The rough cut keeps the camera level, fades up from black, and fades out to black, and joins stay 20 ms inside a file and 120 ms across a dip unless `--scene-transition off`. The app remembers that choice for every movie. The review master stays a straight concat.
+Kept neighbors in the same clip merge when the gap before padding is under 1 second. Each range is then padded by 0.25 seconds before and 0.40 seconds after, and clamped to the clip. The later utterance's reason is the one stored on a merged range. The rough cut keeps the camera level, fades up from black, and fades out to black, and joins stay 20 ms inside a file and 120 ms across a dip unless `--scene-transition off`. The app remembers that choice for every movie.
 
 A dropped line that is not a near-duplicate of a kept line prints `unique? id N: ...`. The line stays dropped.
 
@@ -80,12 +80,3 @@ uv run botcut-cli short out/cuts.json
 ```
 
 `short` asks for one contiguous highlight and writes `out/short.mp4` at 1080×1920 with those captions burned in. It prints `Wrote <path> "<title>" (<len>s)`. Landscape frames are center-cropped with `crop=ih*9/16:ih` and then scaled. A frame that is already 9:16 or taller is only scaled. `BOTCUT_FAKE=1` uses the first three kept lines and does not call the network. A real highlight is asked to land between 30 and 60 seconds; a shorter range is still used when that is what comes back.
-
-## Review
-
-```bash
-uv run botcut-cli review out/cuts.json
-uv run botcut-cli review out/cuts.json --no-open
-```
-
-`review` builds `out/master.mp4` from every shot, in order, and writes `out/master.keep.json` with the rough-cut ranges in master time. When the shots share a codec, size, frame rate, and audio format, the master is a stream copy. Otherwise it is re-encoded the same way as the rough cut. A stream copy that drifts by more than 0.1 seconds per clip prints `master drift …s; re-encoding` and is rebuilt. A second run prints `master up to date`. BotCut opens the keep-list when `botcut` is on `PATH`. `--no-open` skips that. `rough_cut.mp4` stays where it is.

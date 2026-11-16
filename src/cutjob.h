@@ -28,8 +28,6 @@ CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const
                           const QString &sceneTransition = QStringLiteral("dip"),
                           bool brollMix = true);
 
-CutLaunch cutReviewLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
-                          const QString &cliProject);
 
 // captions and short take the cuts.json file. A directory is not a valid path.
 CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,

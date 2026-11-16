@@ -200,13 +200,6 @@ Backend::~Backend() {
 }
 
 void Backend::wireFilePicker() {
-    connect(m_filePicker, &FilePicker::openSelected, this, [this](const QUrl &url) {
-        // A trim dialog that was already open must not leave the shot list mid-cut.
-        // Saving a finished movie still calls load() itself, while busy is set.
-        if (m_busy)
-            return;
-        load(url);
-    });
     connect(m_filePicker, &FilePicker::videosSelected, this, [this](const QList<QUrl> &urls) {
         QStringList paths;
         for (const QUrl &url : urls)
@@ -543,58 +536,6 @@ void Backend::closeProject() {
     if (leaveMovie)
         emit gatheringChanged();
     setStatus(QString());
-}
-
-bool Backend::parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
-                            edit::Clips *clips, QString *error) {
-    const QJsonDocument doc = QJsonDocument::fromJson(json);
-    const QJsonObject root = doc.object();
-    if (!doc.isObject() || !root.value("source").isString()) {
-        *error = QStringLiteral("Keep-list has no source");
-        return false;
-    }
-    const QJsonArray keep = root.value("keep").toArray();
-    if (keep.isEmpty()) {
-        *error = QStringLiteral("Keep-list has no ranges");
-        return false;
-    }
-    edit::Clips parsed;
-    for (int i = 0; i < keep.size(); ++i) {
-        const QJsonObject r = keep.at(i).toObject();
-        const double s = r.value("start").toDouble(-1), e = r.value("end").toDouble(-1);
-        if (!r.value("start").isDouble() || !r.value("end").isDouble() || s < 0 || e <= s) {
-            *error = QStringLiteral("Keep-list range %1 is invalid").arg(i + 1);
-            return false;
-        }
-        parsed.append({s, e});
-    }
-    *source = QDir(baseDir).absoluteFilePath(root.value("source").toString());
-    *clips = parsed;
-    return true;
-}
-
-bool Backend::loadKeepList(const QUrl &url) {
-    QFile file(url.toLocalFile());
-    QString source, error;
-    edit::Clips clips;
-    if (!file.open(QIODevice::ReadOnly)) {
-        emit loadError(QStringLiteral("Cannot read keep-list"));
-        return false;
-    }
-    if (!parseKeepList(file.readAll(), QFileInfo(file).absolutePath(), &source, &clips, &error)) {
-        emit loadError(error);
-        return false;
-    }
-    if (!load(QUrl::fromLocalFile(source)))
-        return false;
-    m_timeline.load(m_info.duration, clips);
-    return true;
-}
-
-void Backend::openVideoDialog() {
-    if (m_busy)
-        return;
-    m_filePicker->openVideo();
 }
 
 void Backend::addVideosDialog() {

@@ -91,14 +91,6 @@ CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
-CutLaunch cutReviewLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
-                          const QString &cliProject) {
-    if (cutsPath.isEmpty())
-        return {QString(), {}, QStringLiteral("No cuts.json")};
-    const QStringList tail{QStringLiteral("review"), cutsPath, QStringLiteral("--no-open")};
-    return launchTool(tail, botcutCli, uv, cliProject);
-}
-
 CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
                             const QString &cliProject) {
     if (cutsPath.isEmpty())

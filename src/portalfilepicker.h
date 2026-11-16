@@ -10,7 +10,6 @@ class PortalFilePicker : public FilePicker {
 public:
     explicit PortalFilePicker(QObject *parent = nullptr);
 
-    void openVideo() override;
     void openVideos() override;
     void openCutList() override;
     void saveCutList(const QUrl &suggestedUrl) override;
@@ -20,7 +19,6 @@ public:
 protected:
     enum class Action {
         None,
-        Open,
         Add,
         OpenList,
         SaveList,

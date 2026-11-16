@@ -111,7 +111,6 @@ Item {
                             { keys: "Shift+Left / Right", action: qsTr("5 seconds") },
                             { keys: "Alt+Left / Right", action: qsTr("0.2 seconds") },
                             { keys: "[ / ]", action: qsTr("Previous or next edge") },
-                            { keys: "S", action: qsTr("Split") },
                             { keys: "X", action: qsTr("Remove or restore") },
                             { keys: "Ctrl / Alt Space", action: qsTr("Set the edges") },
                             { keys: "Ctrl+Z", action: qsTr("Undo") },
@@ -133,7 +132,6 @@ Item {
                         model: [
                             { keys: "Space", action: qsTr("Play or pause") },
                             { keys: "Ctrl+S", action: qsTr("Save or export") },
-                            { keys: "Ctrl+O", action: qsTr("Open") },
                             { keys: "?", action: qsTr("Shortcuts") },
                             { keys: "Q", action: qsTr("Quit") }
                         ]

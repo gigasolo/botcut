@@ -1,4 +1,4 @@
-// BotCut — a dead-simple video length trimmer. Qt Quick (QML) UI, ffmpeg cuts.
+// BotCut: shots in, a cut movie out. Qt Quick (QML) window, botcut-cli and ffmpeg underneath.
 
 #include <QGuiApplication>
 #include <QIcon>
@@ -53,8 +53,6 @@ int main(int argc, char *argv[]) {
         const QString arg = args.at(1);
         if (arg.endsWith(".botcut.json", Qt::CaseInsensitive))
             backend.reopenList(arg);
-        else if (arg.endsWith(".json", Qt::CaseInsensitive))
-            backend.loadKeepList(QUrl::fromLocalFile(arg));
         else
             backend.load(QUrl::fromLocalFile(arg));
     }

@@ -178,18 +178,6 @@ PortalFilePicker::PortalFilePicker(QObject *parent) : FilePicker(parent) {
     registerPortalFilterTypes();
 }
 
-void PortalFilePicker::openVideo() {
-    QVariantMap options;
-    options.insert(QStringLiteral("accept_label"), QStringLiteral("Open"));
-    options.insert(QStringLiteral("modal"), true);
-    options.insert(QStringLiteral("multiple"), false);
-    options.insert(QStringLiteral("current_folder"), portalPathBytes(openFolder()));
-    options.insert(QStringLiteral("filters"), QVariant::fromValue(videoFilters()));
-    options.insert(QStringLiteral("current_filter"), QVariant::fromValue(videoFilter()));
-
-    requestFile(QStringLiteral("OpenFile"), QStringLiteral("Open Video File"), options, Action::Open);
-}
-
 void PortalFilePicker::openVideos() {
     QVariantMap options;
     options.insert(QStringLiteral("accept_label"), QStringLiteral("Add"));
@@ -364,10 +352,6 @@ void PortalFilePicker::handleResponse(uint response, const QVariantMap &results)
         return;
 
     const QUrl url(uris.first());
-    if (action == Action::Open) {
-        emit openSelected(url);
-        return;
-    }
     if (action == Action::Add) {
         QList<QUrl> urls;
         for (const QString &uri : uris)

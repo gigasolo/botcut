@@ -9,9 +9,6 @@ Item {
     visible: host && host.titleCardOpen
     z: 45
 
-    function clearField() {
-        field.text = ""
-    }
     function sentence() {
         return field.text.replace(/\s+/g, " ").trim()
     }

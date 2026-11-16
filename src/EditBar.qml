@@ -2,9 +2,8 @@ import QtQuick
 import "Format.js" as Format
 
 // The video as a row of clips over a filmstrip. Each clip has a handle at both
-// ends; whatever falls outside every clip is cut. Double-click a clip to split
-// it, double-click a gap or a split to join the clips around it, and hover a
-// clip to remove it. All times are in seconds.
+// ends; whatever falls outside every clip is cut. Double-click a gap to bring
+// it back, and hover a clip to remove it. All times are in seconds.
 Item {
     id: root
     implicitHeight: 76
@@ -216,12 +215,8 @@ Item {
         readonly property string hint: {
             if (area.gapHovered >= 0)
                 return "Double-click to restore"
-            if (area.splitHovered >= 0)
-                return "Double-click to join"
-            if (area.clipHovered < 0)
+            if (area.clipHovered < 0 || !root.plan)
                 return ""
-            if (!root.plan)
-                return area.onHandle ? "" : "Double-click to split"
             var row = root.clips[area.clipHovered]
             if (!row || row.text === undefined || row.text === null)
                 return ""
@@ -396,9 +391,7 @@ Item {
         onDoubleClicked: mouse => {
             if (onRemove(mouse.x, mouse.y)) return
             var hit = hitTest(mouse.x)
-            if (!root.plan && hit.split >= 0) root.timeline.joinClips(hit.split)
-            else if (!root.plan && hit.clip >= 0 && !hit.handle) root.timeline.split(root.timeForX(mouse.x))
-            else if (hit.clip < 0) root.timeline.restoreGap(hit.gap)
+            if (hit.clip < 0) root.timeline.restoreGap(hit.gap)
             hover(mouse.x, mouse.y)
         }
         onExited: { clipHovered = -1; gapHovered = -1; splitHovered = -1; removeHovered = false }

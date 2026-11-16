@@ -11,7 +11,6 @@ public:
     explicit FilePicker(QObject *parent = nullptr) : QObject(parent) {}
     virtual ~FilePicker() = default;
 
-    virtual void openVideo() = 0;
     virtual void openVideos() = 0;
     virtual void openCutList() = 0;
     virtual void saveCutList(const QUrl &suggestedUrl) = 0;
@@ -22,7 +21,6 @@ public:
                              int sourceWidth, int sourceHeight) = 0;
 
 signals:
-    void openSelected(const QUrl &url);
     void videosSelected(const QList<QUrl> &urls);
     void cutListOpenSelected(const QUrl &url);
     void cutListSaveSelected(const QUrl &url);

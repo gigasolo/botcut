@@ -136,12 +136,8 @@ public:
 
     // Load a video (probes it, then kicks off thumbnail generation).
     Q_INVOKABLE bool load(const QUrl &url);
-    Q_INVOKABLE bool loadKeepList(const QUrl &url);
-    static bool parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
-                              edit::Clips *clips, QString *error);
 
     // Open native desktop file dialogs.
-    Q_INVOKABLE void openVideoDialog();
     Q_INVOKABLE void addVideosDialog();
     Q_INVOKABLE void addTrayFiles(const QStringList &paths);
     Q_INVOKABLE void addDropped(const QList<QUrl> &urls);
@@ -388,7 +384,7 @@ private:
     QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Propose, Revise, Card, Key };
+    enum class CutStage { Idle, Decide, Run, Render, Captions, Short, Propose, Revise, Card, Key };
     CutStage m_cutStage = CutStage::Idle;
     QString m_cardPath;
     QString m_cardPlace;

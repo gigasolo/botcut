@@ -48,7 +48,6 @@ public:
     QUrl lastSuggestedUrl;
     QList<int> lastScaleHeights;
 
-    void openVideo() override { ++openCount; }
     void openVideos() override { ++openCount; }
     void openCutList() override {}
     void saveCutList(const QUrl &) override {}
@@ -173,7 +172,6 @@ public:
     Q_INVOKABLE void exportPlan() {}
 
     Q_INVOKABLE bool load(const QUrl &) { return false; }
-    Q_INVOKABLE void openVideoDialog() { ++openCount; }
     Q_PROPERTY(QStringList tray READ tray NOTIFY infoChanged)
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY infoChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY infoChanged)
@@ -618,7 +616,6 @@ class BackendTests : public QObject {
 
 private slots:
     void initTestCase();
-    void openDialogDelegatesToFilePicker();
     void trayOrdersFiles();
     void droppedDirectoryAddsVideosOldestFirst();
     void cutListRoundTripsOrderAndMode();
@@ -689,7 +686,7 @@ private slots:
     void qmlShortcutsTriggerBackendActions();
     void qmlArrowKeysMoveThePlayhead();
     void qmlSpaceChordsSetTheClipEdges();
-    void qmlKeysSplitRemoveAndRestoreClips();
+    void qmlKeysRemoveAndRestoreClips();
     void qmlPlainMovieLocksTrimWhileBusy();
     void qmlBracketsJumpBetweenClipEdges();
     void qmlZoomFocusesTheClip();
@@ -707,9 +704,6 @@ private slots:
     void timelineAnswersWhereTimesFall();
     void timelineEditsAtATime();
     void timelineLoadsKeepRangesAsOneUndoStep();
-    void keepListParsesAndResolvesSource();
-    void keepListRejectsBadFiles();
-    void keepListLoadsVideoWithClips();
     void trimArgsReencodeForPreciseCuts();
     void trimArgsConcatenateTheRanges();
     void trimArgsScaleTheShorterSide();
@@ -1098,7 +1092,6 @@ void BackendTests::busyIgnoresTrayEdits() {
     other.close();
     backend.addDropped({QUrl::fromLocalFile(other.fileName())});
     backend.openCutListDialog();
-    backend.openVideoDialog();
     backend.addVideosDialog();
     QCOMPARE(backend.tray(), tray);
     QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
@@ -1116,10 +1109,6 @@ void BackendTests::busyIgnoresTrayEdits() {
     backend.restoreSelect(1);
     QCOMPARE(backend.selects().at(0).toMap().value(QStringLiteral("reason")).toString(),
              QStringLiteral("story"));
-
-    emit picker->openSelected(videoUrl());
-    QVERIFY(backend.gathering());
-    QVERIFY(backend.source().isEmpty());
 
     const QString saved = m_dir.filePath(QStringLiteral("saved-while-busy.botcut.json"));
     backend.writeCutListFile(QUrl::fromLocalFile(saved));
@@ -1579,10 +1568,8 @@ void BackendTests::gatherLabelsFit() {
 
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(settings));
     QCOMPARE(window->property("settingsOpen").toBool(), true);
-    const QString fadeLabel = QStringLiteral("Fade to black between shots");
-    QVERIFY2(fullyInside(visibleItemWithText(window, fadeLabel), fadeLabel).isEmpty(),
-             qPrintable(fullyInside(visibleItemWithText(window, fadeLabel), fadeLabel)));
-    QVERIFY2(labelFitError(window, fadeLabel).isEmpty(), qPrintable(labelFitError(window, fadeLabel)));
+    // Fade is the switch in the cut row and nowhere else.
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Fade to black between shots")));
 
     QQuickItem *spoken = window->findChild<QQuickItem *>(QStringLiteral("spokenCutsBox"));
     QVERIFY(spoken);
@@ -1704,26 +1691,8 @@ void BackendTests::planFadeSwitchWritesSceneTransition() {
     QVERIFY(settings);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(settings));
     QCOMPARE(window->property("settingsOpen").toBool(), true);
-    QQuickItem *fadeCheck = nullptr;
-    const auto items = window->findChildren<QQuickItem *>();
-    for (QQuickItem *item : items) {
-        if (!item->isVisible())
-            continue;
-        if (item->property("text").toString() != QStringLiteral("Fade to black between shots"))
-            continue;
-        if (!item->property("checked").isValid())
-            continue;
-        fadeCheck = item;
-        break;
-    }
-    QVERIFY(fadeCheck);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(fadeCheck));
-    QCOMPARE(backend.sceneTransition(), QStringLiteral("off"));
-    QCOMPARE(fadeCheck->property("checked").toBool(), false);
-    QCOMPARE(fade->property("checked").toBool(), false);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(fadeCheck));
-    QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
-    QCOMPARE(fade->property("checked").toBool(), true);
+    // Settings has no second Fade control to fall out of step with this one.
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Fade to black between shots")));
 
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
@@ -2419,18 +2388,17 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
 
     backend.lastDropId = -1;
     backend.lastRestoreId = -1;
+    // X is the one key for Drop and Keep. K and D do nothing.
     QTest::keyClick(window, Qt::Key_K);
+    QTest::keyClick(window, Qt::Key_D);
     QCOMPARE(backend.lastDropId, -1);
     QCOMPARE(backend.lastRestoreId, -1);
-    QTest::keyClick(window, Qt::Key_D);
+    QTest::keyClick(window, Qt::Key_X);
     QCOMPARE(backend.lastDropId, 3);
     QCOMPARE(backend.lastRestoreId, -1);
     backend.lastDropId = -1;
     backend.lastRestoreId = -1;
-    QTest::keyClick(window, Qt::Key_D);
-    QCOMPARE(backend.lastDropId, -1);
-    QCOMPARE(backend.lastRestoreId, -1);
-    QTest::keyClick(window, Qt::Key_K);
+    QTest::keyClick(window, Qt::Key_X);
     QCOMPARE(backend.lastDropId, -1);
     QCOMPARE(backend.lastRestoreId, 3);
     backend.lastDropId = -1;
@@ -3753,11 +3721,6 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                             QString(), QString(), QString());
     QVERIFY(missing.program.isEmpty());
     QVERIFY(missing.error.contains(QStringLiteral("botcut-cli")));
-
-    const CutLaunch review = cutReviewLaunch(QStringLiteral("/tmp/out/cuts.json"),
-                                              QStringLiteral("/usr/bin/botcut-cli"), QString(), QString());
-    QCOMPARE(review.arguments, (QStringList{QStringLiteral("review"), QStringLiteral("/tmp/out/cuts.json"),
-                                             QStringLiteral("--no-open")}));
 
     const CutLaunch hard = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
                                          QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
@@ -5569,17 +5532,6 @@ void BackendTests::cutStatusLines() {
     QVERIFY(cutStatusFromLine(QString(220, QLatin1Char('x'))).isEmpty());
 }
 
-void BackendTests::openDialogDelegatesToFilePicker() {
-    ThumbProvider provider;
-    auto *picker = new FakeFilePicker;
-    Backend backend(&provider, picker);
-
-    backend.openVideoDialog();
-    backend.openVideoDialog();
-
-    QCOMPARE(picker->openCount, 2);
-}
-
 void BackendTests::pickerSelectionLoadsVideo() {
     ThumbProvider provider;
     auto *picker = new FakeFilePicker;
@@ -5588,7 +5540,7 @@ void BackendTests::pickerSelectionLoadsVideo() {
     QSignalSpy gatheringSpy(&backend, &Backend::gatheringChanged);
     QVERIFY(backend.gathering());
 
-    emit picker->openSelected(videoUrl());
+    QVERIFY(backend.load(videoUrl()));
 
     QCOMPARE(infoSpy.count(), 1);
     QCOMPARE(gatheringSpy.count(), 1);
@@ -5984,15 +5936,11 @@ void BackendTests::qmlShortcutsTriggerBackendActions() {
     QTest::keyClick(window, Qt::Key_S, Qt::ControlModifier);
     QTRY_COMPARE_WITH_TIMEOUT(backend.exportCount, 1, 3000);
 
-    QTest::keyClick(window, Qt::Key_O, Qt::ControlModifier);
-    QTRY_COMPARE_WITH_TIMEOUT(backend.openCount, 1, 3000);
-
     // ? toggles the hotkey overlay, and Escape closes it again.
     QTest::keyClick(window, Qt::Key_Question);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("helpVisible").toBool(), true, 3000);
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("helpVisible").toBool(), false, 3000);
-    QCOMPARE(backend.openCount, 1);
 
     window->setProperty("settingsOpen", true);
     QVERIFY(window->property("settingsOpen").toBool());
@@ -6141,23 +6089,26 @@ void BackendTests::qmlSpaceChordsSetTheClipEdges() {
     QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{5.0, 18.0}}), 3000);
 }
 
-void BackendTests::qmlKeysSplitRemoveAndRestoreClips() {
+void BackendTests::qmlKeysRemoveAndRestoreClips() {
     ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))),
                             20.0);
     QmlHarness harness(backend);
     QQuickWindow *window = showEditor(harness, backend);
     QVERIFY2(window, qPrintable(mainQmlPath()));
 
-    // S splits the clip under the playhead, at 5 s and then at 10 s.
+    // S no longer splits. The clips here are cut in the model, at 5 s and then at 10 s.
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 5.0, 3000);
     QTest::keyClick(window, Qt::Key_S);
-    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
-                              (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}), 3000);
+    QTest::qWait(50);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0.0, 20.0}}));
+    backend.timeline.split(5.0);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}));
     QCOMPARE(window->property("unexported").toBool(), false);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(window, Qt::Key_S);
-    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
-                              (edit::Clips{{0.0, 5.0}, {5.0, 10.0}, {10.0, 20.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 10.0, 3000);
+    backend.timeline.split(10.0);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0.0, 5.0}, {5.0, 10.0}, {10.0, 20.0}}));
 
     // X removes the clip under the playhead...
     QTest::keyClick(window, Qt::Key_X);
@@ -6175,9 +6126,9 @@ void BackendTests::qmlKeysSplitRemoveAndRestoreClips() {
     QTest::keyClick(window, Qt::Key_Left, Qt::ShiftModifier);
     QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 0.0, 3000);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(window, Qt::Key_S);
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(window, Qt::Key_S);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 10.0, 3000);
+    backend.timeline.split(10.0);
     QTest::keyClick(window, Qt::Key_Left);
     QTest::keyClick(window, Qt::Key_Delete);
     QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
@@ -6224,9 +6175,9 @@ void BackendTests::qmlPlainMovieLocksTrimWhileBusy() {
                             .arg(editBar->height())));
 
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(window, Qt::Key_S);
-    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
-                              (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), 5.0, 3000);
+    backend.timeline.split(5.0);
+    QCOMPARE(backend.timeline.clips(), (edit::Clips{{0.0, 5.0}, {5.0, 20.0}}));
 
     backend.setBusy(true);
     QTest::qWait(50);
@@ -6236,7 +6187,6 @@ void BackendTests::qmlPlainMovieLocksTrimWhileBusy() {
 
     const edit::Clips frozen = backend.timeline.clips();
     const double head = playhead(harness);
-    QTest::keyClick(window, Qt::Key_S);
     QTest::keyClick(window, Qt::Key_X);
     QTest::keyClick(window, Qt::Key_Space, Qt::ControlModifier);
     QTest::keyClick(window, Qt::Key_Space, Qt::AltModifier);
@@ -6251,10 +6201,11 @@ void BackendTests::qmlPlainMovieLocksTrimWhileBusy() {
     QVERIFY(editBar->isEnabled());
     QCOMPARE(window->property("editing").toBool(), true);
     QVERIFY(qAbs(editBar->opacity() - 1.0) < 0.01);
+    // The keys work again: the playhead moves and X takes the clip under it.
     QTest::keyClick(window, Qt::Key_Right, Qt::ShiftModifier);
-    QTest::keyClick(window, Qt::Key_S);
-    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(),
-                              (edit::Clips{{0.0, 5.0}, {5.0, 10.0}, {10.0, 20.0}}), 3000);
+    QTRY_COMPARE_WITH_TIMEOUT(playhead(harness), head + 5.0, 3000);
+    QTest::keyClick(window, Qt::Key_X);
+    QTRY_COMPARE_WITH_TIMEOUT(backend.timeline.clips(), (edit::Clips{{0.0, 5.0}}), 3000);
 }
 
 void BackendTests::qmlBracketsJumpBetweenClipEdges() {
@@ -7264,39 +7215,6 @@ void BackendTests::timelineLoadsKeepRangesAsOneUndoStep() {
     QVERIFY(timeline.canUndo());
     timeline.undo();
     QCOMPARE(timeline.clips(), edit::whole(10.0));
-}
-
-void BackendTests::keepListParsesAndResolvesSource() {
-    QString source, error;
-    edit::Clips clips;
-    QVERIFY(Backend::parseKeepList(R"({"source":"a.mp4","keep":[{"start":1,"end":2},{"start":3,"end":4.5}]})",
-                                   QStringLiteral("/tmp/x"), &source, &clips, &error));
-    QCOMPARE(source, QStringLiteral("/tmp/x/a.mp4"));
-    QCOMPARE(clips.size(), 2);
-}
-
-void BackendTests::keepListRejectsBadFiles() {
-    for (const QByteArray &json : {QByteArray("{}"), QByteArray(R"({"source":"a.mp4","keep":[]})"),
-                                  QByteArray(R"({"source":"a.mp4","keep":[{"start":2,"end":2}]})"),
-                                  QByteArray("nope")}) {
-        QString source, error;
-        edit::Clips clips;
-        QVERIFY(!Backend::parseKeepList(json, QStringLiteral("/tmp"), &source, &clips, &error));
-        QVERIFY(!error.isEmpty());
-    }
-}
-
-void BackendTests::keepListLoadsVideoWithClips() {
-    QVERIFY(!makeVideo(QStringLiteral("keep.mp4"), 4.0, false).isEmpty());
-    QFile json(m_dir.filePath(QStringLiteral("keep.keep.json")));
-    QVERIFY(json.open(QIODevice::WriteOnly));
-    json.write(R"({"source":"keep.mp4","keep":[{"start":0.5,"end":1.5},{"start":2.5,"end":3.5}]})");
-    json.close();
-    ThumbProvider provider;
-    Backend backend(&provider, new FakeFilePicker);
-    QVERIFY(backend.loadKeepList(QUrl::fromLocalFile(json.fileName())));
-    QCOMPARE(backend.timeline()->clips(), (edit::Clips{{0.5, 1.5}, {2.5, 3.5}}));
-    waitForBackgroundWork(backend);
 }
 
 void BackendTests::trimArgsReencodeForPreciseCuts() {

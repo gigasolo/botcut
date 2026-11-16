@@ -168,15 +168,6 @@ Item {
             }
             CheckBox {
                 width: parent.width
-                text: qsTr("Fade to black between shots")
-                font.pixelSize: 13
-                focusPolicy: Qt.NoFocus
-                enabled: !backend.busy
-                checked: backend.sceneTransition === "dip"
-                onClicked: backend.sceneTransition = checked ? "dip" : "off"
-            }
-            CheckBox {
-                width: parent.width
                 text: qsTr("Keep a B-roll shot's sound under the voice")
                 font.pixelSize: 13
                 focusPolicy: Qt.NoFocus

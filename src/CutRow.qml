@@ -48,18 +48,6 @@ Item {
             closePace()
     }
 
-    readonly property int keptCount: host ? host.keptLineCount() : 0
-    readonly property int droppedCount: Math.max(0, backend.selects.length - keptCount)
-    readonly property int unsureCount: {
-        var n = 0
-        var lines = backend.selects
-        for (var i = 0; i < lines.length; i++) {
-            if (lines[i] && lines[i].reason === "unique?")
-                n++
-        }
-        return n
-    }
-
     RowLayout {
         anchors.fill: parent
         spacing: 8

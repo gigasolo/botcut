@@ -510,9 +510,6 @@ ApplicationWindow {
         noticeText = text;
         noticeTimer.restart();
     }
-    function openVideo() {
-        backend.openVideoDialog();
-    }
     function openSettings() {
         settingsFromMovie = hasVideo && !gathering;
         if (movie.player.playbackState === MediaPlayer.PlayingState)
@@ -579,31 +576,10 @@ ApplicationWindow {
         else
             backend.restoreSelect(line.id);
     }
-    // K and D are the one toggle, each way. A line already there stays there.
-    function keepCurrentLine() {
-        if (backend.busy || currentLine < 0 || currentLine >= backend.selects.length)
-            return;
-        var line = backend.selects[currentLine];
-        if (line && line.keep === false)
-            backend.restoreSelect(line.id);
-    }
-    function dropCurrentLine() {
-        if (backend.busy || currentLine < 0 || currentLine >= backend.selects.length)
-            return;
-        var line = backend.selects[currentLine];
-        if (line && line.keep !== false)
-            backend.dropSelect(line.id);
-    }
     function playCurrentLine() {
         if (currentLine < 0 || currentLine >= backend.selects.length)
             return;
         playLine(backend.selects[currentLine]);
-    }
-    // The one revise snapshot, through the chat so it can say what happened.
-    function undoRevise() {
-        if (backend.busy || !backend.canRevert)
-            return;
-        planPane.undoRevise();
     }
     function nudgeShot(delta) {
         if (backend.busy || backend.tray.length === 0)
@@ -1107,13 +1083,6 @@ ApplicationWindow {
         }
     }
 
-    Shortcut {
-        sequence: "S"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.editing
-        onActivated: timeline.split(editBar.playheadSec)
-    }
 
     Shortcut {
         sequences: ["X", "Delete", "Backspace"]
@@ -1171,12 +1140,6 @@ ApplicationWindow {
         }
     }
 
-    Shortcut {
-        sequence: "Ctrl+O"
-        context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible && !backend.busy
-        onActivated: openVideo()
-    }
 
     Shortcut {
         sequence: "Q"
@@ -1241,20 +1204,6 @@ ApplicationWindow {
         autoRepeat: false
         enabled: win.lineKeys
         onActivated: toggleCurrentLine()
-    }
-    Shortcut {
-        sequence: "K"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.lineKeys
-        onActivated: keepCurrentLine()
-    }
-    Shortcut {
-        sequence: "D"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.lineKeys
-        onActivated: dropCurrentLine()
     }
     Shortcut {
         sequence: "Alt+Up"
@@ -1508,13 +1457,6 @@ ApplicationWindow {
                                     color: theme.foreground
                                     opacity: 0.62
                                     font.pixelSize: 13
-                                }
-                                ActionButton {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    raised: true
-                                    text: qsTr("Trim one file instead…")
-                                    enabled: !backend.busy
-                                    onClicked: openVideo()
                                 }
                             }
                             // The current line's words, over the picture. In

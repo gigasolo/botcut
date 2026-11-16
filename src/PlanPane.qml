@@ -26,9 +26,6 @@ Item {
         if (decisions)
             decisions.closePace()
     }
-    function undoRevise() {
-        reviseChat.undo()
-    }
 
     function reasonText(reason) {
         if (reason === "unique?")

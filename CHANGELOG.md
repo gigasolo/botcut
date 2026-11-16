@@ -10,11 +10,10 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 - Captions and the vertical short land beside the movie you saved, as `movie.srt` and `movie_short.mp4`. They were written to the temporary cut folder and reported as failed.
 - Keeping a dropped line saves the list at once, as dropping one does.
 - `botcut some.botcut.json` opens that list.
+- BotCut is one product now. The separate one-file trimmer is gone: no **Trim one file instead…**, no Ctrl+O, no keep-list files, and no split or join on the filmstrip. Trimming stays where it is useful, on the finished movie.
+- One way per thing. X is the key that drops or keeps a line, and K and D are gone. Fade is the switch under the picture, and its copy in Settings is gone.
+- `botcut-cli review` is removed. The app never ran it.
 - The window finds `botcut-cli` through `BOTCUT_CLI`, then `PATH`, then `uv` with the `cli` folder of the checkout it was built from. The path `~/code/botcut/cli` is no longer written into the app.
-
-## 2026-11-06
-
-- A full-range B-roll clip, such as a HoverAir file, renders beside the DJI shots. Each branch brings a full-range source to limited range before the join, where VA-API frames could not be converted. A failed render now names ffmpeg's actual complaint instead of its last line.
 
 ## 2026-11-09
 
@@ -28,6 +27,10 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 - B-roll covers about half of the spoken lines, spread from the first line to the last, with the beats in order so the footage moves forward. The model sees each line's length, and a line under a second and a half is never covered. The first real cut had laid two beats over fifty lines.
 - Play on a line, or the kept lines in a row, shows the B-roll picture over a covered line while the voice goes on. Before, only the rendered movie showed a cover.
 - The action sentence on Lines counts the covered lines: "50 of 56 lines kept, 2:40, 15 with B-roll."
+
+## 2026-11-06
+
+- A full-range B-roll clip, such as a HoverAir file, renders beside the DJI shots. Each branch brings a full-range source to limited range before the join, where VA-API frames could not be converted. A failed render now names ffmpeg's actual complaint instead of its last line.
 
 ## 2026-11-05
 

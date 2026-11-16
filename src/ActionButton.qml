@@ -2,9 +2,12 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
 
+// A word button. Filled is the one next action. Raised is a quiet button on a
+// bar or under a list. Neither is a plain word in a row.
 Button {
     id: button
     property bool filled: false
+    property bool raised: false
     // 0..1 fills the button while a job runs. -1 is an ordinary button.
     property real progress: -1
 
@@ -14,7 +17,7 @@ Button {
     font.pixelSize: 13
     font.weight: button.filled || button.progress >= 0 ? Font.DemiBold : Font.Normal
     focusPolicy: Qt.NoFocus
-    implicitHeight: 36
+    implicitHeight: raised && !filled ? 32 : 36
     Material.accent: theme.accent
     Material.roundedScale: theme.radius
 
@@ -36,7 +39,8 @@ Button {
         color: button.progress >= 0 ? theme.raised
                 : !button.enabled && button.filled ? theme.raised
                 : button.filled ? theme.accent
-                : button.hovered && button.enabled ? theme.hover : "transparent"
+                : button.hovered && button.enabled ? theme.hover
+                : button.raised ? theme.raised : "transparent"
         opacity: 1
         border.width: button.activeFocus ? 2 : 0
         border.color: theme.accent

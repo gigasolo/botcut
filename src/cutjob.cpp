@@ -54,7 +54,7 @@ QString defaultCutIntent() {
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent, bool decide, const QString &sceneTransition,
-                       double maxPause, bool broll, bool brollMix) {
+                       double maxPause, const QStringList &brollFiles, bool brollMix) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -67,10 +67,15 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
     tail << QStringLiteral("--intent") << movie;
     tail << QStringLiteral("--scene-transition") << sceneTransitionValue(sceneTransition);
     tail << QStringLiteral("--max-pause") << QString::number(maxPause);
-    if (broll)
-        tail << QStringLiteral("--b-roll");
+    // Assemble plays every file in order, so a B-roll mark only goes with a spoken cut.
+    if (mode == QLatin1String("speech")) {
+        for (const QString &path : brollFiles) {
+            if (!path.isEmpty() && files.contains(path))
+                tail << QStringLiteral("--b-roll-file") << path;
+        }
+    }
     tail << QStringLiteral("--b-roll-sound")
-         << (brollMix ? QStringLiteral("mix") : QStringLiteral("clip"));
+         << (brollMix ? QStringLiteral("mix") : QStringLiteral("voice"));
     if (decide)
         tail << QStringLiteral("--decide");
     return launchTool(tail, botcutCli, uv, cliProject);
@@ -82,7 +87,7 @@ CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const
         return {QString(), {}, QStringLiteral("No output directory")};
     const QStringList tail{QStringLiteral("render"), outDir, QStringLiteral("--scene-transition"),
                            sceneTransitionValue(sceneTransition), QStringLiteral("--b-roll-sound"),
-                           brollMix ? QStringLiteral("mix") : QStringLiteral("clip")};
+                           brollMix ? QStringLiteral("mix") : QStringLiteral("voice")};
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -112,16 +117,29 @@ CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, cons
 
 CutLaunch cutReviseLaunch(const QString &cutsPath, const QString &note, const QString &botcutCli,
                           const QString &uv, const QString &cliProject, const QString &pace,
-                          const QString &sceneTransition) {
+                          const QString &sceneTransition, bool propose, const QString &history) {
     if (cutsPath.isEmpty())
         return {QString(), {}, QStringLiteral("No cuts.json")};
     const QString trimmed = note.simplified();
     if (trimmed.isEmpty())
         return {QString(), {}, QStringLiteral("Say what to change")};
+    QStringList tail{QStringLiteral("revise"), cutsPath, QStringLiteral("--pace"),
+                     paceValue(pace), QStringLiteral("--scene-transition"),
+                     sceneTransitionValue(sceneTransition)};
+    if (propose)
+        tail << QStringLiteral("--propose");
+    if (!history.isEmpty())
+        tail << QStringLiteral("--history") << history;
     // `--` keeps a note such as --help from being parsed as an option.
-    const QStringList tail{QStringLiteral("revise"), cutsPath, QStringLiteral("--pace"),
-                           paceValue(pace), QStringLiteral("--scene-transition"),
-                           sceneTransitionValue(sceneTransition), QStringLiteral("--"), trimmed};
+    tail << QStringLiteral("--") << trimmed;
+    return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+CutLaunch cutApplyLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
+                         const QString &cliProject) {
+    if (cutsPath.isEmpty())
+        return {QString(), {}, QStringLiteral("No cuts.json")};
+    const QStringList tail{QStringLiteral("revise"), cutsPath, QStringLiteral("--apply")};
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -197,7 +215,7 @@ CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QStr
 }
 
 bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode, QStringList *files,
-                  QString *error, QString *intent, QVariantList *lines) {
+                  QString *error, QString *intent, QVariantList *lines, QStringList *brollFiles) {
     const QJsonDocument doc = QJsonDocument::fromJson(json);
     if (!doc.isObject()) {
         *error = QStringLiteral("Cut list is not a JSON object");
@@ -268,11 +286,28 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
             }
         }
     }
+    if (brollFiles != nullptr) {
+        brollFiles->clear();
+        // A B-roll entry has to be one of the files, and a card is never B-roll.
+        // Anything else is dropped rather than refused, so a hand-edited list still opens.
+        for (const QJsonValue &value : root.value(QStringLiteral("broll")).toArray()) {
+            if (!value.isString() || value.toString().isEmpty())
+                continue;
+            const QFileInfo info(value.toString());
+            const QString path = info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
+                                                   : info.absoluteFilePath();
+            if (!parsed.contains(path) || brollFiles->contains(path))
+                continue;
+            if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
+                continue;
+            brollFiles->append(path);
+        }
+    }
     return true;
 }
 
 QByteArray writeCutList(const QString &mode, const QStringList &files, const QString &intent,
-                        const QVariantList &lines) {
+                        const QVariantList &lines, const QStringList &brollFiles) {
     if ((mode != QLatin1String("speech") && mode != QLatin1String("assemble")) || files.isEmpty())
         return {};
     QJsonArray array;
@@ -284,6 +319,13 @@ QByteArray writeCutList(const QString &mode, const QStringList &files, const QSt
     root.insert(QStringLiteral("mode"), mode);
     root.insert(QStringLiteral("intent"), movie);
     root.insert(QStringLiteral("files"), array);
+    QJsonArray broll;
+    for (const QString &path : files) {
+        if (brollFiles.contains(path))
+            broll.append(QFileInfo(path).absoluteFilePath());
+    }
+    if (!broll.isEmpty())
+        root.insert(QStringLiteral("broll"), broll);
     if (!lines.isEmpty()) {
         QJsonArray lineArray;
         for (const QVariant &item : lines) {
@@ -318,7 +360,8 @@ QString cutStatusFromLine(const QString &line) {
     if (trimmed.isEmpty() || trimmed.size() > 200)
         return {};
     if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Reading pictures")
-        || trimmed == QLatin1String("Choosing takes") || trimmed == QLatin1String("Trying again")
+        || trimmed == QLatin1String("Reading beats") || trimmed == QLatin1String("Choosing takes")
+        || trimmed == QLatin1String("Choosing covers") || trimmed == QLatin1String("Trying again")
         || trimmed == QLatin1String("Revising"))
         return trimmed;
     static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));

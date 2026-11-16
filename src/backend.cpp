@@ -6,10 +6,12 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QVariantMap>
+#include <QPair>
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
@@ -148,8 +150,7 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     const QString pace = QSettings().value(QStringLiteral("pace"), QStringLiteral("open")).toString();
     if (pace == QLatin1String("measured") || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
         m_pace = pace;
-    m_broll = QSettings().value(QStringLiteral("broll"), false).toBool();
-    // Only an explicit false is clip sound. A missing or unknown value stays mix.
+    // Only an explicit false is voice only. A missing or unknown value stays mix.
     const QString storedMix = QSettings().value(QStringLiteral("brollMix"), true).toString();
     m_brollMix = storedMix != QLatin1String("false");
 
@@ -406,6 +407,7 @@ void Backend::closeProject() {
         return;
     const bool wasUnsaved = renderedUnsaved();
     m_tray.clear();
+    m_brollFiles.clear();
     m_trayIndex = -1;
     m_selects.clear();
     m_undoSelects.clear();
@@ -600,16 +602,6 @@ void Backend::setSceneTransition(const QString &value) {
     applySceneTransition(value);
 }
 
-void Backend::setBroll(bool value) {
-    if (m_busy)
-        return;
-    if (value == m_broll)
-        return;
-    m_broll = value;
-    QSettings().setValue(QStringLiteral("broll"), value);
-    emit brollChanged();
-}
-
 void Backend::setBrollMix(bool value) {
     if (m_busy)
         return;
@@ -652,10 +644,149 @@ void Backend::clearReviseThread() {
         m_canRevert = false;
         emit canRevertChanged();
     }
-    if (!m_reviseNotes.isEmpty()) {
-        m_reviseNotes.clear();
-        emit reviseNotesChanged();
+    const QString proposal = proposalFile();
+    if (!proposal.isEmpty() && QFileInfo::exists(proposal))
+        QFile::remove(proposal);
+    const QString history = chatHistoryFile();
+    if (!history.isEmpty() && QFileInfo::exists(history))
+        QFile::remove(history);
+    if (!m_chat.isEmpty() || m_proposalPending) {
+        m_chat.clear();
+        m_proposalPending = false;
+        m_pendingChange.clear();
+        emit chatChanged();
     }
+}
+
+QString Backend::proposalFile() const {
+    return m_cutOut.isEmpty() ? QString() : QDir(m_cutOut).filePath(QStringLiteral("proposal.json"));
+}
+
+QString Backend::chatHistoryFile() const {
+    return m_cutOut.isEmpty() ? QString() : QDir(m_cutOut).filePath(QStringLiteral("chat.json"));
+}
+
+// The turns so far, for the CLI to put before the note. A bot turn is its reply.
+bool Backend::writeChatHistory() const {
+    const QString path = chatHistoryFile();
+    if (path.isEmpty())
+        return false;
+    QJsonArray rows;
+    for (const QVariant &item : m_chat) {
+        const QVariantMap turn = item.toMap();
+        QJsonObject row;
+        row.insert(QStringLiteral("role"), turn.value(QStringLiteral("role")).toString());
+        row.insert(QStringLiteral("text"), turn.value(QStringLiteral("text")).toString());
+        rows.append(row);
+    }
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    const QByteArray bytes = QJsonDocument(rows).toJson(QJsonDocument::Indented);
+    if (file.write(bytes) != bytes.size())
+        return false;
+    return file.commit();
+}
+
+void Backend::appendChat(const QString &role, const QString &text, const QString &change) {
+    QVariantMap turn;
+    turn.insert(QStringLiteral("role"), role);
+    turn.insert(QStringLiteral("text"), text);
+    turn.insert(QStringLiteral("change"), change);
+    m_chat.append(turn);
+    while (m_chat.size() > 40)
+        m_chat.removeFirst();
+    emit chatChanged();
+}
+
+// A note that never reached the model goes back to the field, not into the thread.
+void Backend::dropLastYouTurn() {
+    if (m_chat.isEmpty())
+        return;
+    if (m_chat.last().toMap().value(QStringLiteral("role")).toString() != QLatin1String("you"))
+        return;
+    m_chat.removeLast();
+    emit chatChanged();
+}
+
+QString Backend::describeChange(const QJsonObject &proposal, bool past) const {
+    QSet<int> keep;
+    const QJsonArray kept = proposal.value(QStringLiteral("keep")).toArray();
+    for (const QJsonValue &item : kept)
+        keep.insert(item.toObject().value(QStringLiteral("id")).toInt(-1));
+    int dropped = 0;
+    int restored = 0;
+    for (const QVariant &item : m_selects) {
+        const QVariantMap row = item.toMap();
+        bool ok = false;
+        const int id = row.value(QStringLiteral("id")).toInt(&ok);
+        if (!ok)
+            continue;
+        const bool nowKept = !row.contains(QStringLiteral("keep")) || row.value(QStringLiteral("keep")).toBool();
+        const bool willKeep = keep.contains(id);
+        if (nowKept && !willKeep)
+            ++dropped;
+        else if (!nowKept && willKeep)
+            ++restored;
+    }
+    QStringList parts;
+    if (dropped == 1)
+        parts << (past ? tr("Dropped 1 line.") : tr("Drops 1 line."));
+    else if (dropped > 1)
+        parts << (past ? tr("Dropped %1 lines.").arg(dropped) : tr("Drops %1 lines.").arg(dropped));
+    if (restored == 1)
+        parts << (past ? tr("Put back 1 line.") : tr("Puts back 1 line."));
+    else if (restored > 1)
+        parts << (past ? tr("Put back %1 lines.").arg(restored) : tr("Puts back %1 lines.").arg(restored));
+    const QString intent = proposal.value(QStringLiteral("intent")).toString().trimmed();
+    if (!intent.isEmpty() && intent != intentForCut())
+        parts << tr("New movie sentence.");
+    const QString pace = proposal.value(QStringLiteral("pace")).toString();
+    if ((pace == QLatin1String("open") || pace == QLatin1String("measured")
+         || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
+        && pace != m_pace) {
+        QString word = tr("Open");
+        if (pace == QLatin1String("measured"))
+            word = tr("Measured");
+        else if (pace == QLatin1String("tight"))
+            word = tr("Tight");
+        else if (pace == QLatin1String("frenzied"))
+            word = tr("Frenzied");
+        parts << (past ? tr("Pace is now %1.").arg(word) : tr("Pace becomes %1.").arg(word));
+    }
+    if (proposal.contains(QStringLiteral("dip"))) {
+        const bool dip = proposal.value(QStringLiteral("dip")).toBool();
+        if (dip != (m_sceneTransition == QLatin1String("dip")))
+            parts << (dip ? tr("Fade to black on.") : tr("Fade to black off."));
+    }
+    if (proposal.value(QStringLiteral("covers")).isArray()) {
+        // Runs are compared by their lines. A run on the same lines from another beat reads as the same.
+        QSet<QPair<int, int>> now;
+        for (const QVariant &item : m_covers) {
+            const QVariantMap cover = item.toMap();
+            const int first = cover.value(QStringLiteral("line")).toInt();
+            now.insert({first, cover.value(QStringLiteral("through"), first).toInt()});
+        }
+        QSet<QPair<int, int>> next;
+        for (const QJsonValue &item : proposal.value(QStringLiteral("covers")).toArray()) {
+            const QJsonObject cover = item.toObject();
+            const int first = cover.value(QStringLiteral("line")).toInt();
+            next.insert({first, cover.value(QStringLiteral("through")).toInt(first)});
+        }
+        const int laid = (next - now).size();
+        const int dropped = (now - next).size();
+        if (laid == 1)
+            parts << (past ? tr("Laid 1 stretch of B-roll.") : tr("Lays 1 stretch of B-roll."));
+        else if (laid > 1)
+            parts << (past ? tr("Laid %1 stretches of B-roll.").arg(laid)
+                           : tr("Lays %1 stretches of B-roll.").arg(laid));
+        if (dropped == 1)
+            parts << (past ? tr("Dropped 1 stretch of B-roll.") : tr("Drops 1 stretch of B-roll."));
+        else if (dropped > 1)
+            parts << (past ? tr("Dropped %1 stretches of B-roll.").arg(dropped)
+                           : tr("Drops %1 stretches of B-roll.").arg(dropped));
+    }
+    return parts.join(QLatin1Char(' '));
 }
 
 double Backend::maxPause() const {
@@ -734,6 +865,30 @@ void Backend::addDropped(const QList<QUrl> &urls) {
     addTrayFiles(paths);
 }
 
+QStringList Backend::brollFiles() const {
+    QStringList found;
+    for (const QString &path : m_tray) {
+        if (m_brollFiles.contains(path))
+            found.append(path);
+    }
+    return found;
+}
+
+bool Backend::isBroll(const QString &path) const {
+    return m_brollFiles.contains(path);
+}
+
+void Backend::toggleBroll(int index) {
+    if (m_busy || index < 0 || index >= m_tray.size())
+        return;
+    const QString path = m_tray.at(index);
+    if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
+        return;
+    if (!m_brollFiles.remove(path))
+        m_brollFiles.insert(path);
+    emit trayChanged();
+}
+
 void Backend::moveTray(int delta) {
     if (m_busy)
         return;
@@ -750,6 +905,7 @@ void Backend::removeTray() {
         return;
     if (m_trayIndex < 0 || m_trayIndex >= m_tray.size())
         return;
+    m_brollFiles.remove(m_tray.at(m_trayIndex));
     m_tray.removeAt(m_trayIndex);
     if (m_tray.isEmpty())
         m_trayIndex = -1;
@@ -800,12 +956,14 @@ bool Backend::loadCutListFile(const QUrl &url) {
     QStringList files;
     QString intent;
     QVariantList lines;
+    QStringList broll;
     if (!parseCutList(file.readAll(), QFileInfo(file).absolutePath(), &mode, &files, &error, &intent,
-                      &lines)) {
+                      &lines, &broll)) {
         setStatus(error);
         return false;
     }
     m_tray = files;
+    m_brollFiles = QSet<QString>(broll.begin(), broll.end());
     m_trayIndex = 0;
     m_selects = lines;
     m_covers.clear();
@@ -834,7 +992,7 @@ void Backend::writeCutListFile(const QUrl &url) {
     }
     if (!path.endsWith(QStringLiteral(".botcut.json"), Qt::CaseInsensitive))
         path += QStringLiteral(".botcut.json");
-    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects);
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles());
     if (bytes.isEmpty()) {
         setStatus(QStringLiteral("Could not save the list"));
         return;
@@ -1000,7 +1158,7 @@ QString Backend::listForCurrentTray() {
                                   + QString::number(QDateTime::currentMSecsSinceEpoch())
                                   + QStringLiteral(".botcut.json"));
     }
-    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects);
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles());
     if (bytes.isEmpty())
         return {};
     QFile file(path);
@@ -1088,9 +1246,7 @@ void Backend::startCut() {
     const bool decide = m_cutMode == QLatin1String("speech");
     const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, cli, projectOk ? uv : QString(),
                                           projectOk ? project : QString(), intentForCut(), decide,
-                                          m_sceneTransition, maxPause(),
-                                          m_broll && m_cutMode == QLatin1String("speech"),
-                                          m_brollMix);
+                                          m_sceneTransition, maxPause(), brollFiles(), m_brollMix);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -1166,7 +1322,10 @@ void Backend::clearCover(int lineId) {
 }
 
 namespace {
-QVariantList coversFromJson(const QJsonValue &value) {
+// A cover is a run: the B-roll clip, its first and last line, the window in
+// the B-roll file, the model's reason, and a still from the beat it starts on.
+// An older cover names one line and no run.
+QVariantList coversFromJson(const QJsonValue &value, const QString &cutsPath = QString()) {
     QVariantList rows;
     if (!value.isArray())
         return rows;
@@ -1179,6 +1338,24 @@ QVariantList coversFromJson(const QJsonValue &value) {
         QVariantMap row;
         row.insert(QStringLiteral("clip"), obj.value(QStringLiteral("clip")).toInt());
         row.insert(QStringLiteral("line"), obj.value(QStringLiteral("line")).toInt());
+        if (obj.value(QStringLiteral("through")).isDouble())
+            row.insert(QStringLiteral("through"), obj.value(QStringLiteral("through")).toInt());
+        // The window inside the B-roll file. An older cover has none and plays from its start.
+        if (obj.value(QStringLiteral("start")).isDouble() && obj.value(QStringLiteral("end")).isDouble()) {
+            row.insert(QStringLiteral("start"), obj.value(QStringLiteral("start")).toDouble());
+            row.insert(QStringLiteral("end"), obj.value(QStringLiteral("end")).toDouble());
+        }
+        const QString reason = obj.value(QStringLiteral("reason")).toString().simplified();
+        if (!reason.isEmpty())
+            row.insert(QStringLiteral("reason"), reason);
+        const QString still = obj.value(QStringLiteral("still")).toString();
+        if (!still.isEmpty()) {
+            const QFileInfo stillInfo(still);
+            row.insert(QStringLiteral("still"),
+                       stillInfo.isRelative() && !cutsPath.isEmpty()
+                           ? QFileInfo(cutsPath).dir().absoluteFilePath(still)
+                           : stillInfo.absoluteFilePath());
+        }
         rows.append(row);
     }
     return rows;
@@ -1197,21 +1374,86 @@ void putCovers(QJsonObject *root, const QVariantList &covers) {
         QJsonObject obj;
         obj.insert(QStringLiteral("clip"), row.value(QStringLiteral("clip")).toInt());
         obj.insert(QStringLiteral("line"), row.value(QStringLiteral("line")).toInt());
+        if (row.contains(QStringLiteral("through")))
+            obj.insert(QStringLiteral("through"), row.value(QStringLiteral("through")).toInt());
+        if (row.contains(QStringLiteral("start")) && row.contains(QStringLiteral("end"))) {
+            obj.insert(QStringLiteral("start"), row.value(QStringLiteral("start")).toDouble());
+            obj.insert(QStringLiteral("end"), row.value(QStringLiteral("end")).toDouble());
+        }
+        const QString reason = row.value(QStringLiteral("reason")).toString();
+        if (!reason.isEmpty())
+            obj.insert(QStringLiteral("reason"), reason);
+        const QString still = row.value(QStringLiteral("still")).toString();
+        if (!still.isEmpty())
+            obj.insert(QStringLiteral("still"), still);
         array.append(obj);
     }
     root->insert(QStringLiteral("covers"), array);
 }
 }
 
+// Where each line id sits in the list, so a run's range can be read off.
+static QHash<int, int> linePositions(const QVariantList &selects) {
+    QHash<int, int> positions;
+    for (int i = 0; i < selects.size(); ++i) {
+        bool ok = false;
+        const int id = selects.at(i).toMap().value(QStringLiteral("id")).toInt(&ok);
+        if (ok)
+            positions.insert(id, i);
+    }
+    return positions;
+}
+
+// True when this run covers the line at that list position.
+static bool runCovers(const QVariantMap &cover, int position, const QHash<int, int> &positions) {
+    const int first = positions.value(cover.value(QStringLiteral("line")).toInt(), -1);
+    if (first < 0)
+        return false;
+    if (!cover.contains(QStringLiteral("through")))
+        return position == first;
+    const int last = positions.value(cover.value(QStringLiteral("through")).toInt(), first);
+    return position >= first && position <= std::max(first, last);
+}
+
 bool Backend::takeCover(int lineId) {
+    const QHash<int, int> positions = linePositions(m_selects);
+    const int position = positions.value(lineId, -1);
     bool found = false;
     for (int i = m_covers.size() - 1; i >= 0; --i) {
-        if (m_covers.at(i).toMap().value(QStringLiteral("line")).toInt() != lineId)
+        const QVariantMap cover = m_covers.at(i).toMap();
+        const bool hit = position >= 0 ? runCovers(cover, position, positions)
+                                       : cover.value(QStringLiteral("line")).toInt() == lineId;
+        if (!hit)
             continue;
         m_covers.removeAt(i);
         found = true;
     }
     return found;
+}
+
+QString Backend::describeCovers() const {
+    const QHash<int, int> positions = linePositions(m_selects);
+    int runs = 0;
+    double seconds = 0.0;
+    for (const QVariant &item : m_covers) {
+        const QVariantMap cover = item.toMap();
+        const int first = positions.value(cover.value(QStringLiteral("line")).toInt(), -1);
+        if (first < 0)
+            continue;
+        const QVariantMap line = m_selects.at(first).toMap();
+        if (line.contains(QStringLiteral("keep")) && !line.value(QStringLiteral("keep")).toBool())
+            continue;
+        ++runs;
+        if (cover.contains(QStringLiteral("start")) && cover.contains(QStringLiteral("end")))
+            seconds += std::max(0.0, cover.value(QStringLiteral("end")).toDouble()
+                                         - cover.value(QStringLiteral("start")).toDouble());
+    }
+    if (runs == 0)
+        return QString();
+    const int whole = qRound(seconds);
+    if (runs == 1)
+        return tr("B-roll over 1 stretch, %1 s.").arg(whole);
+    return tr("B-roll over %1 stretches, %2 s.").arg(runs).arg(whole);
 }
 
 bool Backend::storeCovers(bool withLines) const {
@@ -1274,7 +1516,7 @@ void Backend::loadSelects(const QString &cutsPath) {
         rows.append(row);
     }
     m_selects = rows;
-    m_covers = coversFromJson(doc.object().value(QStringLiteral("covers")));
+    m_covers = coversFromJson(doc.object().value(QStringLiteral("covers")), cutsPath);
     QStringList clipPaths;
     for (const QJsonValue &value : doc.object().value(QStringLiteral("clips")).toArray()) {
         if (!value.isObject())
@@ -1482,6 +1724,8 @@ bool Backend::writeCutsForRender(bool includeIntent) {
         QJsonObject clip;
         clip.insert(QStringLiteral("index"), i);
         clip.insert(QStringLiteral("path"), m_tray.at(i));
+        if (isBroll(m_tray.at(i)))
+            clip.insert(QStringLiteral("role"), QStringLiteral("broll"));
         clips.append(clip);
     }
     QJsonObject tighten;
@@ -1781,8 +2025,50 @@ bool Backend::sendRevise(const QString &note) {
     const QString uv = findTool(QStringLiteral("uv"));
     const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
     const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    // A new note replaces any proposal still waiting.
+    const QString stale = proposalFile();
+    if (!stale.isEmpty() && QFileInfo::exists(stale))
+        QFile::remove(stale);
+    m_proposalPending = false;
+    m_pendingChange.clear();
+    const QString history = writeChatHistory() ? chatHistoryFile() : QString();
     const CutLaunch launch = cutReviseLaunch(cuts, trimmed, cli, projectOk ? uv : QString(),
-                                             projectOk ? project : QString(), m_pace, m_sceneTransition);
+                                             projectOk ? project : QString(), m_pace, m_sceneTransition,
+                                             true, history);
+    if (!launch.error.isEmpty()) {
+        setStatus(launch.error);
+        emit chatChanged();
+        return false;
+    }
+    m_reviseNote = trimmed;
+    appendChat(QStringLiteral("you"), trimmed);
+    setBusy(true);
+    setStatus(QStringLiteral("Changing…"));
+    m_cutStage = CutStage::Propose;
+    startCutProcess(launch);
+    return true;
+}
+
+bool Backend::applyProposal() {
+    if (m_busy || !m_proposalPending)
+        return false;
+    const QString cuts = m_cutOut.isEmpty() ? QString() : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+    const QString proposal = proposalFile();
+    if (cuts.isEmpty() || !QFileInfo::exists(cuts) || proposal.isEmpty() || !QFileInfo::exists(proposal)) {
+        setStatus(QStringLiteral("Could not read the change"));
+        return false;
+    }
+    // The file carries what the person has flipped since the proposal was made.
+    if (!syncLinesKeepingPause(cuts)) {
+        setStatus(QStringLiteral("Could not save the line list"));
+        return false;
+    }
+    const QString cli = m_launchProgram.isEmpty() ? findTool(QStringLiteral("botcut-cli")) : m_launchProgram;
+    const QString uv = findTool(QStringLiteral("uv"));
+    const QString project = QDir::home().filePath(QStringLiteral("code/botcut/cli"));
+    const bool projectOk = QFileInfo::exists(QDir(project).filePath(QStringLiteral("pyproject.toml")));
+    const CutLaunch launch = cutApplyLaunch(cuts, cli, projectOk ? uv : QString(),
+                                            projectOk ? project : QString());
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return false;
@@ -1793,12 +2079,22 @@ bool Backend::sendRevise(const QString &note) {
         return false;
     }
     m_reviseStamp = stampFile.readAll();
-    m_reviseNote = trimmed;
     setBusy(true);
     setStatus(QStringLiteral("Changing…"));
     m_cutStage = CutStage::Revise;
     startCutProcess(launch);
     return true;
+}
+
+void Backend::dismissProposal() {
+    if (m_busy || !m_proposalPending)
+        return;
+    const QString proposal = proposalFile();
+    if (!proposal.isEmpty() && QFileInfo::exists(proposal))
+        QFile::remove(proposal);
+    m_proposalPending = false;
+    m_pendingChange.clear();
+    emit chatChanged();
 }
 
 void Backend::revertRevise() {
@@ -1961,6 +2257,8 @@ void Backend::startCutProcess(const CutLaunch &launch) {
                 m_cutOut = m_cutOutRestore;
                 m_restoreCutOut = false;
             }
+            if (m_cutStage == CutStage::Propose)
+                dropLastYouTurn();
             m_cutStage = CutStage::Idle;
             m_reviseNote.clear();
             m_reviseStamp.clear();
@@ -2012,6 +2310,8 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         return tail;
     };
     if (status != QProcess::NormalExit || code != 0) {
+        if (m_cutStage == CutStage::Propose)
+            dropLastYouTurn();
         m_cutStage = CutStage::Idle;
         m_reviseNote.clear();
         m_reviseStamp.clear();
@@ -2022,10 +2322,48 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         setStatus(tail.isEmpty() ? QStringLiteral("Cut failed") : tail);
         return;
     }
+    if (m_cutStage == CutStage::Propose) {
+        m_cutStage = CutStage::Idle;
+        m_reviseNote.clear();
+        const QString path = proposalFile();
+        QFile file(path);
+        QJsonObject proposal;
+        if (!path.isEmpty() && file.open(QIODevice::ReadOnly))
+            proposal = QJsonDocument::fromJson(file.readAll()).object();
+        const QString reply = proposal.value(QStringLiteral("reply")).toString().simplified();
+        if (reply.isEmpty()) {
+            // Exit 0 with no proposal is not an answer. The note goes back to the field.
+            dropLastYouTurn();
+            setBusy(false);
+            setStatus(QStringLiteral("Could not read the change"));
+            return;
+        }
+        const QString change = describeChange(proposal, false);
+        m_pendingChange = describeChange(proposal, true);
+        m_proposalPending = !change.isEmpty();
+        if (!m_proposalPending)
+            QFile::remove(path);
+        appendChat(QStringLiteral("bot"), reply, change.isEmpty() ? tr("Nothing would change.") : change);
+        setBusy(false);
+        setStatus(QString());
+        return;
+    }
     if (m_cutStage == CutStage::Decide) {
         m_cutStage = CutStage::Idle;
         setBusy(false);
-        loadSelects(QDir(m_cutOut).filePath(QStringLiteral("cuts.json")));
+        const QString cuts = QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+        loadSelects(cuts);
+        // The editor says what B-roll it laid and why. It is not a proposal: nothing waits on Apply.
+        QFile file(cuts);
+        if (file.open(QIODevice::ReadOnly)) {
+            const QString reply = QJsonDocument::fromJson(file.readAll())
+                                      .object()
+                                      .value(QStringLiteral("covers_reply"))
+                                      .toString()
+                                      .simplified();
+            if (!reply.isEmpty())
+                appendChat(QStringLiteral("bot"), reply, describeCovers());
+        }
         return;
     }
     if (m_cutStage == CutStage::Run || m_cutStage == CutStage::Render) {
@@ -2052,6 +2390,15 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
         bool dip = false;
         if (unchanged || !readReviseOutcome(cuts, &intent, &pace, &dip, &deliver)) {
             m_reviseNote.clear();
+            // The proposal is gone or did not land. Nothing is waiting any more.
+            const QString leftover = proposalFile();
+            if (!leftover.isEmpty() && QFileInfo::exists(leftover))
+                QFile::remove(leftover);
+            if (m_proposalPending) {
+                m_proposalPending = false;
+                m_pendingChange.clear();
+                emit chatChanged();
+            }
             setBusy(false);
             setStatus(QStringLiteral("Could not read the change"));
             return;
@@ -2068,13 +2415,11 @@ void Backend::cutProcessFinished(int code, QProcess::ExitStatus status) {
             || pace == QLatin1String("tight") || pace == QLatin1String("frenzied"))
             applyPace(pace);
         applySceneTransition(dip ? QStringLiteral("dip") : QStringLiteral("off"));
-        if (!m_reviseNote.isEmpty()) {
-            m_reviseNotes.append(m_reviseNote);
-            m_reviseNote.clear();
-            while (m_reviseNotes.size() > 3)
-                m_reviseNotes.removeFirst();
-            emit reviseNotesChanged();
-        }
+        m_reviseNote.clear();
+        m_proposalPending = false;
+        const QString done = m_pendingChange;
+        m_pendingChange.clear();
+        appendChat(QStringLiteral("bot"), tr("Done."), done);
         emit canRevertChanged();
         setBusy(false);
         if (deliver == QLatin1String("render"))

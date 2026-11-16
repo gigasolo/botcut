@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QObject>
 #include <QProcess>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -44,14 +45,19 @@ class Backend : public QObject {
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY trayChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY cutModeChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY sceneTransitionChanged)
-    Q_PROPERTY(bool broll READ broll WRITE setBroll NOTIFY brollChanged)
+    // The tray files marked B-roll, in tray order. Their picture covers spoken lines.
+    Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY trayChanged)
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY brollMixChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
-    Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
+    // The chat about this line list: {role: "you" | "bot", text, change}. A bot
+    // turn carries the model's reply and the change it would make, or made.
+    Q_PROPERTY(QVariantList chat READ chat NOTIFY chatChanged)
+    // The last bot turn is a proposal that has not been applied or left.
+    Q_PROPERTY(bool proposalPending READ proposalPending NOTIFY chatChanged)
     Q_PROPERTY(bool canRevert READ canRevert NOTIFY canRevertChanged)
     Q_PROPERTY(QVariantList selects READ selects NOTIFY selectsChanged)
     Q_PROPERTY(bool gathering READ gathering NOTIFY gatheringChanged)
@@ -95,13 +101,14 @@ public:
     int trayIndex() const { return m_trayIndex; }
     QString cutMode() const { return m_cutMode; }
     QString sceneTransition() const { return m_sceneTransition; }
-    bool broll() const { return m_broll; }
+    QStringList brollFiles() const;
     bool brollMix() const { return m_brollMix; }
     QVariantList covers() const { return m_covers; }
     QStringList cutClips() const { return m_cutClips; }
     QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
-    QStringList reviseNotes() const { return m_reviseNotes; }
+    QVariantList chat() const { return m_chat; }
+    bool proposalPending() const { return m_proposalPending; }
     bool canRevert() const { return m_canRevert; }
     QVariantList selects() const { return m_selects; }
     QVariantList recentLists() const;
@@ -117,7 +124,6 @@ public:
     void setTrayIndex(int index);
     void setCutMode(const QString &mode);
     void setSceneTransition(const QString &value);
-    void setBroll(bool value);
     void setBrollMix(bool value);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
@@ -141,6 +147,9 @@ public:
     int trayThumbRevision() const { return m_trayThumbRevision; }
     Q_INVOKABLE void moveTray(int delta);
     Q_INVOKABLE void removeTray();
+    Q_INVOKABLE bool isBroll(const QString &path) const;
+    // Flip the shot at that tray index between a shot and B-roll. A card stays a card.
+    Q_INVOKABLE void toggleBroll(int index);
     Q_INVOKABLE void openCutListDialog();
     Q_INVOKABLE void saveCutListDialog();
     Q_INVOKABLE void reopenList(const QString &path);
@@ -155,7 +164,10 @@ public:
     Q_INVOKABLE void exportPlan();
     Q_INVOKABLE void writeCaptions();
     Q_INVOKABLE void makeShort();
+    // Asks the model for a proposal and shows its reply. Nothing changes until applyProposal.
     Q_INVOKABLE bool sendRevise(const QString &note);
+    Q_INVOKABLE bool applyProposal();
+    Q_INVOKABLE void dismissProposal();
     Q_INVOKABLE void revertRevise();
     // `place` is "open" (front of the tray) or "close" (end). The sentence is the prompt.
     Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence);
@@ -197,13 +209,12 @@ signals:
     void trayThumbsChanged();
     void cutModeChanged();
     void sceneTransitionChanged();
-    void brollChanged();
     void brollMixChanged();
     void coversChanged();
     void cutClipsChanged();
     void paceChanged();
     void intentChanged();
-    void reviseNotesChanged();
+    void chatChanged();
     void canRevertChanged();
     void selectsChanged();
     void recentsChanged();
@@ -270,6 +281,15 @@ private:
     bool takeCover(int lineId);
     bool readReviseOutcome(const QString &cutsPath, QString *intent, QString *pace, bool *dip,
                            QString *deliver) const;
+    QString proposalFile() const;
+    QString chatHistoryFile() const;
+    bool writeChatHistory() const;
+    void appendChat(const QString &role, const QString &text, const QString &change = QString());
+    void dropLastYouTurn();
+    // What a proposal would do to the current list, as one line. Empty when nothing changes.
+    QString describeChange(const QJsonObject &proposal, bool past) const;
+    // The B-roll laid on the kept lines, as one line: "B-roll over 3 stretches, 31 s."
+    QString describeCovers() const;
     QUrl suggestedCutListUrl() const;
     Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, bool ownsKeys,
             QObject *parent);
@@ -307,13 +327,17 @@ private:
     QString m_cutMode = QStringLiteral("speech");
     QString m_listPath;
     QString m_sceneTransition = QStringLiteral("dip");
-    bool m_broll = false;
+    // Absolute paths, a subset of m_tray. Keyed by path so a reorder needs no bookkeeping.
+    QSet<QString> m_brollFiles;
     bool m_brollMix = true;
     QString m_pace = QStringLiteral("open");
     QString m_planCuts;
     QString m_planMovie;
     QString m_intent;
-    QStringList m_reviseNotes;
+    QVariantList m_chat;
+    bool m_proposalPending = false;
+    // The change line of the pending proposal, in the past tense, for the Done turn.
+    QString m_pendingChange;
     QString m_reviseNote;
     QByteArray m_reviseStamp;
     bool m_canRevert = false;
@@ -336,7 +360,7 @@ private:
     QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Revise, Card };
+    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Propose, Revise, Card };
     CutStage m_cutStage = CutStage::Idle;
     QString m_cardPath;
     QString m_cardPlace;

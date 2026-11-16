@@ -359,3 +359,53 @@ def test_grab_still_writes_one_jpeg(tmp_path):
     assert grab_still(str(video), 0.4, str(dest))
     assert dest.stat().st_size > 0
     assert grab_still(str(tmp_path / "missing.mp4"), 0.0, str(tmp_path / "no.jpg")) is False
+
+
+def test_render_args_brings_a_full_range_clip_to_limited_in_its_own_branch():
+    # A Hover clip is yuvj420p, color_range pc. The DJI next to it is limited.
+    # concat cannot fix that on VA-API frames, so the branch converts first.
+    clips = [
+        {"path": "/tmp/dji.mp4", "width": 2688, "height": 1512, "fps": 25.0, "pix_fmt": "yuv420p10le",
+         "color_range": "tv"},
+        {"path": "/tmp/hover.mp4", "width": 3840, "height": 2160, "fps": 29.97, "pix_fmt": "yuvj420p",
+         "color_range": "pc"},
+        {"path": "/tmp/phone.mp4", "width": 1920, "height": 1080, "fps": 30.0, "pix_fmt": "yuv420p",
+         "color_range": "pc"},
+    ]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 1.0, "reason": "a"},
+        {"clip": 1, "start": 27.0, "end": 29.0, "reason": "b"},
+        {"clip": 2, "start": 0.0, "end": 1.0, "reason": "c"},
+    ]
+    args = render_args(segs, clips, "/tmp/out.mp4", encoder="vaapi", device="/dev/dri/renderD128")
+    branches = args[args.index("-filter_complex") + 1].split(";")
+    assert branches[0].startswith("[0:v]scale_vaapi=")
+    assert "range" not in branches[0]
+    assert branches[2].startswith("[1:v]scale_vaapi=")
+    assert "hwdownload,format=nv12,scale=in_range=pc:out_range=tv,pad=2688:1512" in branches[2]
+    assert "hwdownload,format=nv12,scale=in_range=pc:out_range=tv,pad=2688:1512" in branches[4]
+
+    cpu = render_args(segs, clips, "/tmp/out.mp4")
+    cpu_branches = cpu[cpu.index("-filter_complex") + 1].split(";")
+    assert "range" not in cpu_branches[0]
+    assert "[1:v]scale=2688:1512:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=" in cpu_branches[2]
+    assert "[2:v]scale=2688:1512:force_original_aspect_ratio=decrease:in_range=pc:out_range=tv,pad=" in cpu_branches[4]
+
+
+def test_ffmpeg_error_detail_names_the_cause_not_the_thread_exits():
+    from botcut.media import ffmpeg_error_detail
+
+    log = "\n".join(
+        [
+            "[in#43 @ 0x1] stream 0, timescale not set",
+            "Impossible to convert between the formats supported by the filter 'graph 0 input from stream 2:0' and the filter 'auto_scale_8'",
+            "Link 'graph 0 input from stream 2:0.default' -> 'auto_scale_8.default':",
+            "[fc#0 @ 0x2] Error reinitializing filters!",
+            "[vost#0:0/h264_vaapi @ 0x3] [enc:h264_vaapi @ 0x4] Could not open encoder before EOF",
+            "[vost#0:0/h264_vaapi @ 0x3] Task finished with error code: -22 (Invalid argument)",
+            "[out#0/mp4 @ 0x5] Nothing was written into output file, because at least one of its streams received no packets.",
+        ]
+    )
+    assert ffmpeg_error_detail(log).startswith("Impossible to convert between the formats")
+    assert ffmpeg_error_detail("") == "ffmpeg failed"
+    assert ffmpeg_error_detail("[in#1] stream 0, timescale not set\nx\n") == "x"

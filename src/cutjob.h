@@ -20,7 +20,8 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent = QString(), bool decide = false,
                        const QString &sceneTransition = QStringLiteral("dip"),
-                       double maxPause = 0.8, bool broll = false, bool brollMix = true);
+                       double maxPause = 0.8, const QStringList &brollFiles = {},
+                       bool brollMix = true);
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
@@ -38,9 +39,16 @@ CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, cons
                          const QString &cliProject);
 
 // Pace is a name. --max-pause is applied by the next Cut or Render, not here.
+// With propose, the CLI writes proposal.json beside cuts.json and leaves the
+// lines alone; history names a JSON file of earlier chat turns.
 CutLaunch cutReviseLaunch(const QString &cutsPath, const QString &note, const QString &botcutCli,
                           const QString &uv, const QString &cliProject, const QString &pace,
-                          const QString &sceneTransition);
+                          const QString &sceneTransition, bool propose = false,
+                          const QString &history = QString());
+
+// Lands the proposal.json a propose wrote. No note, no model call.
+CutLaunch cutApplyLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
+                         const QString &cliProject);
 
 // The sentence is positional. `--` keeps it from being read as an option.
 // The output name starts with botcut-card- so a later spoken cut can see it.
@@ -55,12 +63,14 @@ QString ensureCardDirectory(QString *canonical);
 // directory is refused before a process starts.
 QString cardDestinationError(const QString &dest);
 
-// Shot list on disk: version, mode, intent, absolute paths, and optional line
-// decisions. No API key. A list with no lines still opens.
+// Shot list on disk: version, mode, intent, absolute paths, optional line
+// decisions, and the files marked B-roll. No API key. A list with no lines
+// still opens, and so does an older list with no "broll".
 bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode, QStringList *files,
-                  QString *error, QString *intent = nullptr, QVariantList *lines = nullptr);
+                  QString *error, QString *intent = nullptr, QVariantList *lines = nullptr,
+                  QStringList *brollFiles = nullptr);
 QByteArray writeCutList(const QString &mode, const QStringList &files, const QString &intent = QString(),
-                        const QVariantList &lines = {});
+                        const QVariantList &lines = {}, const QStringList &brollFiles = {});
 
 // Child environment for botcut-cli. A typed key is inserted here, never into argv.
 QProcessEnvironment cutProcessEnvironment(const QProcessEnvironment &base, const QString &uiKey);

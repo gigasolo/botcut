@@ -13,11 +13,12 @@ Rectangle {
 
     readonly property bool selected: index === backend.trayIndex
     readonly property bool exists: backend.trayFileExists(modelData)
-    readonly property string title: {
-        var name = baseName(modelData)
-        return name.indexOf("botcut-card-") === 0 ? qsTr("Title card") : name
-    }
-    readonly property string fact: exists ? backend.trayFileSize(modelData) : qsTr("File missing")
+    readonly property bool card: baseName(modelData).indexOf("botcut-card-") === 0
+    // Read through the list so the row follows a toggle. A card is never B-roll.
+    readonly property bool broll: !card && backend.brollFiles.indexOf(modelData) >= 0
+    readonly property string title: card ? qsTr("Title card") : baseName(modelData)
+    readonly property string fact: !exists ? qsTr("File missing")
+                                           : broll ? qsTr("B-roll") : backend.trayFileSize(modelData)
 
     function baseName(path) {
         var s = String(path)
@@ -150,6 +151,26 @@ Rectangle {
                     onClicked: {
                         backend.trayIndex = row.index
                         backend.removeTray()
+                    }
+                }
+            }
+            // A shot becomes B-roll, and B-roll becomes a shot again. A card is neither.
+            Label {
+                objectName: "brollToggle"
+                visible: !row.card
+                text: row.broll ? qsTr("Shot") : qsTr("B-roll")
+                color: theme.foreground
+                opacity: brollArea.enabled ? 0.62 : 0.38
+                font.pixelSize: 13
+                enabled: !backend.busy
+                MouseArea {
+                    id: brollArea
+                    anchors.fill: parent
+                    enabled: parent.enabled
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        backend.trayIndex = row.index
+                        backend.toggleBroll(row.index)
                     }
                 }
             }

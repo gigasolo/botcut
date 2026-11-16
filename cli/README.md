@@ -8,11 +8,13 @@ uv run botcut-cli run a.mp4 b.mp4 c.mp4 --out out/
 uv run botcut-cli run shots.txt --out out/ --mode assemble
 ```
 
-`--mode speech` (the default) keeps the moments that match `--intent`. The default intent keeps each moment, drops flubs and true retakes, and keeps a beat that appears once. Wording about repeated takes uses the retake prompt instead. `--decide` writes `cuts.json` and stops before ffmpeg. `botcut-cli render out/` encodes after a line is restored. `--mode assemble` keeps every file from start to end, in the order given, and does not call speech-to-text or the model. Use it for riding, B-roll, and any clip that should appear even when nobody is talking. `--b-roll` covers one spoken line with a clip's picture. `--b-roll-sound mix` (the default) plays that clip's sound under the voice. `--b-roll-sound clip` plays the clip's own sound for that window. It is not `--mode assemble`, which plays every file in order with its own sound.
+`--mode speech` (the default) keeps the moments that match `--intent`. The default intent keeps each moment, drops flubs and true retakes, and keeps a beat that appears once. Wording about repeated takes uses the retake prompt instead. `--decide` writes `cuts.json` and stops before ffmpeg. `botcut-cli render out/` encodes after a line is restored. `--mode assemble` keeps every file from start to end, in the order given, and does not call speech-to-text or the model. Use it for riding and any clip that should appear even when nobody is talking.
 
-A single `.txt` argument is a shot list, one path per line. Blank lines and `#` comments are skipped.
+`--b-roll-file PATH` marks one of the files as B-roll. Give it once per file. A B-roll file is not transcribed and never becomes a line. It is sliced into beats of one to four seconds at its scene changes, one still is taken per beat, and the model lays runs over the spoken lines the way an editor would: a run starts on a beat and goes on for 3 to 12 seconds over one or more consecutive kept lines, ending on a line, to hide a cut, show what the words describe, or rest the viewer. It sees the movie line, every line with its length, where the cuts fall, and a still per beat. It returns beat and line ids, a reason of a few words per run, and one or two sentences for the person. The first and last kept lines stay on the speaker, runs never sit back to back, and beats go up so the footage moves forward. The voice always keeps playing. `--b-roll-sound mix` (the default) plays the B-roll sound at a quarter under the voice. `--b-roll-sound voice` plays the voice alone. A B-roll file with no sound track is fine. A spoken file without one is still refused. A card cannot be B-roll, and a `--b-roll-file` that is not one of the files stops the run. `--mode assemble` ignores the mark, because it plays every file in order with its own sound.
 
-`out/cuts.json` is the cut list. `out/rough_cut.mp4` is the listening render. Word timestamps are cached at `out/work/<i>-<stem>.<stt>.words.json`. An older `out/work/<i>-<stem>.words.json` still counts as an xAI cache hit. A second run prints `cache hit` and does not call speech-to-text again.
+A single `.txt` argument is a shot list, one path per line. A line that starts with `b-roll ` marks that file. Blank lines and `#` comments are skipped.
+
+`out/cuts.json` is the cut list. A B-roll clip row carries `"role": "broll"`, and a cover is a run: `{clip, line, through, start, end, reason, still}`, the first and last line ids, the window inside the B-roll file, the model's reason, and the starting beat's still. `covers_reply` is the model's sentence about what it laid. `revise` sees the beats and the runs and returns the full list of runs to keep. `out/rough_cut.mp4` is the listening render. Word timestamps are cached at `out/work/<i>-<stem>.<stt>.words.json`. An older `out/work/<i>-<stem>.words.json` still counts as an xAI cache hit. Beats are cached at `out/work/<i>-<stem>.beats.json`. A second run prints `cache hit` and does not call speech-to-text again.
 
 ```bash
 uv run botcut-cli run a.mp4 --out out/ --stt local --whisper-model large-v3-turbo
@@ -43,7 +45,14 @@ A dropped line that is not a near-duplicate of a kept line prints `unique? id N:
 uv run botcut-cli revise out/cuts.json --pace measured --scene-transition dip -- "Drop the second take"
 ```
 
-`revise` rewrites the sentence, the pace, dip on or off, and which lines stay. The note is the argument after `--`, so a note that looks like a flag stays text. It does not return times, padding, or a join other than dip. It does not start ffmpeg. `BOTCUT_FAKE=1` applies a fixture and does not call the network. Without a key, and with fake mode off, the command is refused.
+`revise` rewrites the sentence, the pace, dip on or off, and which lines stay, and the model also returns a one or two sentence reply to the person. The note is the argument after `--`, so a note that looks like a flag stays text. It does not return times, padding, or a join other than dip. It does not start ffmpeg. `BOTCUT_FAKE=1` applies a fixture and does not call the network. Without a key, and with fake mode off, the command is refused.
+
+```bash
+uv run botcut-cli revise out/cuts.json --propose --history out/chat.json -- "Make it tighter"
+uv run botcut-cli revise out/cuts.json --apply
+```
+
+`--propose` asks the model and writes `out/proposal.json` (the note, the reply, and the fields above) without touching `cuts.json`, and prints the reply. `--history PATH` passes earlier chat turns, a JSON list of `{"role": "you" | "bot", "text": "…"}`, before the note. `--apply` takes no note: it lands the proposal in `cuts.json`, with the same result as a plain `revise`, and removes `proposal.json`. The app always goes through `--propose` and `--apply`, so a change is shown and agreed to before it moves anything.
 
 ## Card
 

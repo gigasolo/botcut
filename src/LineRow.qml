@@ -2,10 +2,9 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// One spoken span: its start, its words, why it is where it is, and whether it
-// stays. Keep and Drop are both on every row; the one in force is filled. A
-// kept row carries the accent at its left edge; a dropped row's words are
-// struck through. A filtered-out row is 0 px tall and still in the list.
+// One spoken span: its start, its words, and one word that flips whether it
+// stays. Drop on a kept line, Keep on a dropped one. A dropped line's words
+// are quiet and struck through. The selected row also offers Play.
 Item {
     id: row
     required property int index
@@ -13,19 +12,19 @@ Item {
     property string timeText: ""
     property string reasonText: ""
     property string coverText: ""
+    property string coverStill: ""
     property bool selected: false
     property bool marked: false
-    property bool shown: true
     signal picked()
     signal playRequested()
 
     width: ListView.view ? ListView.view.width : implicitWidth
-    height: shown ? body.implicitHeight + 20 : 0
-    visible: shown
+    height: body.implicitHeight + 20
     readonly property bool dropped: modelData && modelData.keep === false
     readonly property bool unsure: modelData && modelData.reason === "unique?"
     // The user flipped this line. Read off the reason the model already keeps.
     readonly property bool byYou: modelData && (modelData.reason === "dropped" || modelData.reason === "restored")
+    readonly property bool detailShown: reasonText !== "" || coverText !== "" || selected
 
     Rectangle {
         id: fill
@@ -37,48 +36,42 @@ Item {
     }
     HoverHandler { id: rowHover }
 
-    Rectangle {
-        visible: !row.dropped
-        width: 2
-        height: fill.height
-        radius: 1
-        color: theme.accent
-    }
-
     MouseArea {
         anchors.fill: fill
         onClicked: row.picked()
     }
 
-    // Keep or Drop. The word in force is filled with the accent and does
-    // nothing when clicked. The other one flips the line.
-    component KeepWord: Rectangle {
-        id: keepWord
+    // A word in the row that acts: Drop, Keep, Play, Remove B-roll. A hover
+    // pill behind it, quiet while a job runs.
+    component RowWord: Item {
+        id: rowWord
         property string word
-        property bool active: false
         signal chosen()
-        width: keepLabel.implicitWidth + 16
-        height: 20
-        radius: Math.max(0, theme.radius - 2)
-        color: active ? theme.accent
-               : (keepArea.containsMouse && !backend.busy ? theme.hover : "transparent")
+        implicitWidth: wordLabel.implicitWidth + 12
+        implicitHeight: 24
+        Layout.alignment: Qt.AlignTop
+        Rectangle {
+            anchors.fill: parent
+            radius: Math.max(0, theme.radius - 2)
+            color: theme.hover
+            visible: wordArea.containsMouse && !backend.busy
+        }
         Label {
-            id: keepLabel
+            id: wordLabel
             anchors.centerIn: parent
-            text: keepWord.word
-            color: keepWord.active ? theme.accentForeground : theme.foreground
-            opacity: backend.busy ? 0.38 : (keepWord.active ? 1 : 0.62)
-            font.pixelSize: 12
-            font.weight: keepWord.active ? Font.DemiBold : Font.Normal
+            text: rowWord.word
+            color: theme.foreground
+            opacity: backend.busy ? 0.38 : 1
+            font.pixelSize: 13
         }
         MouseArea {
-            id: keepArea
+            id: wordArea
             anchors.fill: parent
             hoverEnabled: true
-            cursorShape: backend.busy || keepWord.active ? Qt.ArrowCursor : Qt.PointingHandCursor
+            cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
             onClicked: {
-                if (!backend.busy && !keepWord.active)
-                    keepWord.chosen()
+                if (!backend.busy)
+                    rowWord.chosen()
             }
         }
     }
@@ -89,9 +82,9 @@ Item {
         anchors.right: parent.right
         anchors.top: parent.top
         anchors.leftMargin: 12
-        anchors.rightMargin: 12
+        anchors.rightMargin: 8
         anchors.topMargin: 8
-        spacing: 6
+        spacing: 4
 
         RowLayout {
             width: parent.width
@@ -104,11 +97,13 @@ Item {
                 font.pixelSize: 12
                 font.family: "monospace"
                 Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 4
                 Layout.minimumWidth: 36
             }
             Label {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignTop
+                Layout.topMargin: 4
                 text: row.modelData && row.modelData.text !== undefined ? row.modelData.text : ""
                 color: theme.foreground
                 opacity: row.dropped ? 0.38 : 1
@@ -116,83 +111,74 @@ Item {
                 font.pixelSize: 13
                 font.strikeout: row.dropped
             }
+            // The one control on every row. It reads the state it would leave.
+            RowWord {
+                objectName: "flipWord"
+                word: row.dropped ? qsTr("Keep") : qsTr("Drop")
+                onChosen: {
+                    if (!row.modelData)
+                        return
+                    if (row.dropped)
+                        backend.restoreSelect(row.modelData.id)
+                    else
+                        backend.dropSelect(row.modelData.id)
+                }
+            }
         }
 
         RowLayout {
+            visible: row.detailShown
             width: parent.width
-            spacing: 12
+            spacing: 8
+            Item { Layout.preferredWidth: 36; Layout.minimumWidth: 36; Layout.preferredHeight: 1 }
+            // The beat the run starts on, on the run's first line.
+            Rectangle {
+                objectName: "coverStill"
+                visible: row.coverStill !== ""
+                Layout.preferredWidth: 64
+                Layout.preferredHeight: 36
+                Layout.alignment: Qt.AlignVCenter
+                radius: Math.max(0, theme.radius - 2)
+                color: theme.raised
+                clip: true
+                Image {
+                    anchors.fill: parent
+                    source: row.coverStill
+                    fillMode: Image.PreserveAspectCrop
+                    asynchronous: true
+                    sourceSize.width: 128
+                }
+            }
             Label {
                 visible: row.reasonText !== ""
+                Layout.alignment: Qt.AlignVCenter
                 text: row.byYou ? qsTr("You · %1").arg(row.reasonText) : row.reasonText
                 color: row.unsure ? theme.accent : theme.foreground
-                opacity: 0.62
+                opacity: row.unsure ? 1 : 0.62
                 font.pixelSize: 12
             }
             Label {
                 visible: row.coverText !== ""
+                Layout.alignment: Qt.AlignVCenter
                 text: row.coverText
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 12
                 elide: Text.ElideMiddle
-                Layout.maximumWidth: 160
-            }
-            Label {
-                visible: row.selected
-                text: qsTr("Play")
-                color: theme.foreground
-                opacity: backend.busy ? 0.38 : 1
-                font.pixelSize: 13
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
-                    onClicked: {
-                        if (!backend.busy)
-                            row.playRequested()
-                    }
-                }
-            }
-            Label {
-                visible: row.selected && row.coverText !== ""
-                text: qsTr("Remove B-roll")
-                color: theme.foreground
-                opacity: backend.busy ? 0.38 : 1
-                font.pixelSize: 13
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: backend.busy ? Qt.ArrowCursor : Qt.PointingHandCursor
-                    onClicked: {
-                        if (backend.busy || !row.modelData)
-                            return
-                        backend.clearCover(row.modelData.id)
-                    }
-                }
+                Layout.maximumWidth: 240
             }
             Item { Layout.fillWidth: true }
-            // The pair sits in the same place whether the row is selected or not.
-            Rectangle {
-                Layout.alignment: Qt.AlignVCenter
-                implicitWidth: pairRow.width + 4
-                implicitHeight: 24
-                radius: theme.radius
-                color: theme.background
-                Row {
-                    id: pairRow
-                    x: 2
-                    y: 2
-                    spacing: 2
-                    KeepWord {
-                        word: qsTr("Keep")
-                        active: !row.dropped
-                        onChosen: backend.restoreSelect(row.modelData.id)
-                    }
-                    KeepWord {
-                        word: qsTr("Drop")
-                        active: row.dropped
-                        onChosen: backend.dropSelect(row.modelData.id)
-                    }
+            RowWord {
+                visible: row.selected
+                word: qsTr("Play")
+                onChosen: row.playRequested()
+            }
+            RowWord {
+                visible: row.selected && row.coverText !== ""
+                word: qsTr("Remove B-roll")
+                onChosen: {
+                    if (row.modelData)
+                        backend.clearCover(row.modelData.id)
                 }
             }
         }

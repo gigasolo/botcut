@@ -152,19 +152,10 @@ Item {
             }
             CheckBox {
                 width: parent.width
-                text: qsTr("Cover a spoken line with another shot's picture")
+                text: qsTr("Keep a B-roll shot's sound under the voice")
                 font.pixelSize: 13
                 focusPolicy: Qt.NoFocus
                 enabled: !backend.busy
-                checked: backend.broll
-                onClicked: backend.broll = checked
-            }
-            CheckBox {
-                width: parent.width
-                text: qsTr("Keep that shot's sound under the voice")
-                font.pixelSize: 13
-                focusPolicy: Qt.NoFocus
-                enabled: backend.broll && !backend.busy
                 checked: backend.brollMix
                 onClicked: backend.brollMix = checked
             }

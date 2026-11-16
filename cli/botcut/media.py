@@ -44,7 +44,8 @@ def grab_still(video: str, at: float, dest: str) -> bool:
     return proc.returncode == 0 and os.path.isfile(dest) and os.path.getsize(dest) > 0
 
 
-def probe(path: str) -> dict:
+def probe(path: str, need_audio: bool = True) -> dict:
+    """Read one file. A spoken shot needs a sound track. B-roll may be silent."""
     if not os.path.isfile(path):
         raise SystemExit(f"No such file: {path}")
     proc = subprocess.run(
@@ -67,10 +68,11 @@ def probe(path: str) -> dict:
     data = json.loads(proc.stdout or "{}")
     streams = data.get("streams") or []
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    if audio is None:
+    if audio is None and need_audio:
         raise SystemExit(f"No audio stream: {path}")
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
-    duration = float((data.get("format") or {}).get("duration") or audio.get("duration") or 0)
+    fallback = (audio or video or {}).get("duration") or 0
+    duration = float((data.get("format") or {}).get("duration") or fallback)
     if video is None:
         width, height, fps = 0, 0, 0.0
         codec = None
@@ -90,9 +92,50 @@ def probe(path: str) -> dict:
         "rotate": _rotation(video) if video is not None else 0,
         "codec": codec,
         "pix_fmt": pix_fmt,
-        "audio_codec": audio.get("codec_name"),
-        "sample_rate": int(audio.get("sample_rate") or 0),
+        # "pc" is full range, as a Hover or a phone JPEG-style stream writes it.
+        "color_range": (video.get("color_range") if video is not None else None) or None,
+        "audio": audio is not None,
+        "audio_codec": audio.get("codec_name") if audio is not None else None,
+        "sample_rate": int(audio.get("sample_rate") or 0) if audio is not None else 0,
     }
+
+
+def parse_scene_changes(stderr: str) -> list[float]:
+    """Frame times from showinfo lines, one per scene change."""
+    found = []
+    for line in stderr.splitlines():
+        if "showinfo" not in line:
+            continue
+        match = re.search(r"pts_time:\s*(-?[0-9.]+)", line)
+        if not match:
+            continue
+        try:
+            found.append(float(match.group(1)))
+        except ValueError:
+            continue
+    return found
+
+
+def scene_changes(path: str, threshold: float = 0.3) -> list[float]:
+    """Where the picture of a B-roll file changes. Sampled at 5 fps and small, so the compare is cheap."""
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            path,
+            "-an",
+            "-vf",
+            f"fps=5,scale=160:-2,select='gt(scene,{threshold})',showinfo",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return parse_scene_changes(proc.stderr or "")
 
 
 def parse_silences(stderr: str, duration: float) -> list[tuple[float, float]]:
@@ -214,8 +257,27 @@ def render_with_progress(
         code = proc.wait()
         thread.join()
     if code != 0:
-        detail = (err_parts[0] if err_parts else "").strip()[-500:] or "ffmpeg failed"
-        raise SystemExit(f"{fail_prefix}: {detail}")
+        raise SystemExit(f"{fail_prefix}: {ffmpeg_error_detail(err_parts[0] if err_parts else '')}")
+
+
+def ffmpeg_error_detail(stderr: str) -> str:
+    """The line in ffmpeg's log that names the problem.
+
+    The thread exits at the end say only "Invalid argument". The cause sits
+    earlier, so the first line that reads like one wins, then the last line.
+    """
+    noise = ("timescale not set", "deprecated pixel format", "Task finished", "Terminating thread",
+             "Nothing was written", "Could not open encoder before EOF", "Conversion failed")
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    lines = [line for line in lines if not any(mark in line for mark in noise)]
+    if not lines:
+        return "ffmpeg failed"
+    telling = ("Impossible to convert", "Error", "error", "Invalid", "No such", "Cannot", "cannot",
+               "Could not", "not supported", "Unsupported", "failed")
+    for line in lines:
+        if any(mark in line for mark in telling):
+            return line[:300]
+    return lines[-1][:300]
 
 
 def resolve_encoder() -> tuple[str, str | None]:
@@ -349,6 +411,14 @@ def _audio_filter(
     return chain + f"[a{out_index}]"
 
 
+def _full_range(clip: dict) -> bool:
+    """A full-range source. Every branch into concat has to agree on the range,
+    and a VA-API frame cannot be converted there, so the branch does it first."""
+    if str(clip.get("color_range") or "").lower() in ("pc", "full", "jpeg"):
+        return True
+    return str(clip.get("pix_fmt") or "").startswith("yuvj")
+
+
 def _video_filter(
     in_index: int,
     out_index: int,
@@ -361,9 +431,12 @@ def _video_filter(
     on_gpu: bool,
     picture: str,
 ) -> str:
+    # Limited range, like the cameras. A full-range clip is converted in its
+    # own branch, before it meets the others.
+    range_opts = ":in_range=pc:out_range=tv" if _full_range(clip) else ""
     if not on_gpu:
         return (
-            f"[{in_index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"[{in_index}:v]scale={width}:{height}:force_original_aspect_ratio=decrease{range_opts},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps_s}"
             + picture
             + (",format=nv12,hwupload" if encoder == "vaapi" else "")
@@ -373,9 +446,10 @@ def _video_filter(
     # surface when more than one VA-API input stays on the device
     # through concat, so each branch downloads, pads, and uploads
     # again for h264_vaapi. The dip runs on those software frames.
+    to_tv = "scale=in_range=pc:out_range=tv," if range_opts else ""
     chain = (
         f"[{in_index}:v]scale_vaapi={width}:{height}:format=nv12:force_original_aspect_ratio=decrease,"
-        f"hwdownload,format=nv12,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
+        f"hwdownload,format=nv12,{to_tv}pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1"
     )
     if not _same_rate(clip, fps):
         chain += f",fps={fps_s}"
@@ -398,16 +472,18 @@ def render_args(
         raise SystemExit("No segments to render")
     if encoder not in ("x264", "vaapi"):
         raise SystemExit(f"Unknown encoder {encoder}")
-    if broll_sound not in ("mix", "clip"):
+    if broll_sound not in ("mix", "voice"):
         raise SystemExit(f"Unknown b-roll sound {broll_sound}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
     # An open card is clips[0]. Its still is not the camera's size or rate.
+    # B-roll is not the camera either.
     ref = clips[0]
     for clip in clips:
-        if not is_card(str(clip.get("path") or "")):
-            ref = clip
-            break
+        if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") == "broll":
+            continue
+        ref = clip
+        break
     width, height, fps = int(ref["width"]), int(ref["height"]), float(ref["fps"])
     if width <= 0 or height <= 0 or fps <= 0:
         raise SystemExit(f"Clip has no video to render: {ref['path']}")
@@ -451,12 +527,22 @@ def render_args(
             if win_start - cursor > 1e-3:
                 pieces.append({"clip": spoken, "start": cursor, "end": win_start})
             if win_end - win_start > 1e-3:
-                # Mix seeks the spoken file to this window. Clip sound does not open it.
+                # The voice goes on under the cover, so the spoken file is opened at this window too.
                 length = win_end - win_start
-                piece = {"clip": int(window["clip"]), "start": 0.0, "end": length}
-                if broll_sound == "mix":
-                    piece["voice"] = spoken
-                    piece["voice_start"] = win_start
+                src = float(window.get("src") or 0.0)
+                piece = {
+                    "clip": int(window["clip"]),
+                    "start": src,
+                    "end": src + length,
+                    "voice": spoken,
+                    "voice_start": win_start,
+                }
+                # A run that goes on across this segment's join is one piece of
+                # footage. A fade there would be a dip inside the B-roll.
+                if window.get("continued"):
+                    piece["continued"] = True
+                if window.get("continues"):
+                    piece["continues"] = True
                 pieces.append(piece)
             cursor = max(cursor, win_end)
         if seg_end - cursor > 1e-3 or not pieces:
@@ -481,8 +567,8 @@ def render_args(
                 video_start = piece["start"]
                 span = piece["end"] - piece["start"]
                 shown = max(0.0, span)
-                fade_in = pic_in if j == 0 else 0.0
-                fade_out = pic_out if j == last_piece else 0.0
+                fade_in = pic_in if j == 0 and not piece.get("continued") else 0.0
+                fade_out = pic_out if j == last_piece and not piece.get("continues") else 0.0
                 raw_in = aud_in if j == 0 else 0.0
                 raw_out = aud_out if j == last_piece else 0.0
                 a_in, a_out = _fit_pair(shown, raw_in, raw_out) if polish else (0.0, 0.0)
@@ -509,7 +595,13 @@ def render_args(
             filters.append(
                 _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture)
             )
-            filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in))
+            if voice_in is None:
+                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out))
+            elif broll_sound == "mix" and video.get("audio", True):
+                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in))
+            else:
+                # Voice only. A silent B-roll file has no [N:a] to mix, so it lands here too.
+                filters.append(_audio_filter(voice_in, out_i, polish, shown, a_in, a_out))
             out_i += 1
     concat_in = "".join(f"[v{i}][a{i}]" for i in range(out_i))
     filters.append(f"{concat_in}concat=n={out_i}:v=1:a=1[v][a]")

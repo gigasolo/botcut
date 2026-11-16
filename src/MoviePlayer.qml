@@ -12,6 +12,9 @@ Item {
     property alias playbackDevices: playbackDevices
     property alias audioOutputComponent: audioOutputComponent
     property alias primeFallback: primeFallback
+    property var coverItem
+    // True while the cover player has a frame on screen for the window it was asked for.
+    property bool coverShown: false
 
     MediaPlayer {
         id: player
@@ -115,6 +118,7 @@ Item {
         }
 
         onSourceChanged: {
+            root.stopCover();
             primeFallback.stop();
             priming = false;
             primed = false;
@@ -265,6 +269,87 @@ Item {
             }
             if (!root.film.interacting)
                 root.film.playheadSec = position / 1000;
+        }
+    }
+
+    // The B-roll picture. No audio output, so it is silent: the voice stays on
+    // the main player. It follows host.coverNow and seeks only while playing,
+    // because a seek on a paused FFmpeg player clears the picture.
+    MediaPlayer {
+        id: cover
+        videoOutput: root.coverItem
+        property int wantMs: -1
+
+        function mediaReady() {
+            return mediaStatus === MediaPlayer.LoadedMedia || mediaStatus === MediaPlayer.BufferedMedia;
+        }
+        onMediaStatusChanged: {
+            if (mediaReady())
+                root.syncCover();
+        }
+        onSourceChanged: {
+            root.coverShown = false;
+            wantMs = -1;
+        }
+    }
+
+    function stopCover() {
+        cover.stop();
+        cover.wantMs = -1;
+        root.coverShown = false;
+    }
+
+    // A frame from the cover player. Only one near the asked time counts: play()
+    // before the seek can put the file's first frame up for an instant.
+    function coverFrame() {
+        var now = root.host.coverNow;
+        if (!now || cover.wantMs < 0)
+            return;
+        if (Math.abs(cover.position - Math.round(Number(now.src) * 1000)) > 500)
+            return;
+        root.coverShown = true;
+        if (player.playbackState !== MediaPlayer.PlayingState || player.priming)
+            cover.pause();
+    }
+
+    function syncCover() {
+        var now = root.host.coverNow;
+        if (!now || !now.path) {
+            if (cover.playbackState === MediaPlayer.PlayingState)
+                cover.pause();
+            cover.wantMs = -1;
+            root.coverShown = false;
+            return;
+        }
+        var url = root.host.fileUrl(now.path);
+        if (cover.source.toString() !== String(url)) {
+            cover.source = url;
+            return;
+        }
+        if (!cover.mediaReady())
+            return;
+        var want = Math.round(Number(now.src) * 1000);
+        var mainPlaying = player.playbackState === MediaPlayer.PlayingState && !player.priming;
+        if (cover.playbackState !== MediaPlayer.PlayingState) {
+            if (root.coverShown && !mainPlaying && Math.abs(cover.position - want) <= 300)
+                return;
+            cover.play();
+            cover.position = want;
+            cover.wantMs = want;
+            return;
+        }
+        if (cover.wantMs < 0 || Math.abs(cover.position - want) > 300) {
+            cover.position = want;
+            cover.wantMs = want;
+        }
+        if (!mainPlaying && root.coverShown)
+            cover.pause();
+    }
+
+    Connections {
+        target: root.host
+        function onCoverNowChanged() {
+            root.syncCover();
         }
     }
 

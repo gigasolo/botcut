@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from botcut.broll import choose_covers
+from botcut.broll import beats_from_cuts, choose_covers, fake_beats, is_broll
 from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
     burn_args,
@@ -19,7 +19,14 @@ from botcut.captions import (
     to_srt,
     word_cache_candidates,
 )
-from botcut.media import extract_audio, probe, render_with_progress, resolve_encoder, silences
+from botcut.media import (
+    extract_audio,
+    probe,
+    render_with_progress,
+    resolve_encoder,
+    scene_changes,
+    silences,
+)
 from botcut.pick import (
     DEFAULT_INTENT,
     decision_lines,
@@ -35,7 +42,7 @@ from botcut.pick import (
     utterances,
 )
 from botcut.review import build_master, keep_list, launch, offsets, source_clips
-from botcut.revise import revise
+from botcut.revise import apply_proposal, revise
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
 
@@ -60,15 +67,17 @@ def main(argv: list[str] | None = None) -> None:
         help="dip through black between source files, or cut",
     )
     run_p.add_argument(
-        "--b-roll",
-        action="store_true",
-        help="cover a spoken line with a clip's picture",
+        "--b-roll-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="this file is B-roll: not transcribed, its picture covers spoken lines",
     )
     run_p.add_argument(
         "--b-roll-sound",
-        choices=("mix", "clip"),
+        choices=("mix", "voice"),
         default="mix",
-        help="mix the clip's sound under the voice, or play the clip's own sound",
+        help="mix the B-roll sound under the voice, or play the voice alone",
     )
     render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
     render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
@@ -80,9 +89,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     render_p.add_argument(
         "--b-roll-sound",
-        choices=("mix", "clip"),
+        choices=("mix", "voice"),
         default="mix",
-        help="mix the clip's sound under the voice, or play the clip's own sound",
+        help="mix the B-roll sound under the voice, or play the voice alone",
     )
     cap_p = sub.add_parser("captions", help="write an SRT for the rough cut")
     cap_p.add_argument("cuts", help="path to cuts.json")
@@ -95,13 +104,28 @@ def main(argv: list[str] | None = None) -> None:
     review_p.add_argument("--rebuild", action="store_true", help="rebuild master.mp4 even if it is current")
     revise_p = sub.add_parser("revise", help="revise a decided cut from a note")
     revise_p.add_argument("cuts", help="path to cuts.json")
-    revise_p.add_argument("note", help="what to change")
+    revise_p.add_argument("note", nargs="?", default="", help="what to change")
     revise_p.add_argument("--pace", choices=("open", "measured", "tight", "frenzied"), default="open")
     revise_p.add_argument(
         "--scene-transition",
         choices=("dip", "off"),
         default="dip",
         help="current dip between files",
+    )
+    revise_p.add_argument(
+        "--propose",
+        action="store_true",
+        help="write proposal.json and print the reply; leave cuts.json alone",
+    )
+    revise_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="land the proposal.json written by --propose; no model call",
+    )
+    revise_p.add_argument(
+        "--history",
+        metavar="PATH",
+        help="earlier chat turns as JSON, a list of {role: you|bot, text}",
     )
     card_p = sub.add_parser("card", help="make a 3 second card from a sentence")
     card_p.add_argument("--out", required=True, help="mp4 to write, named botcut-card-…")
@@ -120,7 +144,7 @@ def main(argv: list[str] | None = None) -> None:
                 intent=args.intent,
                 decide=args.decide,
                 scene_transition=args.scene_transition,
-                broll=args.b_roll,
+                broll_files=args.b_roll_file,
                 broll_sound=args.b_roll_sound,
             )
         elif args.cmd == "render":
@@ -136,12 +160,19 @@ def main(argv: list[str] | None = None) -> None:
         elif args.cmd == "review":
             review(args.cuts, no_open=args.no_open, rebuild=args.rebuild)
         elif args.cmd == "revise":
-            revise(
-                args.cuts,
-                args.note,
-                pace=args.pace,
-                dip=args.scene_transition != "off",
-            )
+            if args.apply:
+                if args.note or args.propose:
+                    raise SystemExit("--apply takes no note")
+                apply_proposal(args.cuts)
+            else:
+                revise(
+                    args.cuts,
+                    args.note,
+                    pace=args.pace,
+                    dip=args.scene_transition != "off",
+                    propose=args.propose,
+                    history=args.history,
+                )
         elif args.cmd == "card":
             make_card(args.sentence, args.out)
     except BrokenPipeError:
@@ -159,18 +190,23 @@ def run(
     intent: str = "",
     decide: bool = False,
     scene_transition: str = "dip",
-    broll: bool = False,
+    broll_files: list[str] | None = None,
     broll_sound: str = "mix",
 ) -> None:
     if mode not in ("speech", "assemble"):
         raise SystemExit(f"Unknown mode: {mode}")
     paths = resolve_inputs(files)
+    # Assemble plays every file in order with its own sound, so a B-roll mark means nothing there.
+    roles = _broll_roles(paths, [*(broll_files or []), *resolve_broll(files)]) if mode == "speech" else set()
     print("Reading files", flush=True)
     clips = []
-    for path in paths:
+    for index, path in enumerate(paths):
         if not os.path.isfile(path):
             raise SystemExit(f"No such file: {path}")
-        clips.append(probe(path))
+        clip = probe(path, need_audio=index not in roles)
+        if index in roles:
+            clip["role"] = "broll"
+        clips.append(clip)
     if mode == "assemble":
         segs = [
             {"clip": i, "start": 0.0, "end": float(clip["duration"]), "reason": "assemble"}
@@ -182,10 +218,7 @@ def run(
             "stt": "none",
             "model": "none",
             "tighten": {"max_pause": max_pause, "snap": False},
-            "clips": [
-                {"index": i, "path": clip["path"], "duration": clip["duration"]}
-                for i, clip in enumerate(clips)
-            ],
+            "clips": [_clip_row(i, clip) for i, clip in enumerate(clips)],
             "segments": segs,
             "dropped": [],
         }
@@ -198,13 +231,22 @@ def run(
     os.makedirs(work, exist_ok=True)
     words_by_clip = []
     silences_by_clip = []
-    speech = [clip for clip in clips if not is_card(clip["path"])]
+    beats_by_clip: dict[int, list] = {}
+    speech = [clip for clip in clips if not is_card(clip["path"]) and not is_broll(clip)]
     speech_i = 0
     for index, clip in enumerate(clips):
         stem = Path(clip["path"]).stem
         if is_card(clip["path"]):
             words_by_clip.append([])
             silences_by_clip.append([])
+            continue
+        if is_broll(clip):
+            # B-roll is picture. It is not transcribed and never becomes a line.
+            words_by_clip.append([])
+            silences_by_clip.append([])
+            if not beats_by_clip:
+                print("Reading beats", flush=True)
+            beats_by_clip[index] = _beats_for_clip(work, index, stem, clip)
             continue
         speech_i += 1
         print(f"Transcribing {speech_i}/{len(speech)} {Path(clip['path']).name}", flush=True)
@@ -233,7 +275,13 @@ def run(
     segs = tighten(segs, silences_by_clip, max_pause)
     lines = decision_lines(utts, chosen)
     lines, segs = merge_cards(lines, segs, clips, movie)
-    covers = choose_covers(clips, lines, os.path.join(work, "stills")) if broll else []
+    covers: list = []
+    covers_reply = ""
+    if beats_by_clip:
+        print("Choosing covers", flush=True)
+        covers, covers_reply = choose_covers(
+            clips, lines, os.path.join(work, "stills"), beats_by_clip, segments=segs, intent=movie
+        )
     for line in unknown_warnings(unknown):
         print(line)
     dropped = dropped_utterances(utts, chosen)
@@ -248,10 +296,7 @@ def run(
         "stt": _stt_label(fake, stt, whisper_model),
         "model": "fake" if fake else model_name(),
         "tighten": {"max_pause": max_pause, "snap": snap_edges},
-        "clips": [
-            {"index": i, "path": clip["path"], "duration": clip["duration"]}
-            for i, clip in enumerate(clips)
-        ],
+        "clips": [_clip_row(i, clip) for i, clip in enumerate(clips)],
         "segments": segs,
         "lines": lines,
         "dropped": [
@@ -267,12 +312,35 @@ def run(
     }
     if covers:
         doc["covers"] = covers
+    if covers_reply:
+        doc["covers_reply"] = covers_reply
     if decide:
         _write_doc(out, doc)
         kept_n = sum(1 for line in doc["lines"] if line["keep"])
         print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
         return
     _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
+
+
+def _clip_row(index: int, clip: dict) -> dict:
+    row = {"index": index, "path": clip["path"], "duration": clip["duration"]}
+    if is_broll(clip):
+        row["role"] = "broll"
+    return row
+
+
+def _broll_roles(paths: list[str], broll_files: list[str]) -> set[int]:
+    """Clip indexes marked B-roll. The file has to be one of the shots, and not a card."""
+    absolute = [os.path.abspath(path) for path in paths]
+    roles: set[int] = set()
+    for wanted in broll_files or []:
+        target = os.path.abspath(wanted)
+        if target not in absolute:
+            raise SystemExit(f"B-roll file is not in the list: {wanted}")
+        if is_card(target):
+            raise SystemExit(f"A card cannot be B-roll: {wanted}")
+        roles.add(absolute.index(target))
+    return roles
 
 
 def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
@@ -345,7 +413,13 @@ def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "m
     rows = sorted(doc.get("clips") or [], key=lambda clip: int(clip["index"]))
     if not rows:
         raise SystemExit("cuts.json has no clips")
-    clips = [probe(row["path"]) for row in rows]
+    clips = []
+    for row in rows:
+        broll = str(row.get("role") or "") == "broll"
+        clip = probe(row["path"], need_audio=not broll)
+        if broll:
+            clip["role"] = "broll"
+        clips.append(clip)
     lines = doc.get("lines") or []
     # A hand trim on Watch owns the segments. Rebuilding from lines would undo it.
     if lines and not doc.get("trimmed"):
@@ -426,6 +500,20 @@ def _words_for_clip(
     cache = word_cache_candidates(work, index, stem, backend)[0]
     Path(cache).write_text(json.dumps(result) + "\n")
     return result["words"]
+
+
+def _beats_for_clip(work: str, index: int, stem: str, clip: dict) -> list:
+    """Scene changes once per B-roll file. BOTCUT_FAKE uses fixed windows and no ffmpeg."""
+    cache = os.path.join(work, f"{index}-{stem}.beats.json")
+    if os.path.isfile(cache):
+        return [tuple(pair) for pair in json.loads(Path(cache).read_text())]
+    duration = float(clip.get("duration") or 0)
+    if os.environ.get("BOTCUT_FAKE") == "1":
+        pairs = fake_beats(duration)
+    else:
+        pairs = beats_from_cuts(scene_changes(clip["path"]), duration)
+    Path(cache).write_text(json.dumps(pairs) + "\n")
+    return pairs
 
 
 def _silences_for_clip(work: str, index: int, stem: str, flac: str, clip: dict) -> list:
@@ -551,18 +639,39 @@ def load_cuts(cuts_path: str) -> tuple[str, dict]:
     return os.path.dirname(path), doc
 
 
+BROLL_PREFIX = "b-roll "
+
+
+def _shot_list(path: str) -> list[tuple[str, bool]]:
+    """One path per line. A line that starts with `b-roll ` marks that file."""
+    if not os.path.isfile(path):
+        raise SystemExit(f"No such file: {path}")
+    rows = []
+    for line in Path(path).read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.lower().startswith(BROLL_PREFIX):
+            rows.append((stripped[len(BROLL_PREFIX) :].strip(), True))
+        else:
+            rows.append((stripped, False))
+    if not rows:
+        raise SystemExit(f"No paths in {path}")
+    return rows
+
+
+def _is_shot_list(files: list[str]) -> bool:
+    return len(files) == 1 and files[0].lower().endswith(".txt")
+
+
 def resolve_inputs(files: list[str]) -> list[str]:
-    if len(files) == 1 and files[0].lower().endswith(".txt"):
-        path = files[0]
-        if not os.path.isfile(path):
-            raise SystemExit(f"No such file: {path}")
-        paths = []
-        for line in Path(path).read_text().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            paths.append(stripped)
-        if not paths:
-            raise SystemExit(f"No paths in {path}")
-        return paths
+    if _is_shot_list(files):
+        return [path for path, _broll in _shot_list(files[0])]
     return list(files)
+
+
+def resolve_broll(files: list[str]) -> list[str]:
+    """The files a shot list marks B-roll. Plain arguments mark none."""
+    if _is_shot_list(files):
+        return [path for path, broll in _shot_list(files[0]) if broll]
+    return []

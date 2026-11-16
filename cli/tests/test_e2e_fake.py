@@ -170,7 +170,7 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
 def test_trimmed_plan_keeps_hand_segments(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_probe(path):
+    def fake_probe(path, need_audio=True):
         return {"path": path, "duration": 8.0, "width": 320, "height": 180, "audio": False}
 
     def fake_render(segments, clips, dst, *_args, **_kwargs):

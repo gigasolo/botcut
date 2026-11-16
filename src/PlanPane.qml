@@ -1,18 +1,24 @@
+import QtCore
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
 // The left column. The recents on the empty home, the shot list on Shots, and
-// on Lines and Movie the line list: a heading, one sentence, a search field,
-// the filters, every line, and the chat at the bottom. The step control and
-// the decisions live elsewhere now; the keys the pace list swallows are still
-// read through here.
+// on Lines and Movie the line list over the chat, with a handle between them
+// that remembers where it was dragged. The cut row under the picture holds the
+// one pace field; the keys its list swallows are read through here.
 Item {
     id: root
     property var host
     property var film
-    // The inspector holds the one pace field in the window.
+    // The cut row holds the one pace field in the window.
     property var decisions
+
+    Settings {
+        id: paneSettings
+        category: "layout"
+        property var linesSplit
+    }
 
     readonly property bool paceOpen: decisions ? decisions.paceOpen : false
     readonly property bool paceKeys: decisions ? decisions.paceKeys : false
@@ -33,23 +39,71 @@ Item {
             return qsTr("dropped")
         return reason ? String(reason) : ""
     }
-    function coverText(line) {
+    // The run this line is in, and whether the line is its first. Null when none.
+    function coverOf(line) {
         var rows = backend.covers
-        var files = backend.cutClips
-        if (!line || !rows || !files)
-            return ""
-        for (var i = 0; i < rows.length; i++) {
-            if (rows[i].line != line.id)
-                continue
-            var clip = rows[i].clip
-            if (clip < 0 || clip >= files.length)
-                return ""
-            var path = String(files[clip])
-            var slash = path.lastIndexOf("/")
-            var name = slash < 0 ? path : path.substring(slash + 1)
-            return qsTr("B-roll: %1").arg(name)
+        var lines = backend.selects
+        if (!line || !rows || !lines)
+            return null
+        var positions = {}
+        for (var p = 0; p < lines.length; p++) {
+            if (lines[p] && lines[p].id !== undefined)
+                positions[Number(lines[p].id)] = p
         }
-        return ""
+        var at = positions[Number(line.id)]
+        if (at === undefined)
+            return null
+        for (var i = 0; i < rows.length; i++) {
+            var cover = rows[i]
+            if (!cover)
+                continue
+            var first = positions[Number(cover.line)]
+            if (first === undefined)
+                continue
+            var last = cover.through === undefined || cover.through === null ? first : positions[Number(cover.through)]
+            if (last === undefined || last < first)
+                last = first
+            if (at < first || at > last)
+                continue
+            // A dropped line ends the run there, and a run whose first line is dropped is gone.
+            var alive = true
+            for (var k = first; k <= at; k++) {
+                if (!lines[k] || lines[k].keep === false) {
+                    alive = false
+                    break
+                }
+            }
+            if (!alive)
+                return null
+            return { cover: cover, first: at === first }
+        }
+        return null
+    }
+    function coverText(line) {
+        var hit = coverOf(line)
+        if (!hit)
+            return ""
+        if (!hit.first)
+            return qsTr("B-roll goes on")
+        var files = backend.cutClips
+        var clip = hit.cover.clip
+        if (!files || clip < 0 || clip >= files.length)
+            return ""
+        var path = String(files[clip])
+        var slash = path.lastIndexOf("/")
+        var words = qsTr("B-roll: %1").arg(slash < 0 ? path : path.substring(slash + 1))
+        var span = Number(hit.cover.end) - Number(hit.cover.start)
+        if (isFinite(span) && span > 0)
+            words += " · " + qsTr("%1 s").arg(Math.round(span))
+        if (hit.cover.reason)
+            words += " · " + String(hit.cover.reason)
+        return words
+    }
+    function coverStill(line) {
+        var hit = coverOf(line)
+        if (!hit || !hit.first || !hit.cover.still)
+            return ""
+        return host.fileUrl(String(hit.cover.still))
     }
     function clockOf(line) {
         var start = line ? Number(line.start) : 0
@@ -82,37 +136,6 @@ Item {
                 return i
         }
         return -1
-    }
-
-    // The filter and the search only hide rows. Keep never changes here, and
-    // the model is never asked.
-    readonly property string lineFilter: host ? host.lineFilter : "all"
-    readonly property string searchWords: searchField.text.replace(/\s+/g, " ").trim().toLowerCase()
-    function rowShown(line) {
-        if (!line)
-            return false
-        var filter = lineFilter
-        if (filter === "kept" && line.keep === false)
-            return false
-        if (filter === "dropped" && line.keep !== false)
-            return false
-        if (filter === "unsure" && line.reason !== "unique?")
-            return false
-        if (searchWords !== "") {
-            var words = line.text === undefined || line.text === null ? "" : String(line.text)
-            if (words.toLowerCase().indexOf(searchWords) < 0)
-                return false
-        }
-        return true
-    }
-    readonly property int shownCount: {
-        var n = 0
-        var lines = backend.selects
-        for (var i = 0; i < lines.length; i++) {
-            if (rowShown(lines[i]))
-                n++
-        }
-        return n
     }
 
     component RecentLine: Rectangle {
@@ -165,61 +188,6 @@ Item {
         }
     }
 
-    // One filter over the rows: its word, a dot for the state it means, and
-    // its count as a monospace label. The current filter is the filled one.
-    component FilterChip: Rectangle {
-        id: chip
-        property string key
-        property string label
-        property int count: 0
-        property bool dotted: false
-        property color dot: theme.accent
-        property real dotOpacity: 1
-        readonly property bool current: root.lineFilter === key
-        width: chipRow.implicitWidth + 20
-        height: 28
-        radius: theme.radius
-        color: current ? theme.raised : (chipHover.hovered ? theme.hover : "transparent")
-        HoverHandler { id: chipHover }
-        Row {
-            id: chipRow
-            anchors.centerIn: parent
-            spacing: 6
-            Rectangle {
-                visible: chip.dotted
-                anchors.verticalCenter: parent.verticalCenter
-                width: 6
-                height: 6
-                radius: 3
-                color: chip.dot
-                opacity: chip.dotOpacity
-            }
-            Label {
-                anchors.verticalCenter: parent.verticalCenter
-                text: chip.label
-                color: theme.foreground
-                opacity: chip.current ? 1 : 0.62
-                font.pixelSize: 12
-            }
-            Label {
-                anchors.verticalCenter: parent.verticalCenter
-                text: chip.count
-                color: theme.foreground
-                opacity: chip.current ? 0.62 : 0.38
-                font.pixelSize: 11
-                font.family: "monospace"
-            }
-        }
-        MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: {
-                if (host)
-                    host.lineFilter = chip.key
-            }
-        }
-    }
-
     Rectangle {
         anchors.fill: parent
         color: theme.surface
@@ -254,7 +222,7 @@ Item {
             Label {
                 visible: backend.recentLists.length === 0 && backend.recentCuts.length === 0
                 Layout.fillWidth: true
-                text: qsTr("Your shots will be listed here.")
+                text: qsTr("Nothing saved yet.")
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 13
@@ -346,6 +314,7 @@ Item {
                 Layout.fillWidth: true
                 spacing: 4
                 ActionButton {
+                    raised: true
                     leftPadding: 10
                     rightPadding: 10
                     text: qsTr("Add shots…")
@@ -353,6 +322,7 @@ Item {
                     onClicked: backend.addVideosDialog()
                 }
                 ActionButton {
+                    raised: true
                     leftPadding: 10
                     rightPadding: 10
                     text: qsTr("Add a title card…")
@@ -360,6 +330,7 @@ Item {
                     onClicked: host.openTitleCard()
                 }
                 ActionButton {
+                    raised: true
                     leftPadding: 10
                     rightPadding: 10
                     text: qsTr("Save list…")
@@ -377,161 +348,77 @@ Item {
 
             Label {
                 Layout.fillWidth: true
+                Layout.bottomMargin: 8
                 text: qsTr("Lines")
                 color: theme.foreground
                 font.pixelSize: 15
                 font.weight: Font.DemiBold
             }
-            Label {
-                Layout.fillWidth: true
-                Layout.topMargin: 2
-                text: qsTr("BotCut picked these. Flip any line to keep or drop it.")
-                color: theme.foreground
-                opacity: 0.62
-                font.pixelSize: 12
-                wrapMode: Text.WordWrap
-            }
 
-            // Search hides rows whose words do not match. Empty shows the filter.
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 12
-                Layout.preferredHeight: 32
-                radius: theme.radius
-                color: theme.raised
-                border.width: searchField.activeFocus ? 1 : 0
-                border.color: theme.accent
-                TextInput {
-                    id: searchField
-                    anchors.fill: parent
-                    leftPadding: 12
-                    rightPadding: 12
-                    verticalAlignment: Text.AlignVCenter
-                    clip: true
-                    color: theme.foreground
-                    font.pixelSize: 13
-                    selectByMouse: true
-                    // The window shortcut sees ShortcutOverride first. Claim Escape
-                    // only while nothing else wants it, then the handler below runs.
-                    Keys.onShortcutOverride: (event) => {
-                        if (event.key !== Qt.Key_Escape || root.paceOpen || (host && host.dialogUp))
-                            return
-                        event.accepted = true
-                    }
-                    Keys.onEscapePressed: (event) => {
-                        if (text === "") {
-                            focus = false
-                        } else {
-                            text = ""
-                        }
-                        event.accepted = true
-                    }
-                }
-                Label {
-                    anchors.fill: searchField
-                    anchors.leftMargin: searchField.leftPadding
-                    anchors.rightMargin: searchField.rightPadding
-                    visible: searchField.text === ""
-                    text: qsTr("Search lines")
-                    color: theme.foreground
-                    opacity: 0.38
-                    font.pixelSize: 13
-                    verticalAlignment: Text.AlignVCenter
-                    elide: Text.ElideRight
-                }
-            }
-
-            Flow {
-                Layout.fillWidth: true
-                Layout.topMargin: 8
-                spacing: 6
-                FilterChip {
-                    key: "all"
-                    label: qsTr("All")
-                    count: backend.selects.length
-                }
-                FilterChip {
-                    key: "kept"
-                    label: qsTr("Kept")
-                    count: decisions.keptCount
-                    dotted: true
-                    dot: theme.accent
-                }
-                FilterChip {
-                    key: "dropped"
-                    label: qsTr("Dropped")
-                    count: decisions.droppedCount
-                    dotted: true
-                    dot: theme.foreground
-                    dotOpacity: 0.38
-                }
-                FilterChip {
-                    key: "unsure"
-                    label: qsTr("Unsure")
-                    count: decisions.unsureCount
-                    dotted: true
-                    dot: theme.accent
-                    dotOpacity: 0.38
-                }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.topMargin: 12
-                Layout.preferredHeight: 1
-                color: theme.line
-            }
-
-            ListView {
-                id: lineList
+            // The rows over the chat. Drag the line between them.
+            SplitView {
+                id: linesSplit
+                objectName: "linesSplit"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.topMargin: 8
-                clip: true
-                boundsBehavior: Flickable.StopAtBounds
-                // A hidden row is 0 px tall. The 4 px between rows is inside each row.
-                spacing: 0
-                model: backend.selects
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
-                delegate: LineRow {
-                    timeText: root.clockOf(modelData)
-                    reasonText: root.reasonText(modelData.reason)
-                    coverText: root.coverText(modelData)
-                    shown: root.rowShown(modelData)
-                    selected: host.viewStep === "lines" && index === host.currentLine
-                    marked: host.viewStep === "movie" && index === root.playheadIndex
-                    onPicked: {
-                        host.currentLine = index
-                        host.showLine(modelData)
+                orientation: Qt.Vertical
+                handle: Rectangle {
+                    implicitWidth: linesSplit.width
+                    implicitHeight: 9
+                    color: "transparent"
+                    Rectangle {
+                        anchors.centerIn: parent
+                        width: parent.width
+                        height: 1
+                        color: SplitHandle.hovered || SplitHandle.pressed ? theme.hover : theme.line
                     }
-                    onPlayRequested: host.playLine(modelData)
                 }
-                Label {
-                    visible: backend.selects.length > 0 && root.shownCount === 0
-                    anchors.top: parent.top
-                    anchors.topMargin: 8
-                    width: parent.width
-                    text: root.searchWords !== "" ? qsTr("No line says that.") : qsTr("No lines here.")
-                    color: theme.foreground
-                    opacity: 0.38
-                    font.pixelSize: 12
-                    wrapMode: Text.WordWrap
+                Component.onCompleted: {
+                    if (paneSettings.linesSplit)
+                        linesSplit.restoreState(paneSettings.linesSplit)
                 }
-            }
+                Component.onDestruction: paneSettings.linesSplit = linesSplit.saveState()
 
-            ReviseChat {
-                id: reviseChat
-                Layout.fillWidth: true
-                Layout.topMargin: 8
-                Layout.preferredHeight: implicitHeight
-                host: root.host
-                onApplied: (changed, fromStep) => {
-                    lineList.contentY = 0
-                    if (!changed || fromStep !== "movie")
-                        return
-                    host.shotsPinned = false
-                    if (host.hasVideo)
-                        backend.showShots()
+                ListView {
+                    id: lineList
+                    SplitView.fillWidth: true
+                    SplitView.fillHeight: true
+                    SplitView.minimumHeight: 160
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    // The 4 px between rows is inside each row.
+                    spacing: 0
+                    model: backend.selects
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+                    delegate: LineRow {
+                        timeText: root.clockOf(modelData)
+                        reasonText: root.reasonText(modelData.reason)
+                        coverText: root.coverText(modelData)
+                        coverStill: root.coverStill(modelData)
+                        selected: host.viewStep === "lines" && index === host.currentLine
+                        marked: host.viewStep === "movie" && index === root.playheadIndex
+                        onPicked: {
+                            host.currentLine = index
+                            host.showLine(modelData)
+                        }
+                        onPlayRequested: host.playLine(modelData)
+                    }
+                }
+
+                ReviseChat {
+                    id: reviseChat
+                    SplitView.fillWidth: true
+                    SplitView.preferredHeight: 240
+                    SplitView.minimumHeight: 140
+                    host: root.host
+                    onApplied: (changed, fromStep) => {
+                        lineList.contentY = 0
+                        if (!changed || fromStep !== "movie")
+                            return
+                        host.shotsPinned = false
+                        if (host.hasVideo)
+                            backend.showShots()
+                    }
                 }
             }
         }

@@ -1,4 +1,5 @@
 #include <QtTest>
+#include <functional>
 
 #include <algorithm>
 
@@ -171,13 +172,14 @@ public:
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY infoChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY infoChanged)
-    Q_PROPERTY(bool broll READ broll WRITE setBroll NOTIFY infoChanged)
+    Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY infoChanged)
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY infoChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY infoChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY infoChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY infoChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY infoChanged)
-    Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
+    Q_PROPERTY(QVariantList chat READ chat NOTIFY chatChanged)
+    Q_PROPERTY(bool proposalPending READ proposalPending NOTIFY chatChanged)
     Q_PROPERTY(bool canRevert READ canRevert NOTIFY infoChanged)
     Q_PROPERTY(QVariantList selects READ selects NOTIFY selectsChanged)
     Q_PROPERTY(QVariantList recentLists READ recentLists NOTIFY infoChanged)
@@ -246,11 +248,19 @@ public:
         m_sceneTransition = next;
         emit infoChanged();
     }
-    bool broll() const { return m_broll; }
-    void setBroll(bool value) {
-        if (m_broll == value)
+    QStringList brollFiles() const { return m_brollFiles; }
+    void setBrollFiles(const QStringList &files) {
+        m_brollFiles = files;
+        emit infoChanged();
+    }
+    Q_INVOKABLE bool isBroll(const QString &path) const { return m_brollFiles.contains(path); }
+    Q_INVOKABLE void toggleBroll(int index) {
+        lastToggleIndex = index;
+        if (index < 0 || index >= m_tray.size())
             return;
-        m_broll = value;
+        const QString path = m_tray.at(index);
+        if (m_brollFiles.removeAll(path) == 0)
+            m_brollFiles.append(path);
         emit infoChanged();
     }
     bool brollMix() const { return m_brollMix; }
@@ -273,10 +283,28 @@ public:
     }
     QString pace() const { return m_pace; }
     double maxPause() const { return 1; }
-    QStringList reviseNotes() const { return m_reviseNotes; }
-    void setReviseNotes(const QStringList &notes) {
-        m_reviseNotes = notes;
-        emit reviseNotesChanged();
+    QVariantList chat() const { return m_chat; }
+    bool proposalPending() const { return m_proposalPending; }
+    static QVariantMap turn(const QString &role, const QString &text, const QString &change = QString()) {
+        QVariantMap row;
+        row.insert(QStringLiteral("role"), role);
+        row.insert(QStringLiteral("text"), text);
+        row.insert(QStringLiteral("change"), change);
+        return row;
+    }
+    void setChat(const QVariantList &turns, bool pending) {
+        m_chat = turns;
+        m_proposalPending = pending;
+        emit chatChanged();
+    }
+    Q_INVOKABLE bool applyProposal() {
+        ++applyCount;
+        return m_acceptApply;
+    }
+    Q_INVOKABLE void dismissProposal() {
+        ++dismissCount;
+        m_proposalPending = false;
+        emit chatChanged();
     }
     bool canRevert() const { return m_canRevert; }
     void setCanRevert(bool value) {
@@ -402,13 +430,17 @@ public:
     int closeCount = 0;
     int showShotsCount = 0;
     bool m_acceptRevise = false;
+    bool m_acceptApply = true;
     bool m_revertWorks = true;
     QString lastRevise;
+    int applyCount = 0;
+    int dismissCount = 0;
     int thumbRequestCount = 0;
     double lastThumbStart = 0;
     double lastThumbEnd = 0;
     int lastDropId = -1;
     int lastRestoreId = -1;
+    int lastToggleIndex = -1;
     int renderCount = 0;
 
 signals:
@@ -419,7 +451,7 @@ signals:
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void loadError(const QString &message);
-    void reviseNotesChanged();
+    void chatChanged();
     void selectsChanged();
 
 private:
@@ -430,7 +462,7 @@ private:
     QVariantList m_selects;
     bool m_renderedUnsaved = false;
     QString m_sceneTransition = QStringLiteral("dip");
-    bool m_broll = false;
+    QStringList m_brollFiles;
     bool m_brollMix = true;
     QVariantList m_covers;
     QStringList m_cutClips;
@@ -440,7 +472,8 @@ private:
     bool m_planCut = false;
     int m_trayIndex = -1;
     QString m_intent = defaultCutIntent();
-    QStringList m_reviseNotes;
+    QVariantList m_chat;
+    bool m_proposalPending = false;
 };
 
 // Finds a DialogButton by its label ("primary" tells them apart from Labels).
@@ -601,6 +634,15 @@ private slots:
     void coverHoverNamesTheCutClip();
     void loadSelectsKeepsClipArrayOrder();
     void assembleLaunchOmitsBroll();
+    void brollRoleRoundTrips();
+    void coversKeepTheBeatWindow();
+    void shotRowBrollWord();
+    void coverAtWindow();
+    void linesSentenceCountsCovers();
+    void coverShowsInThePreview();
+    void clearCoverTakesTheRun();
+    void changeSentenceNamesTheBroll();
+    void cutOpensTheChatWithTheEditorsReply();
     void renderSelectsPassesBrollSound();
     void planSegmentWriteLeavesCovers();
     void reviseDropsALineAndReverts();
@@ -889,6 +931,27 @@ void BackendTests::cutListRoundTripsOrderAndMode() {
     QCOMPARE(intent, defaultCutIntent());
     const QByteArray rewritten = writeCutList(mode, files);
     QVERIFY(!QString::fromUtf8(rewritten).contains(QStringLiteral("supersecret")));
+    QVERIFY(!QString::fromUtf8(rewritten).contains(QStringLiteral("broll")));
+
+    // B-roll marks ride along. An older list without them still opens.
+    QStringList broll;
+    QVERIFY(parseCutList(bytes, QStringLiteral("/unused"), &mode, &files, &error, &intent, nullptr, &broll));
+    QVERIFY(broll.isEmpty());
+    const QString card = QStringLiteral("/tmp/clips/botcut-card-1-open.mp4");
+    const QByteArray marked = writeCutList(QStringLiteral("speech"), {second, first, card}, QString(), {},
+                                           {first, card, QStringLiteral("/tmp/clips/nope.mp4")});
+    QVERIFY(QString::fromUtf8(marked).contains(QStringLiteral("\"broll\"")));
+    QVERIFY(!QString::fromUtf8(marked).contains(QStringLiteral("nope.mp4")));
+    QVERIFY(parseCutList(marked, QStringLiteral("/unused"), &mode, &files, &error, &intent, nullptr, &broll));
+    QCOMPARE(files, (QStringList{second, first, card}));
+    // The card is dropped on the way in. A card is never B-roll.
+    QCOMPARE(broll, QStringList{first});
+    const QByteArray relative = QByteArrayLiteral(
+        "{\"version\":1,\"mode\":\"speech\",\"files\":[\"a.mp4\",\"b.mp4\"],"
+        "\"broll\":[\"b.mp4\",\"c.mp4\",7,\"b.mp4\"]}");
+    QVERIFY(parseCutList(relative, QStringLiteral("/tmp/clips"), &mode, &files, &error, &intent, nullptr, &broll));
+    QCOMPARE(files, (QStringList{QStringLiteral("/tmp/clips/a.mp4"), QStringLiteral("/tmp/clips/b.mp4")}));
+    QCOMPARE(broll, QStringList{QStringLiteral("/tmp/clips/b.mp4")});
 }
 
 void BackendTests::dropSelectUnkeepsALine() {
@@ -1369,10 +1432,11 @@ void BackendTests::gatherLabelsFit() {
     QVERIFY(reviseField->isVisible());
     QVERIFY2(fullyInside(reviseField, QStringLiteral("reviseField")).isEmpty(),
              qPrintable(fullyInside(reviseField, QStringLiteral("reviseField"))));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Change this cut")));
-    QVERIFY(visibleItemWithText(window, QStringLiteral("Tell BotCut what to change")));
-    QVERIFY(visibleItemWithText(window, QStringLiteral("This movie")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Send")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Ask for a change\u2026")));
     QVERIFY(visibleItemWithText(window, defaultCutIntent()));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Search lines")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Previous")));
     const auto rowFit = [&](QQuickItem *item, const QString &label) {
         if (!item || !item->isVisible())
             return label + QStringLiteral(" is missing");
@@ -1415,7 +1479,8 @@ void BackendTests::gatherLabelsFit() {
     QVERIFY(keep);
     QVERIFY(keep->isEnabled());
     QVERIFY(keep->opacity() > 0.5);
-    QQuickItem *droppedRow = keep->parentItem()->parentItem()->parentItem();
+    QQuickItem *droppedRow = lineRowItem(keep);
+    QVERIFY(droppedRow);
     QVERIFY(qAbs(droppedRow->opacity() - 1.0) < 0.01);
     window->setProperty("currentLine", 0);
     QTest::qWait(20);
@@ -1510,15 +1575,19 @@ void BackendTests::gatherLabelsFit() {
     QTest::qWait(50);
     reviseField = window->findChild<QQuickItem *>(QStringLiteral("reviseField"));
     QVERIFY(reviseField && reviseField->isVisible());
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Change this cut")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Send")));
     QCOMPARE(reviseField->setProperty("text", QStringLiteral("drop the stumble")), true);
     QTest::qWait(20);
     QQuickItem *reviseSend = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
     QVERIFY(reviseSend);
     QVERIFY(reviseSend->isVisible());
+    backend.setChat({ShortcutBackend::turn(QStringLiteral("you"), QStringLiteral("drop the stumble")),
+                     ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("Done."),
+                                           QStringLiteral("Dropped 1 line."))},
+                    false);
     backend.setCanRevert(true);
     QTest::qWait(50);
-    QQuickItem *undo = visibleItemWithText(window, QStringLiteral("Undo this change"));
+    QQuickItem *undo = visibleItemWithText(window, QStringLiteral("Undo"));
     QVERIFY(undo);
     QVERIFY(undo->isEnabled());
 
@@ -1560,7 +1629,7 @@ void BackendTests::gatherLabelsFit() {
     QVERIFY(backend.tray().isEmpty());
     QVERIFY(!home->isVisible());
     QVERIFY(visibleItemWithText(window, QStringLiteral("Pick up where you left off")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Change this cut")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Send")));
     for (const QString &label : {QStringLiteral("Open a saved list…"), QStringLiteral("Add shots…")}) {
         QVERIFY2(fullyInside(visibleItemWithText(window, label), label).isEmpty(),
                  qPrintable(fullyInside(visibleItemWithText(window, label), label)));
@@ -1796,12 +1865,13 @@ void BackendTests::paceListKeysAndHide() {
     QTest::keyClick(window, Qt::Key_Return);
     QCOMPARE(field->property("open").toBool(), true);
 
+    // A click anywhere else closes the list. The field stays where it is.
     QQuickItem *shots = window->findChild<QQuickItem *>(QStringLiteral("shotsStep"));
     QVERIFY(shots);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shots));
     QTest::qWait(50);
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
-    QCOMPARE(field->property("open").toBool(), true);
+    QCOMPARE(field->property("open").toBool(), false);
     QVERIFY(field->isVisible());
 
     QQuickItem *lines = window->findChild<QQuickItem *>(QStringLiteral("linesStep"));
@@ -1809,12 +1879,13 @@ void BackendTests::paceListKeysAndHide() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(lines));
     QTest::qWait(50);
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("lines"));
-    QCOMPARE(field->property("open").toBool(), true);
+    QCOMPARE(field->property("open").toBool(), false);
+    QVERIFY(field->isVisible());
 
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shots));
     QTest::qWait(50);
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
-    QCOMPARE(field->property("open").toBool(), true);
+    QCOMPARE(field->property("open").toBool(), false);
     QCOMPARE(window->property("settingsOpen").toBool(), false);
 
     backend.setPreviewUrl(QUrl::fromLocalFile(m_videoPath));
@@ -1827,14 +1898,25 @@ void BackendTests::paceListKeysAndHide() {
             space = object;
     }
     QVERIFY(space);
+    // The list closed with the step click and let the field's focus go, so Space plays.
+    QCOMPARE(space->property("enabled").toBool(), true);
+    closed->forceActiveFocus();
+    QVERIFY(closed->hasActiveFocus());
     QCOMPARE(space->property("enabled").toBool(), false);
+    QTest::keyClick(window, Qt::Key_Return);
+    QCOMPARE(field->property("open").toBool(), true);
+    QTest::keyClick(window, Qt::Key_Escape);
+    QCOMPARE(field->property("open").toBool(), false);
+    QTest::qWait(20);
+    QVERIFY(!closed->hasActiveFocus());
+    QCOMPARE(space->property("enabled").toBool(), true);
 
     backend.setCutMode(QStringLiteral("assemble"));
     QTest::qWait(50);
     QVERIFY(!field->isVisible());
-    QQuickItem *slot = field->parentItem()->parentItem()->parentItem();
-    QVERIFY(slot);
-    QCOMPARE(slot->height(), 0.0);
+    QQuickItem *cutRow = field->parentItem()->parentItem();
+    QVERIFY(cutRow);
+    QVERIFY(!cutRow->isVisible());
     QVERIFY(!field->property("open").toBool());
     QCOMPARE(space->property("enabled").toBool(), true);
 
@@ -1845,22 +1927,22 @@ void BackendTests::paceListKeysAndHide() {
     QCOMPARE(backend.cutMode(), QStringLiteral("assemble"));
     QVERIFY(field->isVisible());
     QVERIFY(!field->property("open").toBool());
-    slot = field->parentItem()->parentItem()->parentItem();
-    QVERIFY(slot->height() > 0.0);
+    QVERIFY(cutRow->isVisible());
+    // No sentence well without spoken cuts; the pace and the fade stay.
+    QVERIFY(!visibleItemWithText(window, defaultCutIntent()));
     QCOMPARE(space->property("enabled").toBool(), true);
 
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shots));
     QTest::qWait(50);
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
     QVERIFY(!field->isVisible());
-    slot = field->parentItem()->parentItem()->parentItem();
-    QCOMPARE(slot->height(), 0.0);
+    QVERIFY(!cutRow->isVisible());
     QVERIFY(!field->property("open").toBool());
 
     backend.setCutMode(QStringLiteral("speech"));
     QTRY_VERIFY_WITH_TIMEOUT(field->isVisible(), 1000);
-    slot = field->parentItem()->parentItem()->parentItem();
-    QTRY_VERIFY_WITH_TIMEOUT(slot->height() > 0.0, 1000);
+    QTRY_VERIFY_WITH_TIMEOUT(cutRow->isVisible(), 1000);
+    QVERIFY(visibleItemWithText(window, defaultCutIntent()));
 
     closed->forceActiveFocus();
     QVERIFY(closed->hasActiveFocus());
@@ -2166,38 +2248,21 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     const auto inForce = [](QQuickItem *label) {
         return label && label->parentItem() && label->parentItem()->property("active").toBool();
     };
-    // Both words on every row. The filled word is the state, and it does not act.
-    QQuickItem *garageKeep = oneWord(wordsOn(garageRow, QStringLiteral("Keep")));
+    // One word on every row: Drop on a kept line, Keep on a dropped one. It is
+    // the only control on a row that is not selected.
     QQuickItem *garageDrop = oneWord(wordsOn(garageRow, QStringLiteral("Drop")));
-    QQuickItem *secondKeep = oneWord(wordsOn(secondRow, QStringLiteral("Keep")));
     QQuickItem *secondDrop = oneWord(wordsOn(secondRow, QStringLiteral("Drop")));
     QQuickItem *shopsKeep = oneWord(wordsOn(shopsRow, QStringLiteral("Keep")));
-    QQuickItem *shopsDrop = oneWord(wordsOn(shopsRow, QStringLiteral("Drop")));
-    QVERIFY(garageKeep);
     QVERIFY(garageDrop);
-    QVERIFY(secondKeep);
     QVERIFY(secondDrop);
     QVERIFY(shopsKeep);
-    QVERIFY(shopsDrop);
-    QVERIFY(inForce(garageKeep));
-    QVERIFY(filled(garageKeep));
-    QVERIFY(!inForce(garageDrop));
+    QVERIFY(wordsOn(garageRow, QStringLiteral("Keep")).isEmpty());
+    QVERIFY(wordsOn(secondRow, QStringLiteral("Keep")).isEmpty());
+    QVERIFY(wordsOn(shopsRow, QStringLiteral("Drop")).isEmpty());
     QVERIFY(!filled(garageDrop));
-    QVERIFY(inForce(secondKeep));
-    QVERIFY(filled(secondKeep));
-    QVERIFY(!inForce(secondDrop));
-    QVERIFY(!filled(secondDrop));
-    QVERIFY(inForce(shopsDrop));
-    QVERIFY(filled(shopsDrop));
-    QVERIFY(!inForce(shopsKeep));
     QVERIFY(!filled(shopsKeep));
-
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageKeep));
-    QCOMPARE(backend.lastDropId, -1);
-    QCOMPARE(backend.lastRestoreId, -1);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsDrop));
-    QCOMPARE(backend.lastDropId, -1);
-    QCOMPARE(backend.lastRestoreId, -1);
+    // The word's pill, the row's layout, the body column, then the row.
+    QCOMPARE(lineRowItem(secondDrop), secondRow);
     QCOMPARE(window->property("currentLine").toInt(), 0);
 
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageDrop));
@@ -2206,9 +2271,9 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QTRY_VERIFY_WITH_TIMEOUT(
         sentenceRow(garage) && sentenceRow(garage)->property("dropped").toBool(), 3000);
     garageRow = sentenceRow(garage);
-    garageKeep = oneWord(wordsOn(garageRow, QStringLiteral("Keep")));
+    QQuickItem *garageKeep = oneWord(wordsOn(garageRow, QStringLiteral("Keep")));
     QVERIFY(garageKeep);
-    QVERIFY(!inForce(garageKeep));
+    QVERIFY(wordsOn(garageRow, QStringLiteral("Drop")).isEmpty());
     backend.lastDropId = -1;
     backend.lastRestoreId = -1;
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(garageKeep));
@@ -2217,19 +2282,20 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QTRY_VERIFY_WITH_TIMEOUT(
         sentenceRow(garage) && !sentenceRow(garage)->property("dropped").toBool(), 3000);
 
+    // The unselected dropped row flips without becoming the current line.
     shopsRow = sentenceRow(shops);
     shopsKeep = oneWord(wordsOn(shopsRow, QStringLiteral("Keep")));
     QVERIFY(shopsKeep);
-    QVERIFY(!inForce(shopsKeep));
+    backend.lastDropId = -1;
+    backend.lastRestoreId = -1;
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsKeep));
     QCOMPARE(backend.lastRestoreId, 3);
     QCOMPARE(backend.lastDropId, -1);
     QTRY_VERIFY_WITH_TIMEOUT(
         sentenceRow(shops) && !sentenceRow(shops)->property("dropped").toBool(), 3000);
     shopsRow = sentenceRow(shops);
-    shopsDrop = oneWord(wordsOn(shopsRow, QStringLiteral("Drop")));
+    QQuickItem *shopsDrop = oneWord(wordsOn(shopsRow, QStringLiteral("Drop")));
     QVERIFY(shopsDrop);
-    QVERIFY(!inForce(shopsDrop));
     backend.lastDropId = -1;
     backend.lastRestoreId = -1;
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(shopsDrop));
@@ -2348,8 +2414,7 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QList<QQuickItem *> keeps;
     collectVisibleText(window->contentItem(), QStringLiteral("Drop"), &drops);
     collectVisibleText(window->contentItem(), QStringLiteral("Keep"), &keeps);
-    QCOMPARE(drops.size(), 3);
-    QCOMPARE(keeps.size(), 3);
+    QCOMPARE(drops.size() + keeps.size(), 3);
     for (QQuickItem *item : drops)
         QVERIFY(qAbs(item->opacity() - 0.38) < 0.01);
     for (QQuickItem *item : keeps)
@@ -2382,36 +2447,25 @@ void BackendTests::lineRowDropStaysOnTheUnselectedRow() {
     QCOMPARE(backend.covers().size(), 0);
     QCOMPARE(backend.timeline.clips(), clips);
 
-    QQuickItem *searchHint = visibleItemWithText(window, QStringLiteral("Search lines"));
-    QVERIFY(searchHint);
-    QVERIFY(searchHint->parentItem());
-    QQuickItem *search = nullptr;
-    const auto searchKids = searchHint->parentItem()->childItems();
-    for (QQuickItem *child : searchKids) {
-        if (child->inherits("QQuickTextInput"))
-            search = child;
-    }
-    QVERIFY(search);
-    search->forceActiveFocus();
-    QVERIFY(search->hasActiveFocus());
-    QCOMPARE(search->setProperty("text", QStringLiteral("garage")), true);
-    QTest::qWait(20);
+    // A focused chat field keeps Ctrl+R and the line keys to itself.
+    QQuickItem *chatField = window->findChild<QQuickItem *>(QStringLiteral("reviseField"));
+    QVERIFY(chatField);
+    chatField->forceActiveFocus();
+    QVERIFY(chatField->hasActiveFocus());
+    QVERIFY(window->property("controlFocused").toBool());
     backend.lastDropId = -1;
     backend.lastRestoreId = -1;
-    const int rendersWhileSearching = backend.renderCount;
-    QTest::keyClick(window, Qt::Key_Escape);
-    QCOMPARE(search->property("text").toString(), QString());
+    const int rendersWhileTyping = backend.renderCount;
+    QTest::keyClick(window, Qt::Key_X);
     QCOMPARE(backend.lastDropId, -1);
-    QCOMPARE(backend.lastRestoreId, -1);
-    QVERIFY(search->hasActiveFocus());
     QTest::keyClick(window, Qt::Key_R, Qt::ControlModifier);
-    QCOMPARE(backend.renderCount, rendersWhileSearching);
+    QCOMPARE(backend.renderCount, rendersWhileTyping);
     // The window content item is a focus scope, so it would hand focus back to the field.
-    searchHint->parentItem()->forceActiveFocus();
-    QVERIFY(!search->hasActiveFocus());
+    chatField->parentItem()->parentItem()->forceActiveFocus();
+    QVERIFY(!chatField->hasActiveFocus());
     QVERIFY(!window->property("controlFocused").toBool());
     QTest::keyClick(window, Qt::Key_R, Qt::ControlModifier);
-    QCOMPARE(backend.renderCount, rendersWhileSearching + 1);
+    QCOMPARE(backend.renderCount, rendersWhileTyping + 1);
 }
 
 void BackendTests::reviseChatStates() {
@@ -2429,79 +2483,120 @@ void BackendTests::reviseChatStates() {
     window->show();
     QTest::qWait(50);
 
+    const auto clickSend = [&](const QString &note) {
+        QQuickItem *field = window->findChild<QQuickItem *>(QStringLiteral("reviseField"));
+        QVERIFY(field);
+        QVERIFY(field->setProperty("text", note));
+        QTest::qWait(20);
+        QQuickItem *send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
+        QVERIFY(send);
+        QVERIFY(send->isVisible());
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
+        QTest::qWait(20);
+    };
     QQuickItem *field = window->findChild<QQuickItem *>(QStringLiteral("reviseField"));
     QVERIFY(field);
     QVERIFY(field->isVisible());
-    QCOMPARE(field->setProperty("text", QStringLiteral("bring back the pricing")), true);
-    QTest::qWait(20);
-    QQuickItem *send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
-    QVERIFY(send);
-    QVERIFY(send->isVisible());
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
-    QTest::qWait(20);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Ask for a change…")));
+
+    // A note that gets no reply comes back to the field.
+    clickSend(QStringLiteral("bring back the pricing"));
     QCOMPARE(backend.lastRevise, QStringLiteral("bring back the pricing"));
     QCOMPARE(field->property("text").toString(), QString());
-    QVERIFY(visibleItemWithText(window, QStringLiteral("Changing the cut\u2026")));
-
     backend.setBusy(true);
     QTest::qWait(20);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Thinking…")));
+    QVERIFY(!field->isEnabled());
     backend.setBusy(false);
     QTest::qWait(50);
     QCOMPARE(field->property("text").toString(), QStringLiteral("bring back the pricing"));
     QVERIFY(visibleItemWithText(
         window, QStringLiteral("That change didn't go through. Your note is back in the field.")));
-    QVERIFY(!visibleItemWithText(window, QStringLiteral("Changing the cut\u2026")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Thinking…")));
 
-    QCOMPARE(field->setProperty("text", QStringLiteral("drop the pricing part")), true);
-    QTest::qWait(20);
-    send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
-    QVERIFY(send);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
-    QTest::qWait(20);
+    // A reply is a proposal. Nothing moves until Apply.
+    clickSend(QStringLiteral("drop the pricing part"));
     backend.setBusy(true);
+    backend.setChat({ShortcutBackend::turn(QStringLiteral("you"), QStringLiteral("drop the pricing part")),
+                     ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("I'd drop the pricing line."),
+                                           QStringLiteral("Drops 1 line. New movie sentence. Pace becomes Tight."))},
+                    true);
+    QTest::qWait(20);
+    backend.setBusy(false);
+    QTest::qWait(50);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("drop the pricing part")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("I'd drop the pricing line.")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Drops 1 line. New movie sentence. Pace becomes Tight.")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Say yes, or ask for something else")));
+    QQuickItem *apply = visibleItemWithText(window, QStringLiteral("Apply"));
+    QVERIFY(apply);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Leave it")));
+    QCOMPARE(backend.applyCount, 0);
+    QCOMPARE(backend.renderCount, 0);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(apply));
+    QTest::qWait(20);
+    QCOMPARE(backend.applyCount, 1);
+    backend.setBusy(true);
+    QTest::qWait(20);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Applying…")));
     QVariantMap dropped = line;
     dropped.insert(QStringLiteral("keep"), false);
     backend.setSelects({dropped});
     backend.setPace(QStringLiteral("tight"));
     backend.setIntent(QStringLiteral("A tighter movie."));
-    backend.setReviseNotes({QStringLiteral("drop the pricing part")});
-    QTest::qWait(20);
-    backend.setBusy(false);
-    QTest::qWait(50);
-    QVERIFY(visibleItemWithText(
-        window, QStringLiteral("Dropped 1 line. New movie sentence. Pace is now Tight.")));
-
-    QCOMPARE(field->setProperty("text", QStringLiteral("say it again")), true);
-    QTest::qWait(20);
-    send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
-    QVERIFY(send);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
-    QTest::qWait(20);
-    backend.setBusy(true);
-    backend.setReviseNotes(
-        {QStringLiteral("drop the pricing part"), QStringLiteral("say it again")});
-    backend.setBusy(false);
-    QTest::qWait(50);
-    QVERIFY(visibleItemWithText(window, QStringLiteral("Nothing changed. Try saying it another way.")));
-
+    QVariantList turns = backend.chat();
+    turns.append(ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("Done."),
+                                       QStringLiteral("Dropped 1 line. New movie sentence. Pace is now Tight.")));
+    backend.setChat(turns, false);
     backend.setCanRevert(true);
-    QTest::qWait(20);
-    QQuickItem *undo = visibleItemWithText(window, QStringLiteral("Undo this change"));
+    backend.setBusy(false);
+    QTest::qWait(50);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Done.")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Dropped 1 line. New movie sentence. Pace is now Tight.")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Apply")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Applying…")));
+    QQuickItem *undo = visibleItemWithText(window, QStringLiteral("Undo"));
     QVERIFY(undo);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(undo));
     QTest::qWait(20);
     QVERIFY(visibleItemWithText(window, QStringLiteral("Undone. Back to how it was before this note.")));
     QVERIFY(!backend.canRevert());
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Undo")));
 
     backend.setCanRevert(true);
     backend.m_revertWorks = false;
     QTest::qWait(20);
-    undo = visibleItemWithText(window, QStringLiteral("Undo this change"));
+    undo = visibleItemWithText(window, QStringLiteral("Undo"));
     QVERIFY(undo);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(undo));
     QTest::qWait(20);
     QVERIFY(visibleItemWithText(window, QStringLiteral("Could not undo. The line list did not save.")));
     QVERIFY(backend.canRevert());
+
+    // A typed yes is Apply. Anything else is a new note.
+    turns.append(ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("Shall I tighten it?"),
+                                       QStringLiteral("Pace becomes Frenzied.")));
+    backend.setChat(turns, true);
+    QTest::qWait(20);
+    backend.lastRevise.clear();
+    clickSend(QStringLiteral("Yes, do it."));
+    QCOMPARE(backend.applyCount, 2);
+    QCOMPARE(backend.lastRevise, QString());
+    clickSend(QStringLiteral("no, make it shorter"));
+    QCOMPARE(backend.applyCount, 2);
+    QCOMPARE(backend.lastRevise, QStringLiteral("no, make it shorter"));
+
+    // Leave it drops the proposal and keeps the thread.
+    backend.setChat(turns, true);
+    QTest::qWait(20);
+    QQuickItem *leave = visibleItemWithText(window, QStringLiteral("Leave it"));
+    QVERIFY(leave);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(leave));
+    QTest::qWait(20);
+    QCOMPARE(backend.dismissCount, 1);
+    QVERIFY(!backend.proposalPending());
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Apply")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Shall I tighten it?")));
 }
 
 void BackendTests::reviseFromMovieOpensLines() {
@@ -2525,34 +2620,52 @@ void BackendTests::reviseFromMovieOpensLines() {
     QQuickItem *field = window->findChild<QQuickItem *>(QStringLiteral("reviseField"));
     QVERIFY(field);
     QVERIFY(field->isVisible());
-    QVERIFY(visibleItemWithText(window, QStringLiteral("This movie")));
-    QVERIFY(visibleItemWithText(window, defaultCutIntent()));
 
-    QCOMPARE(field->setProperty("text", QStringLiteral("leave it")), true);
-    QTest::qWait(20);
-    QQuickItem *send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
-    QVERIFY(send);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
-    QTest::qWait(20);
+    const auto clickSend = [&](const QString &note) {
+        QVERIFY(field->setProperty("text", note));
+        QTest::qWait(20);
+        QQuickItem *send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
+        QVERIFY(send);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
+        QTest::qWait(20);
+    };
+
+    // A reply that changes nothing stays on Movie.
+    clickSend(QStringLiteral("leave it"));
     backend.setBusy(true);
-    backend.setReviseNotes({QStringLiteral("leave it")});
+    backend.setChat({ShortcutBackend::turn(QStringLiteral("you"), QStringLiteral("leave it")),
+                     ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("It stays as it is."),
+                                           QStringLiteral("Nothing would change."))},
+                    false);
     backend.setBusy(false);
     QTest::qWait(50);
     QCOMPARE(backend.showShotsCount, 0);
-    QVERIFY(visibleItemWithText(window, QStringLiteral("Nothing changed. Try saying it another way.")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Nothing would change.")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Apply")));
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("movie"));
 
-    QCOMPARE(field->setProperty("text", QStringLiteral("drop it")), true);
+    // An applied change returns to Lines.
+    clickSend(QStringLiteral("drop it"));
+    backend.setBusy(true);
+    QVariantList turns = backend.chat();
+    turns.append(ShortcutBackend::turn(QStringLiteral("you"), QStringLiteral("drop it")));
+    turns.append(ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("Dropping the garage line."),
+                                       QStringLiteral("Drops 1 line.")));
+    backend.setChat(turns, true);
+    backend.setBusy(false);
+    QTest::qWait(50);
+    QCOMPARE(backend.showShotsCount, 0);
+    QQuickItem *apply = visibleItemWithText(window, QStringLiteral("Apply"));
+    QVERIFY(apply);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(apply));
     QTest::qWait(20);
-    send = window->findChild<QQuickItem *>(QStringLiteral("reviseSend"));
-    QVERIFY(send);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(send));
-    QTest::qWait(20);
+    QCOMPARE(backend.applyCount, 1);
     backend.setBusy(true);
     QVariantMap dropped = line;
     dropped.insert(QStringLiteral("keep"), false);
     backend.setSelects({dropped});
-    backend.setReviseNotes({QStringLiteral("leave it"), QStringLiteral("drop it")});
+    turns.append(ShortcutBackend::turn(QStringLiteral("bot"), QStringLiteral("Done."), QStringLiteral("Dropped 1 line.")));
+    backend.setChat(turns, false);
     backend.setBusy(false);
     QTest::qWait(50);
     QCOMPARE(backend.showShotsCount, 1);
@@ -3094,7 +3207,7 @@ void BackendTests::pictureSentenceUnderThePicture() {
     first.insert(QStringLiteral("start"), 0.0);
     first.insert(QStringLiteral("end"), 3.0);
     first.insert(QStringLiteral("clip"), 0);
-    // No keep key. Counting it as dropped yields 0:06 and 2 lines, which the row would not.
+    // No keep key. Counting it as dropped would read 2 of 4 and 0:06.
     QVariantMap omitted;
     omitted.insert(QStringLiteral("id"), 2);
     omitted.insert(QStringLiteral("text"), QStringLiteral("Then we opened the second location."));
@@ -3125,38 +3238,14 @@ void BackendTests::pictureSentenceUnderThePicture() {
     window->resize(960, 640);
     QTest::qWait(50);
 
-    QQuickItem *sentence = window->findChild<QQuickItem *>(QStringLiteral("pictureSentence"));
+    // One sentence, in the action bar beside the filled button, says how much is kept.
+    QQuickItem *sentence = window->findChild<QQuickItem *>(QStringLiteral("actionSentence"));
     QVERIFY(sentence);
     QTRY_VERIFY_WITH_TIMEOUT(sentence->isVisible(), 3000);
-    const QString measured = QStringLiteral("0:10 kept of 0:14 \u2013 3 lines, measured");
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), measured, 3000);
-    QQuickItem *keptClock = window->findChild<QQuickItem *>(QStringLiteral("keptClock"));
-    QQuickItem *allClock = window->findChild<QQuickItem *>(QStringLiteral("allClock"));
-    QQuickItem *sentenceWords = window->findChild<QQuickItem *>(QStringLiteral("sentenceWords"));
-    QVERIFY(keptClock);
-    QVERIFY(allClock);
-    QVERIFY(sentenceWords);
-    QVERIFY(keptClock->isVisible());
-    QVERIFY(allClock->isVisible());
-    QCOMPARE(keptClock->property("text").toString(), QStringLiteral("0:10"));
-    QCOMPARE(allClock->property("text").toString(), QStringLiteral("0:14"));
-    QCOMPARE(QQmlProperty::read(keptClock, QStringLiteral("font.family")).toString(),
-             QStringLiteral("monospace"));
-    QCOMPARE(QQmlProperty::read(allClock, QStringLiteral("font.family")).toString(),
-             QStringLiteral("monospace"));
-    QVERIFY(QQmlProperty::read(sentenceWords, QStringLiteral("font.family")).toString()
-            != QStringLiteral("monospace"));
-    QCOMPARE(QQmlProperty::read(keptClock, QStringLiteral("font.pixelSize")).toInt(), 13);
-    QCOMPARE(backend.maxPause(), 1.0);
-    QVERIFY(qAbs(sentence->opacity() - 1.0) < 0.01);
-    QVERIFY(sentence->parentItem());
-    QVERIFY(qAbs(sentence->parentItem()->opacity() - 1.0) < 0.01);
-    const auto kids = sentence->childItems();
-    for (QQuickItem *child : kids) {
-        if (!child->isVisible() || child->property("text").toString().isEmpty())
-            continue;
-        QVERIFY(qAbs(child->opacity() - 0.62) < 0.01);
-    }
+    const QString measured = QStringLiteral("3 of 4 lines kept, 0:10. Render makes the movie.");
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(), measured, 3000);
+    QCOMPARE(QQmlProperty::read(sentence, QStringLiteral("font.pixelSize")).toInt(), 13);
+    QVERIFY(qAbs(sentence->opacity() - 0.62) < 0.01);
     QCOMPARE(window->width(), 960);
     QCOMPARE(window->height(), 640);
     const QPointF sentenceAt = sentence->mapToScene(QPointF(0, 0));
@@ -3171,57 +3260,43 @@ void BackendTests::pictureSentenceUnderThePicture() {
 
     QQuickItem *cut = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
     QVERIFY(cut);
-    QVERIFY(sentence != cut);
+    QQuickItem *actionBar = window->findChild<QQuickItem *>(QStringLiteral("actionBar"));
+    QVERIFY(actionBar);
     QQuickItem *linesStep = window->findChild<QQuickItem *>(QStringLiteral("linesStep"));
     QVERIFY(linesStep);
-    QQuickItem *planPane = nullptr;
-    QQuickItem *topBar = nullptr;
-    QList<QQuickItem *> visual;
-    collectVisual(window->contentItem(), &visual);
-    for (QQuickItem *item : visual) {
-        if (!planPane && item->property("decisions").isValid())
-            planPane = item;
-        if (!topBar && item->property("filledText").isValid())
-            topBar = item;
-    }
-    QVERIFY(planPane);
-    QVERIFY(topBar);
-    QObject *decisions = planPane->property("decisions").value<QObject *>();
-    QQuickItem *inspector = qobject_cast<QQuickItem *>(decisions);
-    QVERIFY(inspector);
-    QVERIFY2(itemIsUnder(inspector, sentence), "pictureSentence is outside the inspector");
-    QVERIFY2(!itemIsUnder(planPane, sentence), "pictureSentence is in the lines column");
-    QVERIFY2(!itemIsUnder(topBar, sentence), "pictureSentence is in the top bar");
-    QVERIFY(itemIsUnder(topBar, cut));
-    QVERIFY(itemIsUnder(topBar, linesStep));
-    // Lines meets the sentence above the top bar, not inside a footer that owns both.
-    QQuickItem *meet = sentence;
-    while (meet && !itemIsUnder(meet, linesStep))
-        meet = meet->parentItem();
-    QVERIFY(meet);
-    QVERIFY(meet != topBar);
-    QVERIFY(!itemIsUnder(topBar, meet));
-    QVERIFY2(itemIsUnder(meet, topBar), "linesStep is under a footer that owns the sentence");
+    QVERIFY2(itemIsUnder(actionBar, sentence), "the sentence is outside the action bar");
+    QVERIFY2(itemIsUnder(actionBar, cut), "the filled button is outside the action bar");
+    QVERIFY2(!itemIsUnder(actionBar, linesStep), "the steps are in the action bar");
+    // The button and its sentence sit on one line.
+    QVERIFY(qAbs(cut->mapToScene(QPointF(0, cut->height() / 2)).y()
+                 - sentence->mapToScene(QPointF(0, sentence->height() / 2)).y()) < 8.0);
+    QVERIFY(cut->mapToScene(QPointF(0, 0)).x() > sentenceAt.x() + sentence->width() - 1.0);
 
+    // The picture keeps most of the height. No inspector under it.
+    QQuickItem *well = window->findChild<QQuickItem *>(QStringLiteral("pictureWell"));
+    QVERIFY(well);
+    QVERIFY2(well->height() >= 380.0, qPrintable(QString::number(well->height())));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Result")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Kept")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Click a block to show that line")));
+    QQuickItem *timeline = window->findChild<QQuickItem *>(QStringLiteral("lineTimeline"));
+    QVERIFY(timeline);
+    QVERIFY(timeline->isVisible());
+    QQuickItem *clock = window->findChild<QQuickItem *>(QStringLiteral("transportClock"));
+    QVERIFY(clock);
+    QVERIFY(clock->isVisible());
+    QCOMPARE(clock->property("text").toString(), QStringLiteral("0:00 / 0:10"));
+
+    // Shots has its own sentence. Lines has the count.
     QVERIFY(window->setProperty("shotsPinned", true));
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
-    QVERIFY(sentence->isVisible());
-    QCOMPARE(sentencePlain(sentence), measured);
+    QVERIFY(!timeline->isVisible());
     QVERIFY(window->setProperty("shotsPinned", false));
     QCOMPARE(window->property("viewStep").toString(), QStringLiteral("lines"));
-    QVERIFY(sentence->isVisible());
-
-    backend.setBusy(true);
-    QTest::qWait(20);
-    QVERIFY(sentence->isVisible());
-    QCOMPARE(sentencePlain(sentence), measured);
-    QVERIFY(qAbs(keptClock->opacity() - 0.62) < 0.01);
-    QVERIFY(qAbs(sentence->opacity() - 1.0) < 0.01);
-    backend.setBusy(false);
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(), measured, 3000);
 
     backend.setPace(QStringLiteral("tight"));
-    const QString tight = QStringLiteral("0:10 kept of 0:14 \u2013 3 lines, tight");
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), tight, 3000);
+    QCOMPARE(sentence->property("text").toString(), measured);
     QCOMPARE(backend.maxPause(), 1.0);
 
     const auto rowFor = [&](const QString &words) -> QQuickItem * {
@@ -3233,49 +3308,12 @@ void BackendTests::pictureSentenceUnderThePicture() {
     QList<QQuickItem *> dropWords;
     collectVisibleText(rowFor(QStringLiteral("We started in the garage.")), QStringLiteral("Drop"), &dropWords);
     QCOMPARE(dropWords.size(), 1);
-    QCOMPARE(sentencePlain(sentence), tight);
     backend.lastDropId = -1;
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(dropWords.first()));
     QCOMPARE(backend.lastDropId, 1);
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence),
-                              QStringLiteral("0:07 kept of 0:14 \u2013 2 lines, tight"), 3000);
-    QCOMPARE(keptClock->property("text").toString(), QStringLiteral("0:07"));
-    QCOMPARE(allClock->property("text").toString(), QStringLiteral("0:14"));
-
-    QVariantMap marked = dropped;
-    marked.insert(QStringLiteral("reason"), QStringLiteral("unique?"));
-    QCOMPARE(marked.value(QStringLiteral("keep")).toBool(), false);
-    backend.lastDropId = -1;
-    backend.lastRestoreId = -1;
-    backend.setSelects({first, omitted, third, marked});
-    QCOMPARE(window->property("lineFilter").toString(), QStringLiteral("all"));
-    QQuickItem *unsureChip = nullptr;
-    QList<QQuickItem *> filterItems;
-    collectVisual(window->contentItem(), &filterItems);
-    for (QQuickItem *item : filterItems) {
-        if (item->isVisible() && item->property("key").toString() == QStringLiteral("unsure")) {
-            unsureChip = item;
-            break;
-        }
-    }
-    QVERIFY(unsureChip);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(unsureChip));
-    QCOMPARE(window->property("lineFilter").toString(), QStringLiteral("unsure"));
-    QCOMPARE(backend.lastDropId, -1);
-    QCOMPARE(backend.lastRestoreId, -1);
-    bool markedKeep = true;
-    bool markedFound = false;
-    const QVariantList markedRows = backend.selects();
-    for (const QVariant &row : markedRows) {
-        const QVariantMap map = row.toMap();
-        if (map.value(QStringLiteral("id")).toInt() != 4)
-            continue;
-        markedFound = true;
-        markedKeep = map.value(QStringLiteral("keep")).toBool();
-        QCOMPARE(map.value(QStringLiteral("reason")).toString(), QStringLiteral("unique?"));
-    }
-    QVERIFY(markedFound);
-    QCOMPARE(markedKeep, false);
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(),
+                              QStringLiteral("2 of 4 lines kept, 0:07. Render makes the movie."), 3000);
+    QCOMPARE(clock->property("text").toString(), QStringLiteral("0:00 / 0:07"));
 
     QVariantMap only;
     only.insert(QStringLiteral("id"), 5);
@@ -3293,10 +3331,10 @@ void BackendTests::pictureSentenceUnderThePicture() {
     alsoDropped.insert(QStringLiteral("clip"), 0);
     backend.setPace(QStringLiteral("measured"));
     backend.setSelects({only, alsoDropped});
-    const QString oneLine = QStringLiteral("0:03 kept of 0:07 \u2013 1 line, measured");
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), oneLine, 3000);
-    QVERIFY(!sentencePlain(sentence).contains(QStringLiteral("1 lines")));
+    const QString oneLine = QStringLiteral("1 of 2 lines kept, 0:03. Render makes the movie.");
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(), oneLine, 3000);
 
+    // A line with no end has no clock. The count stays.
     QVariantMap hasEnd;
     hasEnd.insert(QStringLiteral("id"), 7);
     hasEnd.insert(QStringLiteral("keep"), true);
@@ -3304,46 +3342,34 @@ void BackendTests::pictureSentenceUnderThePicture() {
     hasEnd.insert(QStringLiteral("start"), 0.0);
     hasEnd.insert(QStringLiteral("end"), 5.0);
     hasEnd.insert(QStringLiteral("clip"), 0);
-    QVariantMap alsoKept;
-    alsoKept.insert(QStringLiteral("id"), 8);
-    alsoKept.insert(QStringLiteral("keep"), true);
-    alsoKept.insert(QStringLiteral("text"), QStringLiteral("Also kept."));
-    alsoKept.insert(QStringLiteral("start"), 5.0);
-    alsoKept.insert(QStringLiteral("end"), 9.0);
-    alsoKept.insert(QStringLiteral("clip"), 0);
-    // The only timeless line is dropped. Skipping its missing end would still show clocks.
     QVariantMap noEnd;
     noEnd.insert(QStringLiteral("id"), 9);
-    noEnd.insert(QStringLiteral("keep"), false);
+    noEnd.insert(QStringLiteral("keep"), true);
     noEnd.insert(QStringLiteral("text"), QStringLiteral("No end."));
     noEnd.insert(QStringLiteral("start"), 10.0);
     noEnd.insert(QStringLiteral("clip"), 0);
-    backend.setSelects({hasEnd, alsoKept, noEnd});
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), QStringLiteral("2 lines, measured"), 3000);
-    QVERIFY(!keptClock->isVisible());
-    QVERIFY(!allClock->isVisible());
+    backend.setSelects({noEnd});
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(),
+                              QStringLiteral("1 of 1 lines kept. Render makes the movie."), 3000);
+    backend.setSelects({hasEnd, noEnd});
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(),
+                              QStringLiteral("2 of 2 lines kept, 0:05. Render makes the movie."), 3000);
 
-    // The only timeless line has an end and no start. A missing-end check would still show clocks.
-    QVariantMap noStart;
-    noStart.insert(QStringLiteral("id"), 10);
-    noStart.insert(QStringLiteral("keep"), false);
-    noStart.insert(QStringLiteral("text"), QStringLiteral("No start."));
-    noStart.insert(QStringLiteral("end"), 12.0);
-    noStart.insert(QStringLiteral("clip"), 0);
-    backend.setSelects({hasEnd, alsoKept, noStart});
-    const QString plainLines = QStringLiteral("2 lines, measured");
-    QTRY_COMPARE_WITH_TIMEOUT(sentencePlain(sentence), plainLines, 3000);
-    QVERIFY(!sentencePlain(sentence).contains(QStringLiteral("kept of")));
-    QVERIFY(!keptClock->isVisible());
-    QVERIFY(!allClock->isVisible());
+    QVariantMap allGone = only;
+    allGone.insert(QStringLiteral("keep"), false);
+    backend.setSelects({allGone});
+    QTRY_COMPARE_WITH_TIMEOUT(sentence->property("text").toString(),
+                              QStringLiteral("Every line is dropped. Keep one to render."), 3000);
+    QVERIFY(!cut->isEnabled());
 
     backend.setSelects({});
-    QTRY_VERIFY_WITH_TIMEOUT(!sentence->isVisible(), 3000);
+    QTRY_VERIFY_WITH_TIMEOUT(!timeline->isVisible(), 3000);
 
     {
         ShortcutBackend watch(QUrl::fromLocalFile(QStringLiteral("/tmp/rough_cut.mp4")), 7.0);
         watch.setPace(QStringLiteral("measured"));
         watch.setSelects({only, alsoDropped});
+        watch.setRenderedUnsaved(true);
         QmlHarness watchHarness(watch);
         QQuickWindow *watchWindow = watchHarness.window();
         QVERIFY(watchWindow);
@@ -3352,10 +3378,12 @@ void BackendTests::pictureSentenceUnderThePicture() {
         watchWindow->resize(960, 640);
         QTest::qWait(50);
         QCOMPARE(watchWindow->property("viewStep").toString(), QStringLiteral("movie"));
-        QQuickItem *movieSentence = watchWindow->findChild<QQuickItem *>(QStringLiteral("pictureSentence"));
+        QQuickItem *movieSentence = watchWindow->findChild<QQuickItem *>(QStringLiteral("actionSentence"));
         QVERIFY(movieSentence);
         QTRY_VERIFY_WITH_TIMEOUT(movieSentence->isVisible(), 3000);
-        QCOMPARE(sentencePlain(movieSentence), oneLine);
+        QCOMPARE(movieSentence->property("text").toString(),
+                 QStringLiteral("Your movie is ready. It's only in a temporary folder until you save it."));
+        QVERIFY(!watchWindow->findChild<QQuickItem *>(QStringLiteral("lineTimeline"))->isVisible());
     }
 }
 
@@ -3717,25 +3745,38 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                              QString(), false, QStringLiteral("dip"), 0.1);
     QCOMPARE(frenzied.arguments.at(frenzied.arguments.indexOf(QStringLiteral("--max-pause")) + 1),
              QStringLiteral("0.1"));
-    QVERIFY(!frenzied.arguments.contains(QStringLiteral("--b-roll")));
+    QVERIFY(!frenzied.arguments.contains(QStringLiteral("--b-roll-file")));
 
     const CutLaunch covered = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
                                             QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
-                                            QString(), true, QStringLiteral("dip"), 0.8, true);
-    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--max-pause")) + 2),
-             QStringLiteral("--b-roll"));
-    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--b-roll")) + 1),
-             QStringLiteral("--b-roll-sound"));
-    QCOMPARE(covered.arguments.at(covered.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
-             QStringLiteral("mix"));
+                                            QString(), true, QStringLiteral("dip"), 0.8,
+                                            {QStringLiteral("/tmp/b.mp4"), QStringLiteral("/tmp/zz.mp4")});
+    const int coveredPause = covered.arguments.indexOf(QStringLiteral("--max-pause"));
+    QCOMPARE(covered.arguments.at(coveredPause + 2), QStringLiteral("--b-roll-file"));
+    QCOMPARE(covered.arguments.at(coveredPause + 3), QStringLiteral("/tmp/b.mp4"));
+    // A B-roll path that is not one of the files is not sent.
+    QCOMPARE(covered.arguments.count(QStringLiteral("--b-roll-file")), 1);
+    QVERIFY(!covered.arguments.contains(QStringLiteral("/tmp/zz.mp4")));
+    QCOMPARE(covered.arguments.at(coveredPause + 4), QStringLiteral("--b-roll-sound"));
+    QCOMPARE(covered.arguments.at(coveredPause + 5), QStringLiteral("mix"));
     QCOMPARE(covered.arguments.last(), QStringLiteral("--decide"));
+    QVERIFY(!covered.arguments.contains(QStringLiteral("--b-roll")));
 
-    const CutLaunch clipSound = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+    // Assemble plays every file, so the mark stays home.
+    const CutLaunch assembled = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
                                               QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
-                                              QString(), false, QStringLiteral("dip"), 0.8, false, false);
-    QCOMPARE(clipSound.arguments.at(clipSound.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
-             QStringLiteral("clip"));
-    QVERIFY(!clipSound.arguments.contains(QStringLiteral("--b-roll")));
+                                              QString(), false, QStringLiteral("dip"), 0.8,
+                                              {QStringLiteral("/tmp/b.mp4")});
+    QVERIFY(!assembled.arguments.contains(QStringLiteral("--b-roll-file")));
+    QCOMPARE(assembled.arguments.count(QStringLiteral("/tmp/b.mp4")), 1);
+
+    const CutLaunch voiceSound = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                               QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                               QString(), false, QStringLiteral("dip"), 0.8, {}, false);
+    QCOMPARE(voiceSound.arguments.at(voiceSound.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
+             QStringLiteral("voice"));
+    QVERIFY(!voiceSound.arguments.contains(QStringLiteral("--b-roll-file")));
+    QVERIFY(!voiceSound.arguments.contains(QStringLiteral("clip")));
 
     const CutLaunch rendered = cutRenderLaunch(QStringLiteral("/tmp/out"),
                                                 QStringLiteral("/usr/bin/botcut-cli"), QString(),
@@ -3744,10 +3785,10 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                                QStringLiteral("--scene-transition"),
                                                QStringLiteral("dip"), QStringLiteral("--b-roll-sound"),
                                                QStringLiteral("mix")}));
-    const CutLaunch renderedClip = cutRenderLaunch(QStringLiteral("/tmp/out"),
-                                                    QStringLiteral("/usr/bin/botcut-cli"), QString(),
-                                                    QString(), QStringLiteral("dip"), false);
-    QCOMPARE(renderedClip.arguments.last(), QStringLiteral("clip"));
+    const CutLaunch renderedVoice = cutRenderLaunch(QStringLiteral("/tmp/out"),
+                                                     QStringLiteral("/usr/bin/botcut-cli"), QString(),
+                                                     QString(), QStringLiteral("dip"), false);
+    QCOMPARE(renderedVoice.arguments.last(), QStringLiteral("voice"));
 
     const QString cutsPath = QStringLiteral("/tmp/out/cuts.json");
     const CutLaunch captions = cutCaptionsLaunch(cutsPath, QStringLiteral("/usr/bin/botcut-cli"),
@@ -3788,14 +3829,11 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *picker = new FakeFilePicker;
     Backend first(&provider, picker);
     QCOMPARE(first.sceneTransition(), QStringLiteral("dip"));
-    QCOMPARE(first.broll(), false);
     QCOMPARE(first.brollMix(), true);
     QCOMPARE(first.pace(), QStringLiteral("open"));
     QCOMPARE(first.maxPause(), 0.8);
     first.setSceneTransition(QStringLiteral("off"));
     QCOMPARE(first.sceneTransition(), QStringLiteral("off"));
-    first.setBroll(true);
-    QCOMPARE(first.broll(), true);
     first.setBrollMix(false);
     QCOMPARE(first.brollMix(), false);
     first.setPace(QStringLiteral("frenzied"));
@@ -3809,14 +3847,11 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *againPicker = new FakeFilePicker;
     Backend again(&provider, againPicker);
     QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
-    QCOMPARE(again.broll(), true);
     QCOMPARE(again.brollMix(), false);
     QCOMPARE(again.pace(), QStringLiteral("measured"));
     QCOMPARE(again.maxPause(), 0.4);
     again.setSceneTransition(QStringLiteral("nope"));
     QCOMPARE(again.sceneTransition(), QStringLiteral("dip"));
-    again.setBroll(false);
-    QCOMPARE(again.broll(), false);
     again.setBrollMix(true);
     QCOMPARE(again.brollMix(), true);
     again.setPace(QStringLiteral("nope"));
@@ -3826,14 +3861,14 @@ void BackendTests::sceneTransitionRoundTrips() {
     auto *thirdPicker = new FakeFilePicker;
     Backend third(&provider, thirdPicker);
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
-    QCOMPARE(third.broll(), false);
     QCOMPARE(third.brollMix(), true);
     QCOMPARE(third.pace(), QStringLiteral("open"));
     third.setSceneTransition(QStringLiteral("dip"));
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
     third.setPace(QStringLiteral("open"));
     QCOMPARE(third.pace(), QStringLiteral("open"));
-    third.setBroll(false);
+    // An old "broll" switch left in settings means nothing now.
+    QSettings().setValue(QStringLiteral("broll"), true);
     QSettings().setValue(QStringLiteral("brollMix"), QStringLiteral("false"));
     Backend exactFalse(&provider, new FakeFilePicker);
     QCOMPARE(exactFalse.brollMix(), false);
@@ -4099,14 +4134,20 @@ void BackendTests::assembleLaunchOmitsBroll() {
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
     const QString clip = m_dir.filePath(QStringLiteral("assemble-broll.mp4"));
+    const QString room = m_dir.filePath(QStringLiteral("assemble-room.mp4"));
     QVERIFY(QFile(clip).open(QIODevice::WriteOnly));
-    backend.m_tray = {QFileInfo(clip).absoluteFilePath()};
+    QVERIFY(QFile(room).open(QIODevice::WriteOnly));
+    const QString roomPath = QFileInfo(room).absoluteFilePath();
+    backend.m_tray = {QFileInfo(clip).absoluteFilePath(), roomPath};
+    backend.m_trayIndex = 0;
+    backend.toggleBroll(1);
+    QCOMPARE(backend.brollFiles(), QStringList{roomPath});
     backend.m_cutMode = QStringLiteral("assemble");
-    backend.setBroll(true);
     backend.m_launchProgram = QStringLiteral("/bin/true");
     backend.startCut();
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
     QVERIFY(backend.m_cutProcess);
+    QVERIFY(!backend.m_cutProcess->arguments().contains(QStringLiteral("--b-roll-file")));
     QVERIFY(!backend.m_cutProcess->arguments().contains(QStringLiteral("--b-roll")));
 
     backend.m_cutMode = QStringLiteral("speech");
@@ -4116,20 +4157,491 @@ void BackendTests::assembleLaunchOmitsBroll() {
     const QStringList args = backend.m_cutProcess->arguments();
     const int pause = args.indexOf(QStringLiteral("--max-pause"));
     QVERIFY(pause >= 0);
-    QCOMPARE(args.at(pause + 2), QStringLiteral("--b-roll"));
+    QCOMPARE(args.at(pause + 2), QStringLiteral("--b-roll-file"));
+    QCOMPARE(args.at(pause + 3), roomPath);
+    QCOMPARE(args.count(QStringLiteral("--b-roll-file")), 1);
     QCOMPARE(args.at(args.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("mix"));
     QCOMPARE(args.last(), QStringLiteral("--decide"));
     QVERIFY(!args.contains(QStringLiteral("not-a-real-key")));
     backend.setBrollMix(false);
     backend.startCut();
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
-    const QStringList clipArgs = backend.m_cutProcess->arguments();
-    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
-    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--max-pause")) + 2), QStringLiteral("--b-roll"));
-    QCOMPARE(clipArgs.last(), QStringLiteral("--decide"));
-    QVERIFY(!clipArgs.contains(QStringLiteral("not-a-real-key")));
+    const QStringList voiceArgs = backend.m_cutProcess->arguments();
+    QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("voice"));
+    QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--max-pause")) + 2), QStringLiteral("--b-roll-file"));
+    QCOMPARE(voiceArgs.last(), QStringLiteral("--decide"));
+    QVERIFY(!voiceArgs.contains(QStringLiteral("not-a-real-key")));
     backend.setBrollMix(true);
-    backend.setBroll(false);
+
+    // Unmarking the file takes the flag away again.
+    backend.toggleBroll(1);
+    QVERIFY(backend.brollFiles().isEmpty());
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QVERIFY(!backend.m_cutProcess->arguments().contains(QStringLiteral("--b-roll-file")));
+}
+
+void BackendTests::brollRoleRoundTrips() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString talk = QFileInfo(m_dir.filePath(QStringLiteral("role-talk.mp4"))).absoluteFilePath();
+    const QString room = QFileInfo(m_dir.filePath(QStringLiteral("role-room.mp4"))).absoluteFilePath();
+    const QString card = QFileInfo(m_dir.filePath(QStringLiteral("botcut-card-role-open.mp4"))).absoluteFilePath();
+    for (const QString &path : {talk, room, card})
+        QVERIFY(QFile(path).open(QIODevice::WriteOnly));
+    backend.m_tray = {talk, room, card};
+    backend.m_trayIndex = 0;
+    QVERIFY(backend.brollFiles().isEmpty());
+    QVERIFY(!backend.isBroll(room));
+
+    QSignalSpy tray(&backend, &Backend::trayChanged);
+    backend.toggleBroll(1);
+    QCOMPARE(tray.count(), 1);
+    QVERIFY(backend.isBroll(room));
+    QVERIFY(!backend.isBroll(talk));
+    QCOMPARE(backend.brollFiles(), QStringList{room});
+
+    // A card, an index off the list, and a busy window change nothing.
+    backend.toggleBroll(2);
+    backend.toggleBroll(7);
+    backend.toggleBroll(-1);
+    backend.m_busy = true;
+    backend.toggleBroll(0);
+    backend.m_busy = false;
+    QCOMPARE(backend.brollFiles(), QStringList{room});
+    QCOMPARE(tray.count(), 1);
+
+    // The list follows the tray's order, and a move keeps the marks.
+    backend.toggleBroll(0);
+    QCOMPARE(backend.brollFiles(), (QStringList{talk, room}));
+    backend.m_trayIndex = 1;
+    backend.moveTray(-1);
+    QCOMPARE(backend.tray(), (QStringList{room, talk, card}));
+    QCOMPARE(backend.brollFiles(), (QStringList{room, talk}));
+
+    // The saved list carries the marks, and cuts.json carries the role.
+    const QString list = m_dir.filePath(QStringLiteral("roles.botcut.json"));
+    backend.writeCutListFile(QUrl::fromLocalFile(list));
+    QFile listFile(list);
+    QVERIFY(listFile.open(QIODevice::ReadOnly));
+    const QJsonObject listRoot = QJsonDocument::fromJson(listFile.readAll()).object();
+    listFile.close();
+    QCOMPARE(listRoot.value(QStringLiteral("broll")).toArray(), (QJsonArray{room, talk}));
+    backend.m_cutOut.clear();
+    QVERIFY(backend.writeCutsForRender());
+    QFile cutsFile(QDir(backend.m_cutOut).filePath(QStringLiteral("cuts.json")));
+    QVERIFY(cutsFile.open(QIODevice::ReadOnly));
+    const QJsonArray clips = QJsonDocument::fromJson(cutsFile.readAll()).object().value(QStringLiteral("clips")).toArray();
+    cutsFile.close();
+    QCOMPARE(clips.size(), 3);
+    QCOMPARE(clips.at(0).toObject().value(QStringLiteral("role")).toString(), QStringLiteral("broll"));
+    QCOMPARE(clips.at(1).toObject().value(QStringLiteral("role")).toString(), QStringLiteral("broll"));
+    QVERIFY(!clips.at(2).toObject().contains(QStringLiteral("role")));
+
+    // Removing a file drops its mark. Unmarking by hand does too.
+    backend.m_trayIndex = 1;
+    backend.removeTray();
+    QCOMPARE(backend.tray(), (QStringList{room, card}));
+    QCOMPARE(backend.brollFiles(), QStringList{room});
+    backend.toggleBroll(0);
+    QVERIFY(backend.brollFiles().isEmpty());
+
+    // Reopening the list puts the marks back. Closing the project clears them.
+    QVERIFY(backend.loadCutListFile(QUrl::fromLocalFile(list)));
+    QCOMPARE(backend.tray(), (QStringList{room, talk, card}));
+    QCOMPARE(backend.brollFiles(), (QStringList{room, talk}));
+    backend.closeProject();
+    QVERIFY(backend.tray().isEmpty());
+    QVERIFY(backend.brollFiles().isEmpty());
+}
+
+void BackendTests::coversKeepTheBeatWindow() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString dir = m_dir.filePath(QStringLiteral("beat-window"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    const QString json = QStringLiteral(
+        "{\"clips\":[{\"index\":0,\"path\":\"/tmp/talk.mp4\",\"duration\":20},"
+        "{\"index\":1,\"path\":\"/tmp/room.mp4\",\"duration\":10,\"role\":\"broll\"}],"
+        "\"lines\":[{\"id\":4,\"clip\":0,\"start\":1,\"end\":3,\"text\":\"hi\",\"keep\":true,\"reason\":\"story\"},"
+        "{\"id\":5,\"clip\":0,\"start\":4,\"end\":6,\"text\":\"there\",\"keep\":true,\"reason\":\"story\"}],"
+        "\"segments\":[{\"clip\":0,\"start\":0.75,\"end\":6.4,\"reason\":\"story\"}],"
+        "\"covers\":[{\"clip\":1,\"line\":4,\"start\":2.0,\"end\":5.5},{\"clip\":1,\"line\":5}]}");
+    QFile file(cuts);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.write(json.toUtf8());
+    file.close();
+    backend.m_cutOut = dir;
+    backend.loadSelects(cuts);
+    QCOMPARE(backend.covers().size(), 2);
+    const QVariantMap deep = backend.covers().at(0).toMap();
+    QCOMPARE(deep.value(QStringLiteral("clip")).toInt(), 1);
+    QCOMPARE(deep.value(QStringLiteral("start")).toDouble(), 2.0);
+    QCOMPARE(deep.value(QStringLiteral("end")).toDouble(), 5.5);
+    // An older cover has no window and gets none invented.
+    const QVariantMap plain = backend.covers().at(1).toMap();
+    QVERIFY(!plain.contains(QStringLiteral("start")));
+    QVERIFY(!plain.contains(QStringLiteral("end")));
+
+    backend.clearCover(5);
+    QCOMPARE(backend.covers().size(), 1);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+    const QJsonArray saved = root.value(QStringLiteral("covers")).toArray();
+    QCOMPARE(saved.size(), 1);
+    QCOMPARE(saved.at(0).toObject().value(QStringLiteral("line")).toInt(), 4);
+    QCOMPARE(saved.at(0).toObject().value(QStringLiteral("start")).toDouble(), 2.0);
+    QCOMPARE(saved.at(0).toObject().value(QStringLiteral("end")).toDouble(), 5.5);
+    // The clip row's role is left as it was.
+    QCOMPARE(root.value(QStringLiteral("clips")).toArray().at(1).toObject().value(QStringLiteral("role")).toString(),
+             QStringLiteral("broll"));
+}
+
+void BackendTests::shotRowBrollWord() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    const QString room = QStringLiteral("/tmp/room.mp4");
+    backend.setTray({QStringLiteral("/tmp/shot.mp4"), room, QStringLiteral("/tmp/botcut-card-1-open.mp4")});
+    backend.setTrayIndex(1);
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(100);
+    QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
+
+    // The selected shot offers B-roll beside Remove. No row reads B-roll yet.
+    QList<QQuickItem *> words;
+    collectVisibleText(window->contentItem(), QStringLiteral("B-roll"), &words);
+    QCOMPARE(words.size(), 1);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Shot")));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(words.first()));
+    QTest::qWait(50);
+    QCOMPARE(backend.lastToggleIndex, 1);
+    QCOMPARE(backend.brollFiles(), QStringList{room});
+
+    // Now the row's fact reads B-roll, and the word offers Shot.
+    words.clear();
+    collectVisibleText(window->contentItem(), QStringLiteral("B-roll"), &words);
+    QCOMPARE(words.size(), 1);
+    QQuickItem *shotWord = visibleItemWithText(window, QStringLiteral("Shot"));
+    QVERIFY(shotWord);
+    QCOMPARE(shotWord->objectName(), QStringLiteral("brollToggle"));
+    QVERIFY(words.first()->objectName() != QStringLiteral("brollToggle"));
+
+    // A card has no toggle. The B-roll fact on the room row stays.
+    backend.setTrayIndex(2);
+    QTest::qWait(50);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Shot")));
+    words.clear();
+    collectVisibleText(window->contentItem(), QStringLiteral("B-roll"), &words);
+    QCOMPARE(words.size(), 1);
+    QVERIFY(words.first()->objectName() != QStringLiteral("brollToggle"));
+
+    // Busy locks the word without hiding it.
+    backend.setTrayIndex(0);
+    backend.setBusy(true);
+    QTest::qWait(50);
+    QQuickItem *toggle = window->findChild<QQuickItem *>(QStringLiteral("brollToggle"));
+    if (!toggle)
+        toggle = visualItemWithText(window->contentItem(), QStringLiteral("B-roll"), false);
+    QVERIFY(toggle);
+    words.clear();
+    collectVisibleText(window->contentItem(), QStringLiteral("B-roll"), &words);
+    QCOMPARE(words.size(), 2);
+    for (QQuickItem *item : words) {
+        if (item->objectName() == QStringLiteral("brollToggle"))
+            QVERIFY(qAbs(item->opacity() - 0.38) < 0.01);
+    }
+    backend.lastToggleIndex = -1;
+    for (QQuickItem *item : words) {
+        if (item->objectName() == QStringLiteral("brollToggle"))
+            QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(item));
+    }
+    QCOMPARE(backend.lastToggleIndex, -1);
+    backend.setBusy(false);
+}
+
+void BackendTests::coverAtWindow() {
+    QFile file(QFileInfo(QString::fromUtf8(__FILE__)).dir().absoluteFilePath(
+        QStringLiteral("../src/Format.js")));
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QString src = QString::fromUtf8(file.readAll());
+    src.remove(QStringLiteral(".pragma library"));
+    QJSEngine engine;
+    const QJSValue loaded = engine.evaluate(src);
+    QVERIFY2(!loaded.isError(), qPrintable(loaded.toString()));
+
+    // Three kept lines, 0.5 s apart in one clip, and a run over the second and third.
+    const QString setup = QStringLiteral(
+        "var lines = [{id: 6, clip: 0, start: 2, end: 4, keep: true},"
+        "             {id: 7, clip: 0, start: 10, end: 14, keep: true},"
+        "             {id: 8, clip: 0, start: 14.5, end: 18, keep: true},"
+        "             {id: 9, clip: 0, start: 20, end: 22, keep: true}];"
+        "var covers = [{clip: 1, line: 7, through: 8, start: 30, end: 36, reason: 'the road'}];"
+        "var paths = ['/tmp/talk.mp4', '/tmp/room.mp4'];");
+    QVERIFY(!engine.evaluate(setup).isError());
+    const auto at = [&](const QString &call) { return engine.evaluate(call); };
+
+    // Lines outside the run, and before the run's first line, show nothing.
+    QVERIFY(at(QStringLiteral("coverAt(lines, 0, covers, paths, 3, 0.8)")).isNull());
+    QVERIFY(at(QStringLiteral("coverAt(lines, 3, covers, paths, 21, 0.8)")).isNull());
+    QVERIFY(at(QStringLiteral("coverAt(lines, 1, covers, paths, 9.9, 0.8)")).isNull());
+    // Inside the first line: the B-roll file from the run's start.
+    QJSValue hit = at(QStringLiteral("coverAt(lines, 1, covers, paths, 11.5, 0.8)"));
+    QCOMPARE(hit.property(QStringLiteral("path")).toString(), QStringLiteral("/tmp/room.mp4"));
+    QCOMPARE(hit.property(QStringLiteral("src")).toNumber(), 31.5);
+    QCOMPARE(hit.property(QStringLiteral("until")).toNumber(), 14.0);
+    // On the second line the footage has gone on: the first line's 4 s and its 0.5 s of air.
+    hit = at(QStringLiteral("coverAt(lines, 2, covers, paths, 15.0, 0.8)"));
+    QCOMPARE(hit.property(QStringLiteral("src")).toNumber(), 35.0);
+    // The run is 6 s long, so it ends 1.5 s into the second line.
+    QCOMPARE(hit.property(QStringLiteral("until")).toNumber(), 16.0);
+    QVERIFY(at(QStringLiteral("coverAt(lines, 2, covers, paths, 16.0, 0.8)")).isNull());
+    // A dropped line inside the run breaks it.
+    QVERIFY(at(QStringLiteral("coverAt(lines, 2, covers, paths, 15.0, 0.8)")).isObject());
+    QVERIFY(!engine.evaluate(QStringLiteral("lines[1].keep = false")).isError());
+    QVERIFY(at(QStringLiteral("coverAt(lines, 2, covers, paths, 15.0, 0.8)")).isNull());
+    QVERIFY(!engine.evaluate(QStringLiteral("lines[1].keep = true")).isError());
+    // An older cover with no run stays on its line for four seconds at most.
+    hit = at(QStringLiteral("coverAt(lines, 1, [{clip: 1, line: 7}], paths, 12.0, 0.8)"));
+    QCOMPARE(hit.property(QStringLiteral("src")).toNumber(), 2.0);
+    QCOMPARE(hit.property(QStringLiteral("until")).toNumber(), 14.0);
+    QVERIFY(at(QStringLiteral("coverAt(lines, 1, [{clip: 1, line: 7, start: 0, end: 9}], paths, 13.9, 0.8)")).isObject());
+    QVERIFY(at(QStringLiteral("coverAt(lines, 1, [{clip: 1, line: 7, start: 0, end: 9}], paths, 14.0, 0.8)")).isNull());
+    QVERIFY(at(QStringLiteral("coverAt(lines, 2, [{clip: 1, line: 7}], paths, 15, 0.8)")).isNull());
+    // A clip that is not in the list shows nothing.
+    QVERIFY(at(QStringLiteral("coverAt(lines, 1, [{clip: 5, line: 7, through: 8, start: 0, end: 3}], paths, 11)")).isNull());
+}
+
+void BackendTests::linesSentenceCountsCovers() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    const QString talk = QStringLiteral("/tmp/talk.mp4");
+    const QString room = QStringLiteral("/tmp/room.mp4");
+    backend.setTray({talk, room});
+    backend.setCutClips({talk, room});
+    QVariantList lines;
+    for (int id = 1; id <= 4; ++id) {
+        QVariantMap line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("clip"), 0);
+        line.insert(QStringLiteral("start"), id * 10.0);
+        line.insert(QStringLiteral("end"), id * 10.0 + 5.0);
+        line.insert(QStringLiteral("keep"), id != 4);
+        line.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(id));
+        lines.append(line);
+    }
+    backend.setSelects(lines);
+    QVariantMap run;
+    run.insert(QStringLiteral("clip"), 1);
+    run.insert(QStringLiteral("line"), 2);
+    run.insert(QStringLiteral("through"), 3);
+    run.insert(QStringLiteral("start"), 0.0);
+    run.insert(QStringLiteral("end"), 9.6);
+    run.insert(QStringLiteral("reason"), QStringLiteral("hides the cut"));
+    run.insert(QStringLiteral("still"), QStringLiteral("/tmp/broll-1-0.jpg"));
+    QVariantMap onDropped = run;
+    onDropped.insert(QStringLiteral("line"), 4);
+    onDropped.insert(QStringLiteral("through"), 4);
+    backend.setCovers({run, onDropped});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QCOMPARE(window->property("viewStep").toString(), QStringLiteral("lines"));
+    QQuickItem *sentence = window->findChild<QQuickItem *>(QStringLiteral("actionSentence"));
+    QVERIFY(sentence);
+    // The run on the dropped line does not count.
+    QCOMPARE(sentence->property("text").toString(),
+             QStringLiteral("3 of 4 lines kept, 0:15, B-roll over 1 stretch. Render makes the movie."));
+    // The first line of the run names the file, the length, and the reason, with the beat's still.
+    // The line after it says the B-roll goes on. The first line has no cover words at all.
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll: room.mp4 · 10 s · hides the cut")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("B-roll goes on")));
+    // Delegates hang off the list's visual tree, not the QObject tree.
+    QList<QQuickItem *> stills;
+    const std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+        if (item->objectName() == QLatin1String("coverStill") && item->isVisible())
+            stills.append(item);
+        for (QQuickItem *kid : item->childItems())
+            walk(kid);
+    };
+    walk(window->contentItem());
+    QCOMPARE(stills.size(), 1);
+
+    // No covers: the sentence is as before. The overlay is off until a frame arrives.
+    backend.setCovers({});
+    emit backend.infoChanged();
+    QTest::qWait(50);
+    QCOMPARE(sentence->property("text").toString(),
+             QStringLiteral("3 of 4 lines kept, 0:15. Render makes the movie."));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("B-roll goes on")));
+    QQuickItem *overlay = window->findChild<QQuickItem *>(QStringLiteral("coverOut"));
+    QVERIFY(overlay);
+    QVERIFY(!overlay->isVisible());
+    QVERIFY(window->property("coverNow").isNull());
+}
+
+void BackendTests::clearCoverTakesTheRun() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantList lines;
+    for (int id = 1; id <= 5; ++id) {
+        QVariantMap line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("keep"), true);
+        lines.append(line);
+    }
+    backend.m_selects = lines;
+    QVariantMap run;
+    run.insert(QStringLiteral("clip"), 1);
+    run.insert(QStringLiteral("line"), 2);
+    run.insert(QStringLiteral("through"), 4);
+    run.insert(QStringLiteral("start"), 0.0);
+    run.insert(QStringLiteral("end"), 7.0);
+    QVariantMap old;
+    old.insert(QStringLiteral("clip"), 1);
+    old.insert(QStringLiteral("line"), 5);
+    backend.m_covers = {run, old};
+    QCOMPARE(backend.describeCovers(), QStringLiteral("B-roll over 2 stretches, 7 s."));
+    // Remove B-roll on a middle line takes the whole run and leaves the older cover alone.
+    backend.clearCover(3);
+    QCOMPARE(backend.m_covers.size(), 1);
+    QCOMPARE(backend.m_covers.first().toMap().value(QStringLiteral("line")).toInt(), 5);
+    QCOMPARE(backend.describeCovers(), QStringLiteral("B-roll over 1 stretch, 0 s."));
+    // An older cover goes only by its own line.
+    backend.clearCover(4);
+    QCOMPARE(backend.m_covers.size(), 1);
+    backend.clearCover(5);
+    QVERIFY(backend.m_covers.isEmpty());
+    QCOMPARE(backend.describeCovers(), QString());
+}
+
+void BackendTests::changeSentenceNamesTheBroll() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVariantList lines;
+    for (int id = 1; id <= 6; ++id) {
+        QVariantMap line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("keep"), true);
+        lines.append(line);
+    }
+    backend.m_selects = lines;
+    QVariantMap first;
+    first.insert(QStringLiteral("clip"), 1);
+    first.insert(QStringLiteral("line"), 2);
+    first.insert(QStringLiteral("through"), 3);
+    QVariantMap second = first;
+    second.insert(QStringLiteral("line"), 5);
+    second.insert(QStringLiteral("through"), 5);
+    backend.m_covers = {first, second};
+    QJsonObject keep;
+    QJsonArray kept;
+    for (int id = 1; id <= 6; ++id) {
+        QJsonObject row;
+        row.insert(QStringLiteral("id"), id);
+        row.insert(QStringLiteral("reason"), QStringLiteral("story"));
+        kept.append(row);
+    }
+    QJsonObject proposal;
+    proposal.insert(QStringLiteral("keep"), kept);
+    // No covers in the proposal: nothing is said about B-roll.
+    QCOMPARE(backend.describeChange(proposal, false), QString());
+    // The same runs, one from another beat: nothing changes.
+    QJsonObject sameA;
+    sameA.insert(QStringLiteral("beat"), 9);
+    sameA.insert(QStringLiteral("line"), 2);
+    sameA.insert(QStringLiteral("through"), 3);
+    QJsonObject sameB = sameA;
+    sameB.insert(QStringLiteral("line"), 5);
+    sameB.insert(QStringLiteral("through"), 5);
+    proposal.insert(QStringLiteral("covers"), QJsonArray{sameA, sameB});
+    QCOMPARE(backend.describeChange(proposal, false), QString());
+    // One run goes, one is laid.
+    QJsonObject fresh = sameA;
+    fresh.insert(QStringLiteral("line"), 4);
+    fresh.insert(QStringLiteral("through"), 4);
+    proposal.insert(QStringLiteral("covers"), QJsonArray{sameA, fresh});
+    QCOMPARE(backend.describeChange(proposal, false),
+             QStringLiteral("Lays 1 stretch of B-roll. Drops 1 stretch of B-roll."));
+    QCOMPARE(backend.describeChange(proposal, true),
+             QStringLiteral("Laid 1 stretch of B-roll. Dropped 1 stretch of B-roll."));
+    proposal.insert(QStringLiteral("covers"), QJsonArray{});
+    QCOMPARE(backend.describeChange(proposal, false), QStringLiteral("Drops 2 stretches of B-roll."));
+}
+
+void BackendTests::cutOpensTheChatWithTheEditorsReply() {
+    EnvVarGuard fakeGuard("BOTCUT_FAKE");
+    qputenv("BOTCUT_FAKE", "1");
+    // The stub stands in for botcut-cli run --decide: it writes a cut with one run and the editor's sentence.
+    const QString stub = m_dir.filePath(QStringLiteral("decide-stub.sh"));
+    {
+        QFile script(stub);
+        QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        const QByteArray body =
+            "#!/bin/sh\n"
+            "out=\"\"\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  if [ \"$1\" = \"--out\" ]; then out=\"$2\"; fi\n"
+            "  shift\n"
+            "done\n"
+            "mkdir -p \"$out\"\n"
+            "cat > \"$out/cuts.json\" <<'JSON'\n"
+            "{\"version\": 1, \"mode\": \"speech\", \"intent\": \"A ride\",\n"
+            " \"clips\": [{\"index\": 0, \"path\": \"/tmp/talk.mp4\", \"duration\": 30},\n"
+            "           {\"index\": 1, \"path\": \"/tmp/room.mp4\", \"duration\": 20, \"role\": \"broll\"}],\n"
+            " \"segments\": [{\"clip\": 0, \"start\": 0.0, \"end\": 20.0, \"reason\": \"story\"}],\n"
+            " \"lines\": [{\"id\": 1, \"clip\": 0, \"start\": 1, \"end\": 3, \"text\": \"one\", \"keep\": true, \"reason\": \"story\"},\n"
+            "           {\"id\": 2, \"clip\": 0, \"start\": 4, \"end\": 8, \"text\": \"two\", \"keep\": true, \"reason\": \"story\"},\n"
+            "           {\"id\": 3, \"clip\": 0, \"start\": 9, \"end\": 12, \"text\": \"three\", \"keep\": true, \"reason\": \"story\"}],\n"
+            " \"dropped\": [],\n"
+            " \"covers\": [{\"clip\": 1, \"line\": 2, \"through\": 2, \"start\": 0.0, \"end\": 4.0,\n"
+            "              \"reason\": \"shows the road\", \"still\": \"work/stills/broll-1-0.jpg\"}],\n"
+            " \"covers_reply\": \"I laid the road over the middle line.\"}\n"
+            "JSON\n"
+            "exit 0\n";
+        QVERIFY(script.write(body) > 0);
+    }
+    QVERIFY(QFile::setPermissions(stub, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString talk = m_dir.filePath(QStringLiteral("decide-talk.mp4"));
+    const QString room = m_dir.filePath(QStringLiteral("decide-room.mp4"));
+    QVERIFY(QFile(talk).open(QIODevice::WriteOnly));
+    QVERIFY(QFile(room).open(QIODevice::WriteOnly));
+    backend.m_tray = {talk, room};
+    backend.setCutMode(QStringLiteral("speech"));
+    backend.setApiKey(QStringLiteral("supersecret"));
+    backend.m_launchProgram = stub;
+    QVERIFY(backend.chat().isEmpty());
+
+    backend.startCut();
+    QVERIFY(backend.busy());
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
+    QCOMPARE(backend.selects().size(), 3);
+    QCOMPARE(backend.covers().size(), 1);
+    const QVariantMap cover = backend.covers().first().toMap();
+    QCOMPARE(cover.value(QStringLiteral("through")).toInt(), 2);
+    QCOMPARE(cover.value(QStringLiteral("reason")).toString(), QStringLiteral("shows the road"));
+    // The still is resolved beside the cut.
+    QCOMPARE(cover.value(QStringLiteral("still")).toString(),
+             QDir(backend.m_cutOut).filePath(QStringLiteral("work/stills/broll-1-0.jpg")));
+    // The chat opens with the editor's sentence and what it laid. Nothing waits on Apply.
+    QCOMPARE(backend.chat().size(), 1);
+    const QVariantMap turn = backend.chat().first().toMap();
+    QCOMPARE(turn.value(QStringLiteral("role")).toString(), QStringLiteral("bot"));
+    QCOMPARE(turn.value(QStringLiteral("text")).toString(), QStringLiteral("I laid the road over the middle line."));
+    QCOMPARE(turn.value(QStringLiteral("change")).toString(), QStringLiteral("B-roll over 1 stretch, 4 s."));
+    QVERIFY(!backend.proposalPending());
+    QVERIFY(!backend.canRevert());
 }
 
 void BackendTests::renderSelectsPassesBrollSound() {
@@ -4173,8 +4685,8 @@ void BackendTests::renderSelectsPassesBrollSound() {
     backend.renderSelects();
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
     QCOMPARE(backend.m_cutProcess->program(), stub);
-    const QStringList clipArgs = backend.m_cutProcess->arguments();
-    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
+    const QStringList voiceArgs = backend.m_cutProcess->arguments();
+    QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("voice"));
     backend.setBrollMix(true);
 }
 
@@ -4286,6 +4798,23 @@ void BackendTests::reviseDropsALineAndReverts() {
                                                    QStringLiteral("/usr/bin/botcut-cli"), QString(),
                                                    QString(), QStringLiteral("open"), QStringLiteral("dip"));
     QCOMPARE(missingCuts.error, QStringLiteral("No cuts.json"));
+    const CutLaunch proposed = cutReviseLaunch(
+        QStringLiteral("/tmp/out/cuts.json"), QStringLiteral("drop the stumble"),
+        QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(), QStringLiteral("measured"),
+        QStringLiteral("dip"), true, QStringLiteral("/tmp/out/chat.json"));
+    QCOMPARE(proposed.arguments,
+             (QStringList{QStringLiteral("revise"), QStringLiteral("/tmp/out/cuts.json"),
+                          QStringLiteral("--pace"), QStringLiteral("measured"),
+                          QStringLiteral("--scene-transition"), QStringLiteral("dip"),
+                          QStringLiteral("--propose"), QStringLiteral("--history"),
+                          QStringLiteral("/tmp/out/chat.json"), QStringLiteral("--"),
+                          QStringLiteral("drop the stumble")}));
+    const CutLaunch applied = cutApplyLaunch(QStringLiteral("/tmp/out/cuts.json"),
+                                             QStringLiteral("/usr/bin/botcut-cli"), QString(), QString());
+    QCOMPARE(applied.arguments, (QStringList{QStringLiteral("revise"), QStringLiteral("/tmp/out/cuts.json"),
+                                             QStringLiteral("--apply")}));
+    QCOMPARE(cutApplyLaunch(QString(), QStringLiteral("/usr/bin/botcut-cli"), QString(), QString()).error,
+             QStringLiteral("No cuts.json"));
 
     ThumbProvider provider;
     Backend backend(&provider, new FakeFilePicker);
@@ -4318,7 +4847,8 @@ void BackendTests::reviseDropsALineAndReverts() {
     backend.m_busy = true;
     QVERIFY(!backend.sendRevise(QStringLiteral("drop the stumble")));
     backend.m_busy = false;
-    QCOMPARE(backend.reviseNotes().size(), 0);
+    QCOMPARE(backend.chat().size(), 0);
+    QVERIFY(!backend.applyProposal());
 
     const QString out = m_dir.filePath(QStringLiteral("revise-out"));
     QVERIFY(QDir().mkpath(out));
@@ -4382,7 +4912,40 @@ void BackendTests::reviseDropsALineAndReverts() {
     };
 
     QVERIFY2(backend.sendRevise(QStringLiteral("drop the stumble")), qPrintable(backend.status()));
+    QCOMPARE(backend.chat().size(), 1);
+    QCOMPARE(backend.chat().at(0).toMap().value(QStringLiteral("role")).toString(), QStringLiteral("you"));
+    QCOMPARE(backend.chat().at(0).toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("drop the stumble"));
+    QVERIFY(backend.m_cutProcess);
+    const QStringList reviseArgs = backend.m_cutProcess->arguments();
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
+    // A proposal only. The lines, the pace, and the sentence wait for Apply.
+    QVERIFY2(backend.proposalPending(), qPrintable(backend.status()));
+    QCOMPARE(backend.pace(), QStringLiteral("measured"));
+    QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
+    QVERIFY(lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
+    QVERIFY(!backend.canRevert());
+    QCOMPARE(backend.chat().size(), 2);
+    const QVariantMap proposal = backend.chat().at(1).toMap();
+    QCOMPARE(proposal.value(QStringLiteral("role")).toString(), QStringLiteral("bot"));
+    QCOMPARE(proposal.value(QStringLiteral("text")).toString(),
+             QStringLiteral("I'd drop the last line and cut every breath."));
+    QCOMPARE(proposal.value(QStringLiteral("change")).toString(),
+             QStringLiteral("Drops 1 line. New movie sentence. Pace becomes Frenzied. Fade to black off."));
+    QVERIFY(QFileInfo::exists(QDir(out).filePath(QStringLiteral("proposal.json"))));
+    QVERIFY(QFileInfo::exists(QDir(out).filePath(QStringLiteral("chat.json"))));
+    QVERIFY(reviseArgs.contains(QStringLiteral("--propose")));
+    QCOMPARE(reviseArgs.at(reviseArgs.indexOf(QStringLiteral("--history")) + 1),
+             QDir(out).filePath(QStringLiteral("chat.json")));
+
+    QVERIFY2(backend.applyProposal(), qPrintable(backend.status()));
+    QVERIFY(backend.busy());
+    const QStringList applyArgs = backend.m_cutProcess->arguments();
+    QCOMPARE(applyArgs.last(), QStringLiteral("--apply"));
+    QVERIFY(!applyArgs.contains(QStringLiteral("--propose")));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
+    QVERIFY(!backend.proposalPending());
+    QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("proposal.json"))));
     QVERIFY2(backend.pace() == QLatin1String("frenzied"), qPrintable(backend.status()));
     QCOMPARE(backend.intent(), QStringLiteral("A frenzied cut."));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("off"));
@@ -4405,13 +4968,15 @@ void BackendTests::reviseDropsALineAndReverts() {
     for (const QVariant &item : backend.selects())
         QVERIFY(item.toMap().value(QStringLiteral("id")).toInt() != 1000000000);
     QVERIFY(backend.canRevert());
-    QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
+    QCOMPARE(backend.chat().size(), 3);
+    const QVariantMap done = backend.chat().at(2).toMap();
+    QCOMPARE(done.value(QStringLiteral("text")).toString(), QStringLiteral("Done."));
+    QCOMPARE(done.value(QStringLiteral("change")).toString(),
+             QStringLiteral("Dropped 1 line. New movie sentence. Pace is now Frenzied. Fade to black off."));
     QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("rough_cut.mp4"))));
     QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("short.mp4"))));
     QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("rough_cut.srt"))));
 
-    QVERIFY(backend.m_cutProcess);
-    const QStringList reviseArgs = backend.m_cutProcess->arguments();
     QVERIFY(reviseArgs.contains(QStringLiteral("revise")));
     QCOMPARE(reviseArgs.at(reviseArgs.lastIndexOf(QStringLiteral("--")) + 1),
              QStringLiteral("drop the stumble"));
@@ -4457,7 +5022,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QCOMPARE(backend.maxPause(), 0.4);
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
     QVERIFY(!backend.canRevert());
-    QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
+    QCOMPARE(backend.chat().size(), 3);
     QVERIFY(lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
     QCOMPARE(backend.covers().size(), 1);
     QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 3);
@@ -4478,13 +5043,25 @@ void BackendTests::reviseDropsALineAndReverts() {
     backend.setIntent(QStringLiteral("Hand edit"));
     backend.setSceneTransition(QStringLiteral("off"));
     QVERIFY(backend.sendRevise(QStringLiteral("keep going")));
+    const QStringList secondArgs = backend.m_cutProcess->arguments();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
+    QVERIFY(backend.proposalPending());
+    // The earlier turns went along as history.
+    {
+        QFile history(QDir(out).filePath(QStringLiteral("chat.json")));
+        QVERIFY(history.open(QIODevice::ReadOnly));
+        const QJsonArray turns = QJsonDocument::fromJson(history.readAll()).array();
+        QCOMPARE(turns.size(), 3);
+        QCOMPARE(turns.at(0).toObject().value(QStringLiteral("role")).toString(), QStringLiteral("you"));
+        QCOMPARE(turns.at(1).toObject().value(QStringLiteral("role")).toString(), QStringLiteral("bot"));
+    }
+    QVERIFY(backend.applyProposal());
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
     QVERIFY2(backend.pace() == QLatin1String("frenzied"), qPrintable(backend.status()));
     QCOMPARE(backend.intent(), QStringLiteral("A frenzied cut."));
     QVERIFY(!lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
              0.1);
-    const QStringList secondArgs = backend.m_cutProcess->arguments();
     QVERIFY(secondArgs.contains(QStringLiteral("--pace")));
     QCOMPARE(secondArgs.at(secondArgs.indexOf(QStringLiteral("--pace")) + 1), QStringLiteral("tight"));
     QCOMPARE(secondArgs.at(secondArgs.lastIndexOf(QStringLiteral("--")) + 1),
@@ -4498,7 +5075,16 @@ void BackendTests::reviseDropsALineAndReverts() {
     QCOMPARE(backend.sceneTransition(), QStringLiteral("off"));
     QVERIFY(lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
     QVERIFY(!backend.canRevert());
-    QCOMPARE(backend.reviseNotes().size(), 2);
+    QCOMPARE(backend.chat().size(), 6);
+    // A new note replaces a proposal that is still waiting, and Leave it drops one.
+    QVERIFY(backend.sendRevise(QStringLiteral("drop it after all")));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
+    QVERIFY(backend.proposalPending());
+    backend.dismissProposal();
+    QVERIFY(!backend.proposalPending());
+    QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("proposal.json"))));
+    QVERIFY(!backend.applyProposal());
+    QCOMPARE(backend.chat().size(), 8);
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
              0.1);
 
@@ -4581,6 +5167,8 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QVariantMap cover;
     cover.insert(QStringLiteral("clip"), 1);
     cover.insert(QStringLiteral("line"), 1);
+    cover.insert(QStringLiteral("start"), 2.0);
+    cover.insert(QStringLiteral("end"), 5.0);
     backend.m_covers = {cover};
     backend.m_undoCovers = {cover};
     backend.m_cutOut = m_dir.filePath(QStringLiteral("cut-out"));
@@ -4591,7 +5179,7 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
         "{\"clips\":[{\"index\":0,\"path\":\"%1\",\"duration\":1},{\"index\":1,\"path\":\"%2\",\"duration\":1}],"
         "\"lines\":[{\"id\":1,\"clip\":0,\"start\":0,\"end\":1,\"text\":\"hello\",\"keep\":true,\"reason\":\"story\"}],"
         "\"segments\":[{\"clip\":0,\"start\":0,\"end\":1,\"reason\":\"story\"}],"
-        "\"covers\":[{\"clip\":1,\"line\":1}]}")
+        "\"covers\":[{\"clip\":1,\"line\":1,\"start\":2.0,\"end\":5.0}]}")
                                  .arg(QFileInfo(first).absoluteFilePath(),
                                       QFileInfo(second).absoluteFilePath());
     QCOMPARE(cutsFile.write(cutsJson.toUtf8()), qint64(cutsJson.toUtf8().size()));
@@ -4638,6 +5226,9 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
     QCOMPARE(backend.m_undoSelects.at(0).toMap().value(QStringLiteral("clip")).toInt(), 1);
     QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("clip")).toInt(), 2);
     QCOMPARE(backend.m_undoCovers.at(0).toMap().value(QStringLiteral("clip")).toInt(), 2);
+    // The window is inside the B-roll file, so a shifted clip index leaves it alone.
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("start")).toDouble(), 2.0);
+    QCOMPARE(backend.covers().at(0).toMap().value(QStringLiteral("end")).toDouble(), 5.0);
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
     QVERIFY(cutsFile.open(QIODevice::ReadOnly));
     const QJsonObject cutsRoot = QJsonDocument::fromJson(cutsFile.readAll()).object();
@@ -4653,6 +5244,10 @@ void BackendTests::cardLandsAtTheEndsOfTheTray() {
              1);
     QCOMPARE(cutsRoot.value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("clip")).toInt(),
              2);
+    QCOMPARE(cutsRoot.value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("start")).toDouble(),
+             2.0);
+    QCOMPARE(cutsRoot.value(QStringLiteral("covers")).toArray().at(0).toObject().value(QStringLiteral("end")).toDouble(),
+             5.0);
     QVERIFY(!work.exists(QStringLiteral("0-card-a.fake.words.json")));
     QVERIFY(!work.exists(QStringLiteral("0-card-a.silences.json")));
     QVERIFY(!work.exists(QStringLiteral("0-card-a.flac")));
@@ -4784,12 +5379,15 @@ void BackendTests::helpNoteDoesNotReplayRevise() {
     }
 
     QVERIFY2(backend.sendRevise(QStringLiteral("--help")), qPrintable(backend.status()));
+    QCOMPARE(backend.chat().size(), 1);
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 60000);
     QCOMPARE(backend.pace(), QStringLiteral("measured"));
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
     QVERIFY(!backend.canRevert());
-    QCOMPARE(backend.reviseNotes().size(), 0);
+    QVERIFY(!backend.proposalPending());
+    QCOMPARE(backend.chat().size(), 0);
+    QVERIFY(!QFileInfo::exists(QDir(out).filePath(QStringLiteral("proposal.json"))));
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
     QVERIFY(!backend.status().contains(QStringLiteral("supersecret")));
     QVERIFY(backend.status() != QLatin1String("Ready to render"));
@@ -4818,7 +5416,7 @@ void BackendTests::helpNoteDoesNotReplayRevise() {
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
     QVERIFY(!backend.canRevert());
-    QCOMPARE(backend.reviseNotes().size(), 0);
+    QCOMPARE(backend.chat().size(), 0);
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
 
     backend.setPace(QStringLiteral("open"));
@@ -4849,7 +5447,10 @@ void BackendTests::failedLaunchKeepsTheReviseSnapshot() {
     backend.m_undoPace = QStringLiteral("measured");
     backend.m_undoDip = QStringLiteral("dip");
     backend.m_canRevert = true;
-    backend.m_reviseNotes = QStringList{QStringLiteral("drop the stumble")};
+    QVariantMap note;
+    note.insert(QStringLiteral("role"), QStringLiteral("you"));
+    note.insert(QStringLiteral("text"), QStringLiteral("drop the stumble"));
+    backend.m_chat = {note};
 
     backend.startCut();
     QCOMPARE(backend.status(), QStringLiteral("Unknown cut mode"));
@@ -4858,7 +5459,7 @@ void BackendTests::failedLaunchKeepsTheReviseSnapshot() {
     QCOMPARE(backend.selects().size(), 1);
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
     QVERIFY(backend.canRevert());
-    QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
+    QCOMPARE(backend.chat().size(), 1);
     QCOMPARE(backend.pace(), QStringLiteral("measured"));
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
@@ -4893,18 +5494,21 @@ void BackendTests::missingProgramKeepsTheReviseSnapshot() {
     backend.m_undoPace = QStringLiteral("measured");
     backend.m_undoDip = QStringLiteral("dip");
     backend.m_canRevert = true;
-    backend.m_reviseNotes = QStringList{QStringLiteral("drop the stumble")};
+    QVariantMap note;
+    note.insert(QStringLiteral("role"), QStringLiteral("you"));
+    note.insert(QStringLiteral("text"), QStringLiteral("drop the stumble"));
+    backend.m_chat = {note};
 
     backend.startCut();
     QCOMPARE(backend.selects().size(), 1);
     QVERIFY(backend.canRevert());
-    QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
+    QCOMPARE(backend.chat().size(), 1);
     QTRY_VERIFY(!backend.busy());
     QCOMPARE(backend.m_cutOut, QStringLiteral("/tmp/previous-cut"));
     QCOMPARE(backend.selects().size(), 1);
     QVERIFY(backend.selects().at(0).toMap().value(QStringLiteral("keep")).toBool());
     QVERIFY(backend.canRevert());
-    QCOMPARE(backend.reviseNotes(), (QStringList{QStringLiteral("drop the stumble")}));
+    QCOMPARE(backend.chat().size(), 1);
     QCOMPARE(backend.pace(), QStringLiteral("measured"));
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
@@ -5382,6 +5986,61 @@ static QQuickWindow *showEditor(QmlHarness &harness, ShortcutBackend &backend) {
 
 static double playhead(QmlHarness &harness) {
     return harness.editBar()->property("playheadSec").toDouble();
+}
+
+// Real media through the FFmpeg backend: the silent cover player puts the
+// B-roll beat over the start of a covered line, then leaves when the beat ends.
+void BackendTests::coverShowsInThePreview() {
+    const QString talk = makeVideo(QStringLiteral("cover-talk.mp4"), 6.0, true);
+    const QString room = makeVideo(QStringLiteral("cover-room.mp4"), 6.0, false);
+    QVERIFY(!talk.isEmpty());
+    QVERIFY(!room.isEmpty());
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({talk, room});
+    backend.setCutClips({talk, room});
+    backend.setPreviewUrl(QUrl::fromLocalFile(talk));
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("clip"), 0);
+    line.insert(QStringLiteral("start"), 1.0);
+    line.insert(QStringLiteral("end"), 5.0);
+    line.insert(QStringLiteral("keep"), true);
+    line.insert(QStringLiteral("text"), QStringLiteral("the ride"));
+    backend.setSelects({line});
+    QVariantMap cover;
+    cover.insert(QStringLiteral("clip"), 1);
+    cover.insert(QStringLiteral("line"), 1);
+    cover.insert(QStringLiteral("through"), 1);
+    cover.insert(QStringLiteral("start"), 1.0);
+    cover.insert(QStringLiteral("end"), 3.0);
+    cover.insert(QStringLiteral("reason"), QStringLiteral("the road"));
+    backend.setCovers({cover});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(100);
+    QCOMPARE(window->property("viewStep").toString(), QStringLiteral("lines"));
+    QQuickItem *overlay = window->findChild<QQuickItem *>(QStringLiteral("coverOut"));
+    QVERIFY(overlay);
+    QVERIFY(!overlay->isVisible());
+    QVERIFY(window->property("coverNow").isNull());
+
+    QVERIFY(QMetaObject::invokeMethod(window, "playLine", Q_ARG(QVariant, QVariant(line)),
+                                      Q_ARG(QVariant, QVariant(true)), Q_ARG(QVariant, QVariant())));
+    QCOMPARE(window->property("linePlayStart").toInt(), 1000);
+    // Inside the beat: the cover names the B-roll file, and its frame goes up.
+    QTRY_VERIFY_WITH_TIMEOUT(!window->property("coverNow").isNull(), 6000);
+    const QVariantMap now = window->property("coverNow").toMap();
+    QCOMPARE(now.value(QStringLiteral("path")).toString(), room);
+    QVERIFY(now.value(QStringLiteral("src")).toDouble() >= 1.0);
+    QCOMPARE(now.value(QStringLiteral("until")).toDouble(), 3.0);
+    QTRY_VERIFY_WITH_TIMEOUT(overlay->isVisible(), 6000);
+    // The beat ends at 3 s into the line's file while the line plays on to 5 s.
+    QTRY_VERIFY_WITH_TIMEOUT(window->property("coverNow").isNull(), 6000);
+    QTRY_VERIFY_WITH_TIMEOUT(!overlay->isVisible(), 3000);
 }
 
 void BackendTests::qmlArrowKeysMoveThePlayhead() {
@@ -6318,10 +6977,10 @@ void BackendTests::planWatchTrimsOneSourceAndRenders() {
     backend.setBrollMix(false);
     backend.exportPlan();
     QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 5000);
-    const QStringList clipArgs = backend.m_cutProcess->arguments();
-    QVERIFY(clipArgs.contains(QStringLiteral("render")));
-    QCOMPARE(clipArgs.at(clipArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("clip"));
-    QVERIFY(!clipArgs.join(QLatin1Char(' ')).contains(token));
+    const QStringList voiceArgs = backend.m_cutProcess->arguments();
+    QVERIFY(voiceArgs.contains(QStringLiteral("render")));
+    QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("voice"));
+    QVERIFY(!voiceArgs.join(QLatin1Char(' ')).contains(token));
     backend.setBrollMix(true);
     // The checks below still read the 3.5 out point.
     backend.m_plan.moveEdge(0, false, 2.5);
@@ -7051,6 +7710,11 @@ void BackendTests::grabWindowScreens() {
             dropped.insert(QStringLiteral("reason"), QStringLiteral("dropped"));
             backend.setSelects({kept, dropped});
             backend.setTray({m_dir.filePath(QStringLiteral("DJI_20261008_091204.MP4"))});
+            backend.setChat({ShortcutBackend::turn(QStringLiteral("you"), QStringLiteral("drop the pricing part")),
+                             ShortcutBackend::turn(QStringLiteral("bot"),
+                                                   QStringLiteral("I'd drop the line about the first customers and keep the garage."),
+                                                   QStringLiteral("Drops 1 line."))},
+                            true);
             GrabSession session(&theme, &backend);
             QVERIFY(session.window());
             QVERIFY(session.window()->setProperty("currentLine", 0));

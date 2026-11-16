@@ -2,6 +2,35 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-11-06
+
+- A full-range B-roll clip, such as a HoverAir file, renders beside the DJI shots. Each branch brings a full-range source to limited range before the join, where VA-API frames could not be converted. A failed render now names ffmpeg's actual complaint instead of its last line.
+
+## 2026-11-09
+
+- B-roll is laid like an editor would: in runs of three to twelve seconds over one or more lines, to hide a cut, to show what the words describe, or to rest the viewer. The first and last lines stay on the speaker, runs are spaced out, and the footage moves forward. Covering nothing is allowed. The movie line steers it.
+- The chat opens after a cut with the model's own sentence about what it laid and why, and "B-roll over 3 stretches, 31 s." Nothing waits on Apply. "Less B-roll" or "none over the opening" in the chat comes back as a proposal.
+- The first line of a run shows a still from the footage, the file, the run's length, and the reason. The lines under it read "B-roll goes on". Remove B-roll on any of them takes the run.
+- A run plays as one piece in the movie and in the preview, across the cuts inside it, with no fade on those joins.
+
+## 2026-11-08
+
+- B-roll covers about half of the spoken lines, spread from the first line to the last, with the beats in order so the footage moves forward. The model sees each line's length, and a line under a second and a half is never covered. The first real cut had laid two beats over fifty lines.
+- Play on a line, or the kept lines in a row, shows the B-roll picture over a covered line while the voice goes on. Before, only the rendered movie showed a cover.
+- The action sentence on Lines counts the covered lines: "50 of 56 lines kept, 2:40, 15 with B-roll."
+
+## 2026-11-05
+
+- The window is the picture, the list, and one next action. The filled button sits beside its sentence in an action bar at the bottom. The steps are a breadcrumb in the top bar with no counts. The left column and the chat under the lines drag to resize, and the sizes are remembered.
+- The chat is a transcript. BotCut replies in words with the change it would make, and nothing changes until you press Apply or answer yes. Leave it drops the proposal. Undo sits on the turn that changed the cut. `botcut-cli revise` takes `--propose`, `--history`, and `--apply`, and the model returns a `reply`.
+- A line row has one word, Drop or Keep. Clicking a row is the one way to jump to a line. The block row under the picture is a plain timeline that shows where playback is and seeks on a click. Search, filters, the Review button, the count tiles, the key hints, Previous and Next, and the third column are gone.
+- The movie sentence, the pace, and the fade are one row under the picture. Cover shots has no row: B-roll is marked on the shot, and the sound choice is in Settings.
+- A shot can be marked B-roll on the shot list, and marked back as a shot. The row then reads "B-roll" where the size was. The saved list keeps the mark.
+- A B-roll shot is not transcribed. It is sliced into beats of one to four seconds at its scene changes, and the model lays beats over spoken lines, choosing by the words and a still from each beat. One file can cover many lines. The voice always keeps playing.
+- The "Cover lines with other shots" switch is gone. Marking a shot is the switch. The Decisions column counts the B-roll shots instead.
+- "Keep a B-roll shot's sound under the voice" stays. Off now plays the voice alone instead of the clip's own sound. A B-roll file with no sound track is accepted.
+- `botcut-cli run` takes `--b-roll-file PATH` and `--b-roll-sound mix|voice`. A `.txt` shot list marks a file with a `b-roll ` prefix. `--b-roll` and `--b-roll-sound clip` are gone.
+
 ## 2026-10-29
 
 - Window colors come from the theme: background, surface, raised, and foreground. Opening a shot says "Opening…". A change to the line list says "Changing…".

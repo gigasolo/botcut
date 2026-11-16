@@ -1,228 +1,274 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Layouts
 
-// The field is the chat. One note, one result, no bubbles.
+// The chat about this line list. Your turns on the right, the bot's on the
+// left. A bot turn is the model's reply and the change it would make. Nothing
+// moves until Apply, or a typed yes. The thread itself is backend.chat; the
+// lines this file adds (Thinking…, a failure, an undo) are the window's own.
 Item {
     id: root
     property var host
     signal applied(bool changed, string fromStep)
 
-    property string pendingNote: ""
+    // "proposing" while the model thinks, "applying" while the change lands.
     property string chatState: ""
-    property string changeText: ""
-    property var before: null
+    property string pendingNote: ""
     property string sentFrom: ""
+    // One transient line under the thread: a failure, or what undo did.
+    property string localText: ""
+    property var keptBefore: null
 
-    readonly property string shownNote: {
-        if (pendingNote !== "")
-            return pendingNote
-        var notes = backend.reviseNotes
-        if (!notes || notes.length === 0)
-            return ""
-        return String(notes[notes.length - 1])
-    }
     readonly property string trimmedField: field.text.replace(/\s+/g, " ").trim()
+    readonly property string failedText: qsTr("That change didn't go through. Your note is back in the field.")
+    readonly property int lastTurn: backend.chat ? backend.chat.length - 1 : -1
+    readonly property string lastRole: {
+        var turns = backend.chat
+        if (!turns || turns.length === 0)
+            return ""
+        return String(turns[turns.length - 1].role || "")
+    }
+    readonly property string lastChange: {
+        var turns = backend.chat
+        if (!turns || turns.length === 0)
+            return ""
+        return String(turns[turns.length - 1].change || "")
+    }
 
     implicitWidth: 200
-    implicitHeight: chatCol.implicitHeight + 9
+    implicitHeight: 240
 
-    function snapshot() {
+    // Short answers that mean "go ahead" while a proposal waits.
+    function accepts(text) {
+        var plain = text.toLowerCase().replace(/[.!,]/g, "").replace(/\s+/g, " ").trim()
+        var whole = ["yes", "y", "ok", "okay", "do it", "apply", "apply it", "go ahead", "go",
+                     "sure", "yep", "yeah", "please", "make it so"]
+        if (whole.indexOf(plain) >= 0)
+            return true
+        // "Yes, do it." and "ok go ahead" say yes. "yes but shorter" is a new note.
+        var words = plain.split(" ")
+        var first = ["yes", "ok", "okay", "sure", "yep", "yeah"]
+        if (first.indexOf(words[0]) < 0 || words.length > 4)
+            return false
+        return words.indexOf("but") < 0 && words.indexOf("not") < 0 && words.indexOf("no") < 0
+    }
+    function snapshotKept() {
         var kept = {}
         var rows = backend.selects
         for (var i = 0; i < rows.length; i++)
             kept[String(rows[i].id)] = rows[i].keep !== false
-        return {
-            intent: backend.intent,
-            pace: backend.pace,
-            dip: backend.sceneTransition,
-            kept: kept
-        }
+        return { kept: kept, intent: backend.intent, pace: backend.pace, dip: backend.sceneTransition }
     }
-    function paceWord(pace) {
-        if (pace === "measured")
-            return qsTr("Measured")
-        if (pace === "tight")
-            return qsTr("Tight")
-        if (pace === "frenzied")
-            return qsTr("Frenzied")
-        return qsTr("Open")
-    }
-    function describe(snap) {
+    function changedSince(snap) {
+        if (!snap)
+            return true
+        if (backend.intent !== snap.intent || backend.pace !== snap.pace || backend.sceneTransition !== snap.dip)
+            return true
         var rows = backend.selects
-        var dropped = 0
-        var restored = 0
         for (var i = 0; i < rows.length; i++) {
-            var id = String(rows[i].id)
-            var wasKept = snap.kept[id]
-            if (wasKept === undefined)
-                continue
-            var nowKept = rows[i].keep !== false
-            if (wasKept && !nowKept)
-                dropped++
-            else if (!wasKept && nowKept)
-                restored++
+            var was = snap.kept[String(rows[i].id)]
+            if (was !== undefined && was !== (rows[i].keep !== false))
+                return true
         }
-        var parts = []
-        if (dropped === 1)
-            parts.push(qsTr("Dropped 1 line."))
-        else if (dropped > 1)
-            parts.push(qsTr("Dropped %1 lines.").arg(dropped))
-        if (restored === 1)
-            parts.push(qsTr("Put back 1 line."))
-        else if (restored > 1)
-            parts.push(qsTr("Put back %1 lines.").arg(restored))
-        if (backend.intent !== snap.intent)
-            parts.push(qsTr("New movie sentence."))
-        if (backend.pace !== snap.pace)
-            parts.push(qsTr("Pace is now %1.").arg(paceWord(backend.pace)))
-        if (backend.sceneTransition !== snap.dip) {
-            parts.push(backend.sceneTransition === "dip"
-                       ? qsTr("Fade to black on.")
-                       : qsTr("Fade to black off."))
-        }
-        if (parts.length === 0)
-            return qsTr("Nothing changed. Try saying it another way.")
-        return parts.join(" ")
+        return false
     }
     function send() {
         var note = trimmedField
         if (note === "" || backend.busy)
             return
-        var snap = snapshot()
-        var from = host ? host.viewStep : ""
-        if (!backend.sendRevise(note)) {
-            chatState = "failed"
-            changeText = qsTr("That change didn't go through. Your note is back in the field.")
+        if (backend.proposalPending && accepts(note)) {
+            field.text = ""
+            apply()
             return
         }
-        before = snap
+        var from = host ? host.viewStep : ""
+        localText = ""
+        if (!backend.sendRevise(note)) {
+            localText = failedText
+            return
+        }
         sentFrom = from
         pendingNote = note
         field.text = ""
-        chatState = "changing"
-        changeText = qsTr("Changing the cut…")
+        chatState = "proposing"
+    }
+    function apply() {
+        if (backend.busy || !backend.proposalPending)
+            return
+        localText = ""
+        keptBefore = snapshotKept()
+        sentFrom = host ? host.viewStep : ""
+        if (!backend.applyProposal()) {
+            localText = failedText
+            return
+        }
+        chatState = "applying"
+    }
+    function leave() {
+        if (backend.busy)
+            return
+        localText = ""
+        backend.dismissProposal()
     }
     function undo() {
         backend.revertRevise()
-        if (!backend.canRevert) {
-            chatState = "undone"
-            changeText = qsTr("Undone. Back to how it was before this note.")
-        } else {
-            chatState = "undoFailed"
-            changeText = qsTr("Could not undo. The line list did not save.")
-        }
-    }
-    function notesChanged() {
-        var notes = backend.reviseNotes
-        if (!notes || notes.length === 0) {
-            pendingNote = ""
-            chatState = ""
-            changeText = ""
-            before = null
-            sentFrom = ""
-            return
-        }
-        if (chatState !== "changing" || !before)
-            return
-        var text = describe(before)
-        var from = sentFrom
-        var changed = text !== qsTr("Nothing changed. Try saying it another way.")
-        pendingNote = ""
-        chatState = "changed"
-        changeText = text
-        before = null
-        applied(changed, from)
+        if (!backend.canRevert)
+            localText = qsTr("Undone. Back to how it was before this note.")
+        else
+            localText = qsTr("Could not undo. The line list did not save.")
     }
     function busyChanged() {
-        if (backend.busy || chatState !== "changing")
+        if (backend.busy)
             return
-        field.text = pendingNote
-        field.cursorPosition = field.text.length
-        pendingNote = ""
-        chatState = "failed"
-        changeText = qsTr("That change didn't go through. Your note is back in the field.")
-        if (root.visible)
-            field.forceActiveFocus()
+        if (chatState === "proposing") {
+            chatState = ""
+            if (lastRole === "bot") {
+                pendingNote = ""
+                return
+            }
+            // No reply came. The note goes back where it was typed.
+            field.text = pendingNote
+            field.cursorPosition = field.text.length
+            pendingNote = ""
+            localText = failedText
+            if (root.visible)
+                field.forceActiveFocus()
+            return
+        }
+        if (chatState === "applying") {
+            chatState = ""
+            if (backend.proposalPending) {
+                localText = failedText
+                return
+            }
+            applied(changedSince(keptBefore), sentFrom)
+            keptBefore = null
+        }
     }
 
-    Rectangle {
-        anchors.top: parent.top
-        width: parent.width
-        height: 1
-        color: theme.raised
-    }
-
-    Column {
-        id: chatCol
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.topMargin: 9
+    ColumnLayout {
+        anchors.fill: parent
         spacing: 8
 
-        Label {
-            visible: root.shownNote !== ""
-            width: parent.width
-            text: "\u201C" + root.shownNote + "\u201D"
-            color: theme.foreground
-            font.pixelSize: 13
-            wrapMode: Text.WordWrap
-        }
-        Label {
-            visible: root.changeText !== ""
-            width: parent.width
-            text: root.changeText
-            color: theme.foreground
-            opacity: 0.62
-            font.pixelSize: 12
-            wrapMode: Text.WordWrap
-        }
-        Label {
-            visible: backend.canRevert && !backend.busy
-            text: qsTr("Undo this change")
-            color: theme.foreground
-            font.pixelSize: 13
-            MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.undo()
-            }
-        }
-
-        // Three notes to start from. A chip only fills the field. Sending is
-        // still the word in the field or Enter.
-        Flow {
-            width: parent.width
-            spacing: 6
-            Repeater {
-                model: [qsTr("Make it tighter"), qsTr("Drop the pricing part"), qsTr("Under 90 seconds")]
-                delegate: Rectangle {
-                    id: chip
-                    required property string modelData
-                    width: chipText.implicitWidth + 16
-                    height: 24
-                    radius: theme.radius
-                    color: chipHover.hovered && chip.enabled ? theme.hover : "transparent"
-                    border.width: 1
-                    border.color: theme.line
-                    enabled: !backend.busy
-                    HoverHandler { id: chipHover; enabled: chip.enabled }
+        ListView {
+            id: thread
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            clip: true
+            spacing: 8
+            boundsBehavior: Flickable.StopAtBounds
+            model: backend.chat
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+            onCountChanged: Qt.callLater(function() { thread.positionViewAtEnd() })
+            footer: Item {
+                width: thread.width
+                height: footerCol.implicitHeight > 0 ? footerCol.implicitHeight + 8 : 0
+                Column {
+                    id: footerCol
+                    width: parent.width
+                    spacing: 8
                     Label {
-                        id: chipText
-                        anchors.centerIn: parent
-                        text: chip.modelData
+                        visible: root.chatState !== "" && backend.busy
+                        width: parent.width
+                        text: root.chatState === "applying" ? qsTr("Applying…") : qsTr("Thinking…")
                         color: theme.foreground
-                        opacity: !chip.enabled ? 0.38 : (chipHover.hovered ? 1 : 0.62)
-                        font.pixelSize: 12
+                        opacity: 0.62
+                        font.pixelSize: 13
                     }
-                    MouseArea {
+                    Label {
+                        visible: root.localText !== ""
+                        width: parent.width
+                        text: root.localText
+                        color: theme.foreground
+                        opacity: 0.62
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+            delegate: Item {
+                id: turn
+                required property int index
+                required property var modelData
+                readonly property bool mine: String(modelData.role) === "you"
+                readonly property bool last: index === root.lastTurn
+                readonly property string words: String(modelData.text || "")
+                readonly property string change: String(modelData.change || "")
+                width: thread.width
+                height: mine ? bubble.height : botCol.implicitHeight
+
+                // Your turn: a raised bubble on the right.
+                Rectangle {
+                    id: bubble
+                    visible: turn.mine
+                    anchors.right: parent.right
+                    width: Math.min(bubbleText.implicitWidth + 24, Math.round(thread.width * 0.85))
+                    height: bubbleText.implicitHeight + 16
+                    radius: theme.radius
+                    color: theme.raised
+                    Label {
+                        id: bubbleText
                         anchors.fill: parent
-                        enabled: chip.enabled
-                        cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                        onClicked: {
-                            field.text = chip.modelData
-                            field.cursorPosition = field.text.length
-                            field.forceActiveFocus()
+                        anchors.margins: 8
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        text: turn.words
+                        color: theme.foreground
+                        font.pixelSize: 13
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
+                // The bot's turn: its reply, the change, and the way to say yes.
+                Column {
+                    id: botCol
+                    visible: !turn.mine
+                    width: parent.width
+                    spacing: 6
+                    Label {
+                        width: parent.width
+                        text: turn.words
+                        color: theme.foreground
+                        font.pixelSize: 13
+                        wrapMode: Text.WordWrap
+                    }
+                    Label {
+                        visible: turn.change !== ""
+                        width: parent.width
+                        text: turn.change
+                        color: theme.foreground
+                        opacity: 0.62
+                        font.pixelSize: 12
+                        wrapMode: Text.WordWrap
+                    }
+                    Row {
+                        visible: turn.last && backend.proposalPending
+                        spacing: 6
+                        ActionButton {
+                            objectName: "applyProposal"
+                            text: qsTr("Apply")
+                            filled: true
+                            implicitHeight: 32
+                            enabled: !backend.busy
+                            onClicked: root.apply()
+                        }
+                        ActionButton {
+                            text: qsTr("Leave it")
+                            raised: true
+                            enabled: !backend.busy
+                            onClicked: root.leave()
+                        }
+                    }
+                    Label {
+                        visible: turn.last && !backend.proposalPending && backend.canRevert && !backend.busy
+                        text: qsTr("Undo")
+                        color: theme.foreground
+                        font.pixelSize: 13
+                        MouseArea {
+                            anchors.fill: parent
+                            anchors.margins: -4
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.undo()
                         }
                     }
                 }
@@ -230,8 +276,9 @@ Item {
         }
 
         Rectangle {
-            width: parent.width
-            height: 36
+            Layout.fillWidth: true
+            Layout.preferredHeight: 36
+            Layout.minimumHeight: 36
             radius: theme.radius
             color: theme.raised
             border.width: field.activeFocus ? 1 : 0
@@ -257,7 +304,8 @@ Item {
                 anchors.leftMargin: field.leftPadding
                 anchors.rightMargin: field.rightPadding
                 visible: field.text === ""
-                text: qsTr("Tell BotCut what to change")
+                text: backend.proposalPending ? qsTr("Say yes, or ask for something else")
+                                              : qsTr("Ask for a change…")
                 color: theme.foreground
                 opacity: 0.38
                 font.pixelSize: 13
@@ -271,11 +319,12 @@ Item {
                 anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.trimmedField !== "" && !backend.busy
-                text: qsTr("Change this cut")
+                text: qsTr("Send")
                 color: theme.accent
                 font.pixelSize: 13
                 MouseArea {
                     anchors.fill: parent
+                    anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.send()
                 }
@@ -283,9 +332,15 @@ Item {
         }
     }
 
+    onLocalTextChanged: Qt.callLater(function() { thread.positionViewAtEnd() })
+
     Connections {
         target: backend
-        function onReviseNotesChanged() { root.notesChanged() }
         function onBusyChanged() { root.busyChanged() }
+        function onChatChanged() {
+            if (backend.chat.length === 0)
+                root.localText = ""
+            Qt.callLater(function() { thread.positionViewAtEnd() })
+        }
     }
 }

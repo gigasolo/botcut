@@ -46,6 +46,45 @@ QString paceValue(const QString &pace) {
 
 }
 
+QVariantList wordCutsFromJson(const QJsonValue &value) {
+    QVariantList cuts;
+    for (const QJsonValue &item : value.toArray()) {
+        const QJsonObject obj = item.toObject();
+        const int from = obj.value(QStringLiteral("from")).toInt(-1);
+        const int through = obj.value(QStringLiteral("through")).toInt(-1);
+        const double start = obj.value(QStringLiteral("start")).toDouble(-1);
+        const double end = obj.value(QStringLiteral("end")).toDouble(-1);
+        // One that does not name words and a span is not a cut the render could make.
+        if (from < 0 || through < from || start < 0 || end <= start)
+            continue;
+        QVariantMap cut;
+        cut.insert(QStringLiteral("from"), from);
+        cut.insert(QStringLiteral("through"), through);
+        cut.insert(QStringLiteral("start"), start);
+        cut.insert(QStringLiteral("end"), end);
+        cut.insert(QStringLiteral("reason"), obj.value(QStringLiteral("reason")).toString());
+        cut.insert(QStringLiteral("cut"), obj.value(QStringLiteral("cut")).toBool());
+        cuts.append(cut);
+    }
+    return cuts;
+}
+
+QJsonArray wordCutsToJson(const QVariantList &cuts) {
+    QJsonArray array;
+    for (const QVariant &item : cuts) {
+        const QVariantMap cut = item.toMap();
+        QJsonObject obj;
+        obj.insert(QStringLiteral("from"), cut.value(QStringLiteral("from")).toInt());
+        obj.insert(QStringLiteral("through"), cut.value(QStringLiteral("through")).toInt());
+        obj.insert(QStringLiteral("start"), cut.value(QStringLiteral("start")).toDouble());
+        obj.insert(QStringLiteral("end"), cut.value(QStringLiteral("end")).toDouble());
+        obj.insert(QStringLiteral("reason"), cut.value(QStringLiteral("reason")).toString());
+        obj.insert(QStringLiteral("cut"), cut.value(QStringLiteral("cut")).toBool());
+        array.append(obj);
+    }
+    return array;
+}
+
 QString defaultCutIntent() {
     return QStringLiteral(
         "Keep each moment in order. Drop flubs and true retakes. Keep a beat that appears only once.");
@@ -278,6 +317,9 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
                                stillInfo.isRelative() ? QDir(baseDir).absoluteFilePath(still)
                                                       : stillInfo.absoluteFilePath());
                 }
+                const QVariantList wordCuts = wordCutsFromJson(line.value(QStringLiteral("cuts")));
+                if (!wordCuts.isEmpty())
+                    row.insert(QStringLiteral("cuts"), wordCuts);
                 lines->append(row);
             }
         }
@@ -337,6 +379,9 @@ QByteArray writeCutList(const QString &mode, const QStringList &files, const QSt
             const QString still = row.value(QStringLiteral("still")).toString();
             if (!still.isEmpty())
                 line.insert(QStringLiteral("still"), still);
+            const QVariantList wordCuts = row.value(QStringLiteral("cuts")).toList();
+            if (!wordCuts.isEmpty())
+                line.insert(QStringLiteral("cuts"), wordCutsToJson(wordCuts));
             lineArray.append(line);
         }
         root.insert(QStringLiteral("lines"), lineArray);

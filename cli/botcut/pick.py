@@ -56,10 +56,12 @@ KEEP_SCHEMA = {
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["id", "reason"],
+                        "required": ["id", "reason", "cuts"],
                         "properties": {
                             "id": {"type": "integer"},
                             "reason": {"type": "string"},
+                            # Numbers from the cuts offered on that line. Never times.
+                            "cuts": {"type": "array", "items": {"type": "integer"}},
                         },
                     },
                 }
@@ -80,20 +82,123 @@ def utterances(words_by_clip: list[list[dict]]) -> list[dict]:
             end = float(word["end"])
             if not text:
                 continue
+            spoken = {"text": text, "start": start, "end": end}
             if current is None:
                 current = _utt(next_id, clip, start, end, text)
+                current["words"] = [spoken]
                 next_id += 1
                 continue
             if start - current["end"] > UTTERANCE_GAP:
                 found.append(current)
                 current = _utt(next_id, clip, start, end, text)
+                current["words"] = [spoken]
                 next_id += 1
             else:
                 current["end"] = end
                 current["text"] = f"{current['text']} {text}"
+                current["words"].append(spoken)
         if current is not None:
             found.append(current)
+    for utt in found:
+        utt["cuts"] = word_cuts(utt)
     return found
+
+
+# Sounds that carry no words. A cut inside a line only ever removes these, or a
+# phrase said twice in a row.
+FILLERS = {"um", "umm", "uhm", "uh", "uhh", "er", "erm", "ah", "hmm", "mm", "mhm"}
+# The longest phrase looked for as a stumbled restart: "we were, we were going".
+RESTART_WORDS = 3
+# Air left on each side of a cut inside a line, and the shortest cut worth a jump.
+CUT_AIR = 0.04
+CUT_MIN = 0.15
+
+
+def _bare(text: str) -> str:
+    return re.sub(r"[^a-z0-9']", "", text.lower())
+
+
+def word_cuts(utt: dict) -> list[dict]:
+    """Stretches inside a line that could come out, by word position.
+
+    The times are worked out here, from the word times. The model is only
+    offered these by number, and says which to take.
+    """
+    words = utt.get("words") or []
+    # A word with a space in it would not line up with the text on screen.
+    if len(words) < 2 or len(str(utt.get("text") or "").split()) != len(words):
+        return []
+    bare = [_bare(str(word["text"])) for word in words]
+    spans: list[tuple[int, int, str]] = []
+    index = 0
+    while index < len(words):
+        if bare[index] in FILLERS:
+            last = index
+            while last + 1 < len(words) and bare[last + 1] in FILLERS:
+                last += 1
+            spans.append((index, last, "filler"))
+            index = last + 1
+            continue
+        took = 0
+        for size in range(RESTART_WORDS, 0, -1):
+            first = bare[index : index + size]
+            again = bare[index + size : index + 2 * size]
+            if len(again) == size and first == again and all(first):
+                spans.append((index, index + size - 1, "said twice"))
+                took = size
+                break
+        index += took or 1
+    found = []
+    for first, last, reason in spans:
+        # A line that is nothing else is dropped as a line, not cut down to nothing.
+        if first == 0 and last == len(words) - 1:
+            continue
+        before = float(words[first - 1]["end"]) if first > 0 else float(utt["start"])
+        after = float(words[last + 1]["start"]) if last + 1 < len(words) else float(utt["end"])
+        start = min(float(words[first]["start"]), before + CUT_AIR) if first > 0 else before
+        end = max(float(words[last]["end"]), after - CUT_AIR) if last + 1 < len(words) else after
+        if end - start < CUT_MIN:
+            continue
+        found.append(
+            {
+                "from": first,
+                "through": last,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "reason": reason,
+                "cut": False,
+            }
+        )
+    return found
+
+
+def cut_words(segments: list[dict], lines: list[dict]) -> list[dict]:
+    """Take the chosen cuts of the kept lines out of the ranges that will be rendered."""
+    gone: dict[int, list[tuple[float, float]]] = {}
+    for line in lines:
+        if not line.get("keep"):
+            continue
+        for cut in line.get("cuts") or []:
+            if cut.get("cut"):
+                gone.setdefault(int(line["clip"]), []).append((float(cut["start"]), float(cut["end"])))
+    if not gone:
+        return segments
+    out = []
+    for seg in segments:
+        pieces = [(float(seg["start"]), float(seg["end"]))]
+        for cut_start, cut_end in sorted(gone.get(int(seg["clip"]), [])):
+            nxt = []
+            for start, end in pieces:
+                if cut_end <= start or cut_start >= end:
+                    nxt.append((start, end))
+                    continue
+                if cut_start - start >= CUT_MIN:
+                    nxt.append((start, cut_start))
+                if end - cut_end >= CUT_MIN:
+                    nxt.append((cut_end, end))
+            pieces = nxt
+        out.extend({**seg, "start": start, "end": end} for start, end in pieces)
+    return out
 
 
 # A long shoot goes to the model in parts, so no request carries more lines
@@ -105,7 +210,7 @@ CHUNK_WORKERS = 3
 
 def pick(utts: list[dict], intent: str = "") -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
-        return [{"id": u["id"], "reason": "fake"} for u in utts]
+        return [_kept(u["id"], "fake", range(len(u.get("cuts") or []))) for u in utts]
     key = os.environ.get("XAI_API_KEY")
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
@@ -126,6 +231,15 @@ def pick(utts: list[dict], intent: str = "") -> list[dict]:
     with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
         answers = list(pool.map(ask, enumerate(parts, start=1)))
     return [item for answer in answers for item in answer]
+
+
+def _kept(uid, reason, cuts) -> dict:
+    """One kept line. The cuts taken inside it are listed only when there are some."""
+    row = {"id": int(uid), "reason": str(reason)}
+    numbers = [int(number) for number in cuts]
+    if numbers:
+        row["cuts"] = numbers
+    return row
 
 
 def chunks(utts: list[dict], size: int = CHUNK_LINES, overlap: int = CHUNK_OVERLAP) -> list[dict]:
@@ -181,7 +295,9 @@ def _ask_keep(utts: list[dict], intent: str, key: str, note: str = "") -> list[d
         try:
             content = response.json()["choices"][0]["message"]["content"]
             parsed = json.loads(content)
-            return [{"id": int(item["id"]), "reason": str(item["reason"])} for item in parsed["keep"]]
+            return [
+                _kept(item["id"], item["reason"], item.get("cuts") or []) for item in parsed["keep"]
+            ]
         except (ValueError, KeyError, TypeError, IndexError):
             if attempt == 0:
                 print("Trying again", flush=True)
@@ -341,6 +457,7 @@ def _retake_job(intent: str) -> bool:
 
 def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
     reasons = {int(item["id"]): str(item["reason"]) for item in keep}
+    taken = {int(item["id"]): {int(number) for number in item.get("cuts") or []} for item in keep}
     kept = kept_utterances(utts, keep)
     dropped = dropped_utterances(utts, keep)
     drop_reason = {}
@@ -365,6 +482,12 @@ def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
         still = str(utt.get("still") or "")
         if still and os.path.isfile(still):
             row["still"] = os.path.abspath(still)
+        # Every cut on offer is listed, so one the model left in can still be taken by hand.
+        offered = utt.get("cuts") or []
+        if offered:
+            row["cuts"] = [
+                {**cut, "cut": number in taken.get(uid, set())} for number, cut in enumerate(offered)
+            ]
         rows.append(row)
     return rows
 
@@ -406,10 +529,31 @@ def _utt(uid: int, clip: int, start: float, end: float, text: str) -> dict:
 MAX_STILLS = 40
 
 
+CUTS_NOTE = (
+    "Some lines end with cuts on offer, numbered from 0: a filler sound, or words said twice in a row. "
+    "For a line you keep, return the numbers of the cuts that should come out, or an empty list. "
+    "Take a filler. Take a stumbled restart. Leave words said twice on purpose, like \"no, no\" "
+    "or \"very, very\". A line with no cuts on offer gets an empty list.\n\n"
+)
+
+
+def _offer(utt: dict) -> str:
+    cuts = utt.get("cuts") or []
+    if not cuts:
+        return ""
+    words = utt.get("words") or []
+    said = [
+        " ".join(str(word["text"]) for word in words[cut["from"] : cut["through"] + 1]) for cut in cuts
+    ]
+    return " {cuts: " + ", ".join(f'{number}="{text}"' for number, text in enumerate(said)) + "}"
+
+
 def _user_message(utts: list[dict]) -> str:
-    return "\n".join(
-        f"[{u['id']}] (clip {u['clip']}, {u['start']:.2f}-{u['end']:.2f}) {u['text']}" for u in utts
+    rows = "\n".join(
+        f"[{u['id']}] (clip {u['clip']}, {u['start']:.2f}-{u['end']:.2f}) {u['text']}{_offer(u)}"
+        for u in utts
     )
+    return (CUTS_NOTE + rows) if any(u.get("cuts") for u in utts) else rows
 
 
 def user_content(utts: list[dict]) -> str | list[dict]:

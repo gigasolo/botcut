@@ -894,6 +894,24 @@ QString Backend::describeChange(const QJsonObject &proposal, bool past) const {
             word = tr("Frenzied");
         parts << (past ? tr("Pace is now %1.").arg(word) : tr("Pace becomes %1.").arg(word));
     }
+    // Only said when it would change something: a line that has a cut the other way.
+    const QString fillers = proposal.value(QStringLiteral("fillers")).toString();
+    if (fillers == QLatin1String("cut") || fillers == QLatin1String("keep")) {
+        const bool take = fillers == QLatin1String("cut");
+        bool changes = false;
+        for (const QVariant &item : m_selects) {
+            for (const QVariant &cut : item.toMap().value(QStringLiteral("cuts")).toList()) {
+                if (cut.toMap().value(QStringLiteral("cut")).toBool() != take)
+                    changes = true;
+            }
+        }
+        if (changes) {
+            if (take)
+                parts << (past ? tr("Took the ums and restarts out.") : tr("Takes the ums and restarts out."));
+            else
+                parts << (past ? tr("Left the ums and restarts in.") : tr("Leaves the ums and restarts in."));
+        }
+    }
     if (proposal.contains(QStringLiteral("dip"))) {
         const bool dip = proposal.value(QStringLiteral("dip")).toBool();
         if (dip != (m_sceneTransition == QLatin1String("dip")))
@@ -1541,6 +1559,35 @@ void Backend::dropSelect(int id) {
     }
 }
 
+void Backend::toggleWordCut(int id, int index) {
+    if (m_busy)
+        return;
+    dismissError();
+    for (int i = 0; i < m_selects.size(); ++i) {
+        QVariantMap row = m_selects.at(i).toMap();
+        if (row.value(QStringLiteral("id")).toInt() != id)
+            continue;
+        QVariantList cuts = row.value(QStringLiteral("cuts")).toList();
+        if (index < 0 || index >= cuts.size())
+            return;
+        const QVariantMap previousRow = row;
+        QVariantMap cut = cuts.at(index).toMap();
+        cut.insert(QStringLiteral("cut"), !cut.value(QStringLiteral("cut")).toBool());
+        cuts[index] = cut;
+        row.insert(QStringLiteral("cuts"), cuts);
+        m_selects[i] = row;
+        emit selectsChanged();
+        if (!storeCovers(true)) {
+            m_selects[i] = previousRow;
+            emit selectsChanged();
+            setStatus(QStringLiteral("Could not save the line list"));
+            return;
+        }
+        touchMovie();
+        return;
+    }
+}
+
 void Backend::clearCover(int lineId) {
     if (m_busy)
         return;
@@ -1749,6 +1796,10 @@ void Backend::loadSelects(const QString &cutsPath) {
                        stillInfo.isRelative() ? QFileInfo(cutsPath).dir().absoluteFilePath(still)
                                               : stillInfo.absoluteFilePath());
         }
+        const QVariantList wordCuts = wordCutsFromJson(line.value(QStringLiteral("cuts")));
+        if (!wordCuts.isEmpty()) {
+            row.insert(QStringLiteral("cuts"), wordCuts);
+        }
         rows.append(row);
     }
     m_selects = rows;
@@ -1781,6 +1832,9 @@ QJsonArray linesForSelects(const QVariantList &selects) {
         const QString still = row.value(QStringLiteral("still")).toString();
         if (!still.isEmpty())
             line.insert(QStringLiteral("still"), still);
+        const QVariantList wordCuts = row.value(QStringLiteral("cuts")).toList();
+        if (!wordCuts.isEmpty())
+            line.insert(QStringLiteral("cuts"), wordCutsToJson(wordCuts));
         lines.append(line);
     }
     return lines;

@@ -171,6 +171,8 @@ public:
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void clearCover(int lineId);
+    // Flip one cut inside a line: an um or a restart, taken out or put back.
+    Q_INVOKABLE void toggleWordCut(int id, int index);
     Q_INVOKABLE void renderSelects();
     // Renders what changed, lines or a hand trim, over the movie this project already has.
     Q_INVOKABLE void updateMovie();

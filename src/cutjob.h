@@ -2,6 +2,8 @@
 
 #include <QByteArray>
 #include <QProcessEnvironment>
+#include <QJsonArray>
+#include <QJsonValue>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -36,6 +38,11 @@ CutLaunch cutCaptionsLaunch(const QString &cutsPath, const QString &botcutCli, c
 CutLaunch cutShortLaunch(const QString &cutsPath, const QString &botcutCli, const QString &uv,
                          const QString &cliProject);
 // Asks xAI whether it accepts the key in the environment. No files.
+// The cuts on offer inside a line, between cuts.json and the window. Each is
+// {from, through, start, end, reason, cut}: word positions, the seconds they
+// span in the shot, and whether it is taken.
+QVariantList wordCutsFromJson(const QJsonValue &value);
+QJsonArray wordCutsToJson(const QVariantList &cuts);
 CutLaunch cutKeyLaunch(const QString &botcutCli, const QString &uv, const QString &cliProject);
 
 // Pace is a name. --max-pause is applied by the next Cut or Render, not here.

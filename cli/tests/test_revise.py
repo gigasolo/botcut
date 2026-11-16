@@ -87,7 +87,9 @@ def test_parse_rejects_times_padding_and_a_bad_pace():
     with pytest.raises(SystemExit, match="not a revise"):
         parse_revise(bad_pace)
     schema = REVISE_SCHEMA["json_schema"]["schema"]
-    assert set(schema["properties"]) == {"reply", "intent", "pace", "dip", "keep", "deliver", "covers"}
+    assert set(schema["properties"]) == {
+            "reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers",
+        }
     assert set(schema["properties"]["covers"]["items"]["properties"]) == {"beat", "line", "through", "reason"}
     assert "A listed run stays." in REVISE_SYSTEM
     assert parse_revise(good)["covers"] is None

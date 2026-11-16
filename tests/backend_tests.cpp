@@ -245,6 +245,12 @@ public:
         emit infoChanged();
     }
     Q_INVOKABLE void updateMovie() { ++updateCount; }
+    Q_INVOKABLE void toggleWordCut(int id, int index) {
+        lastWordCutLine = id;
+        lastWordCut = index;
+    }
+    int lastWordCutLine = -1;
+    int lastWordCut = -1;
     int updateCount = 0;
     bool m_movieStale = false;
     void setRoughCut(bool value) {
@@ -733,6 +739,8 @@ private slots:
     void qmlSettingsSavesOnlyATypedKey();
     void cutMakesTheMovieInOnePress();
     void aWholeCutIsOneProgressBar();
+    void wordCutsLoadToggleAndSave();
+    void qmlLineMarksItsCutsAndAClickFlipsOne();
     void failedRenderKeepsTheLines();
     void recentMovieComesBackWithItsProject();
     void qmlUpdateMovieIsTheButtonWhenTheMovieIsBehind();
@@ -8262,6 +8270,137 @@ void BackendTests::aWholeCutIsOneProgressBar() {
     QCOMPARE(backend.progress(), 0.5);
     backend.m_cutStage = Backend::CutStage::Idle;
     backend.m_busy = false;
+}
+
+void BackendTests::wordCutsLoadToggleAndSave() {
+    const QString dir = m_dir.filePath(QStringLiteral("word-cuts"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString cutsPath = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    QJsonObject um;
+    um.insert(QStringLiteral("from"), 1);
+    um.insert(QStringLiteral("through"), 1);
+    um.insert(QStringLiteral("start"), 1.24);
+    um.insert(QStringLiteral("end"), 1.96);
+    um.insert(QStringLiteral("reason"), QStringLiteral("filler"));
+    um.insert(QStringLiteral("cut"), true);
+    QJsonObject broken;
+    broken.insert(QStringLiteral("from"), 3);
+    QJsonObject line;
+    line.insert(QStringLiteral("id"), 4);
+    line.insert(QStringLiteral("clip"), 0);
+    line.insert(QStringLiteral("start"), 1.0);
+    line.insert(QStringLiteral("end"), 3.9);
+    line.insert(QStringLiteral("text"), QStringLiteral("So um we were building this."));
+    line.insert(QStringLiteral("keep"), true);
+    line.insert(QStringLiteral("cuts"), QJsonArray{um, broken});
+    QJsonObject root;
+    root.insert(QStringLiteral("lines"), QJsonArray{line});
+    {
+        QFile file(cutsPath);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write(QJsonDocument(root).toJson());
+    }
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_cutOut = dir;
+    backend.loadSelects(cutsPath);
+    QCOMPARE(backend.selects().size(), 1);
+    // A cut with no words or span is not one the render could make, so it is not offered.
+    QVariantList cuts = backend.selects().first().toMap().value(QStringLiteral("cuts")).toList();
+    QCOMPARE(cuts.size(), 1);
+    QCOMPARE(cuts.first().toMap().value(QStringLiteral("cut")).toBool(), true);
+    QCOMPARE(cuts.first().toMap().value(QStringLiteral("reason")).toString(), QStringLiteral("filler"));
+
+    const auto saved = [&cutsPath] {
+        QFile file(cutsPath);
+        if (!file.open(QIODevice::ReadOnly))
+            return QJsonObject();
+        return QJsonDocument::fromJson(file.readAll())
+            .object()
+            .value(QStringLiteral("lines"))
+            .toArray()
+            .first()
+            .toObject()
+            .value(QStringLiteral("cuts"))
+            .toArray()
+            .first()
+            .toObject();
+    };
+    // Putting the um back is saved at once, with its times, for the next render.
+    backend.toggleWordCut(4, 0);
+    cuts = backend.selects().first().toMap().value(QStringLiteral("cuts")).toList();
+    QCOMPARE(cuts.first().toMap().value(QStringLiteral("cut")).toBool(), false);
+    QCOMPARE(saved().value(QStringLiteral("cut")).toBool(), false);
+    QCOMPARE(saved().value(QStringLiteral("start")).toDouble(), 1.24);
+    QCOMPARE(saved().value(QStringLiteral("through")).toInt(), 1);
+    backend.toggleWordCut(4, 0);
+    QCOMPARE(saved().value(QStringLiteral("cut")).toBool(), true);
+    // A number that is not on the line does nothing.
+    backend.toggleWordCut(4, 7);
+    backend.toggleWordCut(9, 0);
+    QCOMPARE(saved().value(QStringLiteral("cut")).toBool(), true);
+
+    // A saved list carries the cuts too.
+    const QByteArray list = writeCutList(QStringLiteral("speech"), {QStringLiteral("/tmp/a.mp4")},
+                                         QStringLiteral("A talk"), backend.selects());
+    const QJsonObject listed = QJsonDocument::fromJson(list).object().value(QStringLiteral("lines")).toArray().first().toObject();
+    QCOMPARE(listed.value(QStringLiteral("cuts")).toArray().size(), 1);
+}
+
+void BackendTests::qmlLineMarksItsCutsAndAClickFlipsOne() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({QStringLiteral("/tmp/talk.mp4")});
+    backend.setCutClips({QStringLiteral("/tmp/talk.mp4")});
+    QVariantMap um;
+    um.insert(QStringLiteral("from"), 1);
+    um.insert(QStringLiteral("through"), 1);
+    um.insert(QStringLiteral("cut"), true);
+    QVariantMap again;
+    again.insert(QStringLiteral("from"), 2);
+    again.insert(QStringLiteral("through"), 3);
+    again.insert(QStringLiteral("cut"), false);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 4);
+    line.insert(QStringLiteral("clip"), 0);
+    line.insert(QStringLiteral("start"), 1.0);
+    line.insert(QStringLiteral("end"), 3.9);
+    line.insert(QStringLiteral("keep"), true);
+    line.insert(QStringLiteral("text"), QStringLiteral("So um we were we <were> building"));
+    line.insert(QStringLiteral("cuts"), QVariantList{um, again});
+    QVariantMap plain = line;
+    plain.insert(QStringLiteral("id"), 5);
+    plain.insert(QStringLiteral("text"), QStringLiteral("Nothing to cut <here>"));
+    plain.remove(QStringLiteral("cuts"));
+    backend.setSelects({line, plain});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(80);
+    // List rows hang off the list's content item, so they are found by walking what is drawn.
+    QList<QQuickItem *> labels;
+    std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+        if (item->objectName() == QLatin1String("lineWords") && item->isVisible())
+            labels.append(item);
+        for (QQuickItem *child : item->childItems())
+            walk(child);
+    };
+    walk(window->contentItem());
+    QCOMPARE(labels.size(), 2);
+    QQuickItem *marked = labels.at(0)->property("marked").toBool() ? labels.at(0) : labels.at(1);
+    QQuickItem *unmarked = marked == labels.at(0) ? labels.at(1) : labels.at(0);
+    // The taken um is struck through. The restart left in is a link without the strike.
+    QCOMPARE(marked->property("text").toString(),
+             QStringLiteral("So <a href=\"0\"><s>um</s></a> <a href=\"1\">we were</a> we &lt;were&gt; building"));
+    // A line with nothing to cut is plain text, so what was said is shown as it is.
+    QCOMPARE(unmarked->property("marked").toBool(), false);
+    QCOMPARE(unmarked->property("text").toString(), QStringLiteral("Nothing to cut <here>"));
+
+    QVERIFY(QMetaObject::invokeMethod(marked, "linkActivated", Q_ARG(QString, QStringLiteral("1"))));
+    QCOMPARE(backend.lastWordCutLine, 4);
+    QCOMPARE(backend.lastWordCut, 1);
 }
 
 QTEST_MAIN(BackendTests)

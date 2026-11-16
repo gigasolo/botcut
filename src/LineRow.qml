@@ -76,6 +76,34 @@ Item {
         }
     }
 
+    function plainWord(word) {
+        return String(word).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    }
+    // The line's words, with each cut on offer as a link named by its number.
+    function markedWords() {
+        var line = row.modelData
+        var words = String(line.text).split(" ")
+        var opens = {}
+        var closes = {}
+        for (var c = 0; c < line.cuts.length; c++) {
+            var cut = line.cuts[c]
+            if (cut.from < 0 || cut.through >= words.length || cut.from > cut.through)
+                continue
+            opens[cut.from] = { number: c, taken: cut.cut === true }
+            closes[cut.through] = cut.cut === true
+        }
+        var out = []
+        for (var i = 0; i < words.length; i++) {
+            var word = plainWord(words[i])
+            if (opens[i] !== undefined)
+                word = "<a href=\"" + opens[i].number + "\">" + (opens[i].taken ? "<s>" : "") + word
+            if (closes[i] !== undefined)
+                word += (closes[i] ? "</s>" : "") + "</a>"
+            out.push(word)
+        }
+        return out.join(" ")
+    }
+
     Column {
         id: body
         anchors.left: parent.left
@@ -101,15 +129,27 @@ Item {
                 Layout.minimumWidth: 36
             }
             Label {
+                objectName: "lineWords"
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignTop
                 Layout.topMargin: 4
-                text: row.modelData && row.modelData.text !== undefined ? row.modelData.text : ""
+                // A kept line with cuts inside it marks them: struck through when
+                // taken, underlined when left in. A click on one flips it.
+                readonly property bool marked: !row.dropped && row.modelData !== undefined && row.modelData !== null
+                                               && row.modelData.cuts !== undefined && row.modelData.cuts.length > 0
+                text: marked ? row.markedWords()
+                             : (row.modelData && row.modelData.text !== undefined ? row.modelData.text : "")
+                textFormat: marked ? Text.StyledText : Text.PlainText
+                linkColor: Qt.rgba(theme.foreground.r, theme.foreground.g, theme.foreground.b, 0.5)
                 color: theme.foreground
                 opacity: row.dropped ? 0.38 : 1
                 wrapMode: Text.WordWrap
                 font.pixelSize: 13
                 font.strikeout: row.dropped
+                onLinkActivated: link => {
+                    if (!backend.busy && row.modelData)
+                        backend.toggleWordCut(row.modelData.id, Number(link))
+                }
             }
             // The one control on every row. It reads the state it would leave.
             RowWord {

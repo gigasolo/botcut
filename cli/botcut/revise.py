@@ -37,7 +37,9 @@ HISTORY_TURNS = 12
 
 PACES = ("open", "measured", "tight", "frenzied")
 DELIVERS = ("none", "render", "captions", "short")
-_FIELDS = {"reply", "intent", "pace", "dip", "keep", "deliver", "covers"}
+# What to do with the cuts inside lines: fillers and words said twice.
+FILLERS = ("same", "cut", "keep")
+_FIELDS = {"reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers"}
 _KEEP_FIELDS = {"id", "reason"}
 _COVER_FIELDS = {"beat", "line", "through", "reason"}
 
@@ -49,7 +51,7 @@ REVISE_SCHEMA = {
         "schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["reply", "intent", "pace", "dip", "keep", "deliver", "covers"],
+            "required": ["reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers"],
             "properties": {
                 "reply": {"type": "string"},
                 "intent": {"type": "string"},
@@ -68,6 +70,7 @@ REVISE_SCHEMA = {
                     },
                 },
                 "deliver": {"type": "string", "enum": list(DELIVERS)},
+                "fillers": {"type": "string", "enum": list(FILLERS)},
                 "covers": {
                     "type": "array",
                     "items": {
@@ -96,6 +99,8 @@ REVISE_SYSTEM = (
     "Pace is open, measured, tight, or frenzied. "
     "Deliver is none, render, captions, or short. "
     "Deliver never changes the picture. "
+    "Fillers is same, cut, or keep. cut takes every filler sound and stumbled restart out of the kept "
+    "lines, keep leaves them all in, and same changes none of them. "
     "none only means not to mark render, captions, or short. "
     "Do not return times, padding, or any join other than dip on or off. "
     "A listed id is kept. An id you leave out is dropped. Do not invent ids. "
@@ -145,7 +150,15 @@ def apply_revise(lines: list[dict], keep: list[dict]) -> list[dict]:
 
 
 def parse_revise(payload: dict) -> dict:
-    if not isinstance(payload, dict) or not (set(payload) == _FIELDS or set(payload) == _FIELDS - {"covers"}):
+    # A proposal saved before cuts inside lines has no fillers, and one with no B-roll has no covers.
+    if not isinstance(payload, dict) or not (
+        _FIELDS - {"covers", "fillers"} <= set(payload) <= _FIELDS
+    ):
+        raise SystemExit("LLM response was not a revise")
+    fillers = payload.get("fillers", "same")
+    if fillers is None:
+        fillers = "same"
+    if fillers not in FILLERS:
         raise SystemExit("LLM response was not a revise")
     reply = payload["reply"]
     covers = payload.get("covers")
@@ -190,6 +203,7 @@ def parse_revise(payload: dict) -> dict:
         "keep": parsed_keep,
         "deliver": deliver,
         "covers": None if covers is None else [dict(item) for item in covers],
+        "fillers": fillers,
     }
 
 
@@ -292,6 +306,10 @@ def apply_proposal(cuts_path: str) -> None:
 
 def _land(cuts_path: str, doc: dict, lines: list[dict], result: dict) -> None:
     new_lines = apply_revise(lines, result["keep"])
+    if result.get("fillers") in ("cut", "keep"):
+        for line in new_lines:
+            if line.get("cuts"):
+                line["cuts"] = [{**cut, "cut": result["fillers"] == "cut"} for cut in line["cuts"]]
     out_dir = os.path.dirname(os.path.abspath(cuts_path))
     clips = doc.get("clips") or []
     beats = collect_beats(clips, load_beats(out_dir, clips))
@@ -409,6 +427,7 @@ def _fake(lines: list[dict], covers: list[dict] | None = None) -> dict:
         "keep": keep,
         "deliver": "render",
         "covers": list(covers or []),
+        "fillers": "same",
     }
 
 

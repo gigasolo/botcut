@@ -30,6 +30,7 @@ from botcut.media import (
 )
 from botcut.pick import (
     DEFAULT_INTENT,
+    cut_words,
     decision_lines,
     dropped_utterances,
     kept_utterances,
@@ -315,6 +316,7 @@ def run(
         segs = snap(segs, silences_by_clip)
     segs = tighten(segs, silences_by_clip, max_pause)
     lines = decision_lines(utts, chosen)
+    segs = cut_words(segs, lines)
     lines, segs = merge_cards(lines, segs, clips, movie)
     covers: list = []
     covers_reply = ""
@@ -520,7 +522,7 @@ def _segments_for_lines(
     segs, _unknown = segments(utts, keep, durations)
     if snap_edges:
         segs = snap(segs, silences)
-    return tighten(segs, silences, max_pause)
+    return cut_words(tighten(segs, silences, max_pause), lines)
 
 
 def _load_silences(out: str, clips: list) -> list:

@@ -96,36 +96,96 @@ def utterances(words_by_clip: list[list[dict]]) -> list[dict]:
     return found
 
 
+# A long shoot goes to the model in parts, so no request carries more lines
+# than it reads well, and every part gets its own stills.
+CHUNK_LINES = 150
+CHUNK_OVERLAP = 10
+CHUNK_WORKERS = 3
+
+
 def pick(utts: list[dict], intent: str = "") -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return [{"id": u["id"], "reason": "fake"} for u in utts]
     key = os.environ.get("XAI_API_KEY")
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
+    parts = chunks(utts)
+    if len(parts) == 1:
+        return _ask_keep(utts, intent, key)
+    from concurrent.futures import ThreadPoolExecutor
+
+    def ask(numbered: tuple[int, dict]) -> list[dict]:
+        number, part = numbered
+        note = (
+            f"\nThese lines are part {number} of {len(parts)} of the movie. "
+            "Lines before or after them exist and are judged separately."
+        )
+        kept = _ask_keep(part["lines"], intent, key, note)
+        return [item for item in kept if item["id"] in part["owned"]]
+
+    with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
+        answers = list(pool.map(ask, enumerate(parts, start=1)))
+    return [item for answer in answers for item in answer]
+
+
+def chunks(utts: list[dict], size: int = CHUNK_LINES, overlap: int = CHUNK_OVERLAP) -> list[dict]:
+    """Overlapping runs of lines. Each id is owned by exactly one run.
+
+    Neighbours share `overlap` lines so a retake across the join is seen whole.
+    The shared lines are split down the middle: each run decides the half
+    nearer its own body.
+    """
+    if len(utts) <= size:
+        return [{"lines": utts, "owned": {u["id"] for u in utts}}]
+    step = size - overlap
+    half = overlap // 2
+    parts = []
+    start = 0
+    while True:
+        end = min(len(utts), start + size)
+        last = end == len(utts)
+        own_from = start + (half if start > 0 else 0)
+        own_to = end if last else start + step + half
+        parts.append(
+            {
+                "lines": utts[start:end],
+                "owned": {u["id"] for u in utts[own_from:own_to]},
+            }
+        )
+        if last:
+            return parts
+        start += step
+
+
+def _ask_keep(utts: list[dict], intent: str, key: str, note: str = "") -> list[dict]:
     body = {
         **chat_fields(),
         "messages": [
-            {"role": "system", "content": system_prompt(intent)},
+            {"role": "system", "content": system_prompt(intent) + note},
             {"role": "user", "content": user_content(utts)},
         ],
         "response_format": KEEP_SCHEMA,
     }
-    response = post(
-        llm_url(),
-        key=key,
-        label="LLM",
-        read_timeout=120,
-        send=lambda: {
-            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            "json": body,
-        },
-    )
-    try:
-        content = response.json()["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        return [{"id": int(item["id"]), "reason": str(item["reason"])} for item in parsed["keep"]]
-    except (ValueError, KeyError, TypeError, IndexError):
-        raise SystemExit("LLM response was not a keep list")
+    # A reply that is not the schema is asked for once more before the cut stops.
+    for attempt in range(2):
+        response = post(
+            llm_url(),
+            key=key,
+            label="LLM",
+            read_timeout=120,
+            send=lambda: {
+                "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                "json": body,
+            },
+        )
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+            parsed = json.loads(content)
+            return [{"id": int(item["id"]), "reason": str(item["reason"])} for item in parsed["keep"]]
+        except (ValueError, KeyError, TypeError, IndexError):
+            if attempt == 0:
+                print("Trying again", flush=True)
+    raise SystemExit("LLM response was not a keep list")
 
 
 def segments(utts: list[dict], keep: list[dict], durations: list[float]) -> tuple[list[dict], list[int]]:

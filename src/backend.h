@@ -72,6 +72,9 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList recentCuts READ recentCuts NOTIFY recentsChanged)
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY apiKeyChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY renderedUnsavedChanged)
+    // The lines, the pace, the fade, or the B-roll changed since the movie on
+    // disk was rendered. Update movie renders them.
+    Q_PROPERTY(bool movieStale READ movieStale NOTIFY movieStaleChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
     // A plan cut's filmstrip is one block per cuts.json segment, not the baked file.
     Q_PROPERTY(bool planCut READ planCut NOTIFY planChanged)
@@ -123,6 +126,7 @@ public:
     bool trayMissing() const;
     bool apiKeySet() const;
     bool renderedUnsaved() const { return m_renderedHere && !m_cutSaved; }
+    bool movieStale() const { return m_movieStale; }
     bool roughCut() const;
     bool planCut() const { return m_plan.active(); }
     QObject *plan() { return &m_plan; }
@@ -168,6 +172,8 @@ public:
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void clearCover(int lineId);
     Q_INVOKABLE void renderSelects();
+    // Renders what changed, lines or a hand trim, over the movie this project already has.
+    Q_INVOKABLE void updateMovie();
     // Re-encode a hand-trimmed plan from its cuts.json. An untouched plan copies instead.
     Q_INVOKABLE void exportPlan();
     Q_INVOKABLE void writeCaptions();
@@ -234,6 +240,7 @@ signals:
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void renderedUnsavedChanged();
+    void movieStaleChanged();
     void loadError(const QString &message);
     void planChanged();
 
@@ -255,6 +262,17 @@ private:
     void copyCut(const QUrl &dst);
     void finishSavedCut(const QString &outPath);
     void noteCutSaved(const QString &path);
+    void setMovieStale(bool stale);
+    // A change that the movie on disk does not have yet. Nothing to mark with no movie.
+    void touchMovie();
+    // Where this project's movie goes: the path it already has, or a new name in the movies folder.
+    QString movieForProject(const QString &projectDir);
+    // Puts a finished rough cut in the movies folder and opens it there, with its plan.
+    void publishMovie(const QString &roughCut, const QString &cutsPath, bool fresh);
+    void openPublished(const QString &movie, const QString &cutsPath, bool fresh);
+    void sayCovers(const QString &cutsPath);
+    void adoptProjectTray();
+    void pruneProjects() const;
     void startThumbs();
     void stopThumbs();
     struct TrayThumbEntry {
@@ -384,7 +402,8 @@ private:
     QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Captions, Short, Propose, Revise, Card, Key };
+    bool m_movieStale = false;
+    enum class CutStage { Idle, Run, Render, Captions, Short, Propose, Revise, Card, Key };
     CutStage m_cutStage = CutStage::Idle;
     QString m_cardPath;
     QString m_cardPlace;

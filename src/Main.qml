@@ -82,6 +82,9 @@ ApplicationWindow {
             return qsTr("Cut");
         if (step === "lines" || step === "allDropped")
             return qsTr("Render");
+        // linesCurrent has none: the movie already has these lines.
+        if (step === "linesStale" || step === "movieStale")
+            return qsTr("Update movie");
         if (step === "movieUnsaved")
             return qsTr("Save…");
         if (step === "trimmed" || (step === "movieSaved" && !backend.roughCut))
@@ -94,9 +97,9 @@ ApplicationWindow {
             return false;
         if (step === "shotsReady")
             return backend.tray.length > 0 && !backend.trayMissing;
-        if (step === "lines")
+        if (step === "lines" || step === "linesStale")
             return keptLineCount() > 0;
-        if (step === "trimmed" || step === "movieSaved")
+        if (step === "trimmed" || step === "movieSaved" || step === "movieStale")
             return (backend.planCut ? backend.plan.duration : backend.duration) > 0;
         return true;
     }
@@ -120,6 +123,8 @@ ApplicationWindow {
         }
         if (step === "lines" && keptLineCount() > 0)
             backend.renderSelects();
+        else if (step === "linesStale" || step === "movieStale")
+            updateMovie();
         else if (step === "movieUnsaved" || step === "trimmed"
                  || (step === "movieSaved" && !backend.roughCut))
             exportVideo();
@@ -138,8 +143,11 @@ ApplicationWindow {
             return "working";
         if (backend.step !== "")
             return backend.step;
+        var behind = backend.planCut && (backend.movieStale || backend.plan.unexported);
         if (!gathering && hasVideo) {
-            if (backend.planCut ? backend.plan.unexported : timeline.unexported)
+            if (behind)
+                return "movieStale";
+            if (!backend.planCut && timeline.unexported)
                 return "trimmed";
             if (looseCut)
                 return "movieUnsaved";
@@ -149,8 +157,13 @@ ApplicationWindow {
             return "empty";
         if (missingShotCount() > 0)
             return "missingShot";
-        if (backend.selects.length > 0)
-            return keptLineCount() > 0 ? "lines" : "allDropped";
+        if (backend.selects.length > 0) {
+            if (keptLineCount() === 0)
+                return "allDropped";
+            if (!hasVideo || !backend.planCut)
+                return "lines";
+            return behind ? "linesStale" : "linesCurrent";
+        }
         if (backend.cutMode === "speech" && !backend.apiKeySet)
             return "needsKey";
         return "shotsReady";
@@ -172,10 +185,10 @@ ApplicationWindow {
             if (backend.cutMode !== "speech")
                 return count === 1 ? qsTr("Cut makes this one shot the movie.")
                                    : qsTr("Cut joins all %1 shots in this order.").arg(count);
-            return count === 1 ? qsTr("1 shot. Cut finds the lines worth keeping.")
-                               : qsTr("%1 shots, in this order. Cut finds the lines worth keeping.").arg(count);
+            return count === 1 ? qsTr("1 shot. Cut makes the movie from the lines worth keeping.")
+                               : qsTr("%1 shots, in this order. Cut makes the movie from the lines worth keeping.").arg(count);
         }
-        if (step === "lines") {
+        if (step === "lines" || step === "linesStale" || step === "linesCurrent") {
             var span = keptSpan();
             var kept = qsTr("%1 of %2 lines kept").arg(keptLineCount()).arg(backend.selects.length);
             if (span > 0)
@@ -185,14 +198,21 @@ ApplicationWindow {
                 kept += ", " + qsTr("B-roll over 1 stretch");
             else if (runs > 1)
                 kept += ", " + qsTr("B-roll over %1 stretches").arg(runs);
+            if (step === "linesStale")
+                return kept + qsTr(". The movie does not have these changes yet.");
+            if (step === "linesCurrent")
+                return kept + qsTr(". This is the movie as it stands.");
             return kept + qsTr(". Render makes the movie.");
         }
+        if (step === "movieStale")
+            return backend.movieStale ? qsTr("The lines changed since this movie was made. Update movie renders them.")
+                                      : qsTr("Trimmed by hand. Update movie renders the trim.");
         if (step === "allDropped")
             return qsTr("Every line is dropped. Keep one to render.");
         if (step === "movieUnsaved")
-            return qsTr("Your movie is ready. It's only in a temporary folder until you save it.");
+            return qsTr("Your movie is ready, but it could not be put in your movies folder. Save says where it goes.");
         if (step === "trimmed")
-            return qsTr("Trimmed by hand. Export writes a new file. Captions and the short wait until then.");
+            return qsTr("Trimmed by hand. Export writes a new file.");
         if (step === "movieSaved")
             return qsTr("Saved as %1.").arg(fileName(backend.source));
         if (step === "empty")
@@ -609,12 +629,21 @@ ApplicationWindow {
         } else if (backend.duration <= 0) {
             return;
         }
+        if (backend.planCut && (backend.plan.unexported || backend.movieStale)) {
+            updateMovie();
+            return;
+        }
         movie.player.pause();
         planPlaying = false;
-        if (backend.planCut && backend.plan.unexported)
-            backend.exportPlan();
-        else
-            backend.exportDialog();
+        backend.exportDialog();
+    }
+    // Lines or a handle changed. Render them over the movie this plan already has.
+    function updateMovie() {
+        if (backend.busy)
+            return;
+        movie.player.pause();
+        planPlaying = false;
+        backend.updateMovie();
     }
     function ensureAudioOutput() {
         if (audioOutput === null && (win.hasVideo || win.previewing)) {
@@ -1715,7 +1744,8 @@ ApplicationWindow {
                             raised: true
                             text: qsTr("Cut again\u2026")
                             visible: !win.running && win.gathering
-                                     && (win.displayStep === "lines" || win.displayStep === "allDropped")
+                                     && (win.displayStep === "lines" || win.displayStep === "allDropped"
+                                         || win.displayStep === "linesStale" || win.displayStep === "linesCurrent")
                             enabled: !backend.busy && backend.tray.length > 0 && !backend.trayMissing
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
@@ -1753,7 +1783,8 @@ ApplicationWindow {
                         }
                         ActionButton {
                             raised: true
-                            text: qsTr("Export another size\u2026")
+                            objectName: "saveCopyButton"
+                            text: qsTr("Save a copy\u2026")
                             visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
                                      && !win.looseCut && !win.unexported
                             enabled: !backend.busy && (backend.planCut ? backend.plan.duration : backend.duration) > 0
@@ -1836,7 +1867,7 @@ ApplicationWindow {
         function onGatheringChanged() {
             if (backend.gathering || !backend.planCut || !win.hasVideo)
                 return;
-            // Back on Watch. The filmstrip time is the picture, not the head of the file.
+            // Back on Movie. The filmstrip time is the picture, not the head of the file.
             win.armPlan(editBar.playheadSec, false);
         }
         function onExportDone(path) {

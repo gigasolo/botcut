@@ -4,6 +4,15 @@ User-facing changes in this fork. Dates are the days the work landed on `master`
 
 ## 2026-11-15
 
+- One press makes the movie. **Cut** transcribes, chooses the lines, lays the B-roll, renders, and puts the movie in `~/Videos/BotCut`, named after the first shot. It opens on Movie, playing. There is no stop at Lines, no Render press, and no save dialog on the way.
+- Lines and the chat are where you change it afterwards. After a line, the pace, the fade, or a handle changes, the filled button reads **Update movie** on Lines and on Movie, and it renders over the same file. When the movie already has the lines, Lines has no filled button.
+- A cut is kept as a project under `~/.local/share/botcut/projects`, not in `/tmp`. A movie opened from Recents after a restart comes back with its lines, its shots, and its chat history file, and can be changed again. A project whose movie has been deleted is cleaned up after a day.
+- **Save a copy…** replaces **Export another size…**. It copies the movie as it stands, or re-encodes it smaller, and leaves the movie on screen alone.
+- A render that fails after the lines were chosen keeps the lines. Only the render is left to try again.
+- The progress bar runs once across the whole cut, through transcribing, choosing, B-roll, and rendering. It used to stay empty until the render.
+- Shots are transcribed four at a time on xAI. Stills are grabbed four at a time and reused on a second run.
+- A shoot of more than 150 lines is sent to the model in overlapping parts, each with its own stills, and the answers are merged. A reply that is not the expected shape is asked for once more before the cut stops.
+- A re-exported shot with the same name, or another Whisper model, no longer gets the old transcript. A sound file or B-roll file ffmpeg cannot read stops the cut and says so, where it used to pass as "no pauses" or "no cuts".
 - A job that fails now says why and keeps saying it. The reason stays in the action bar, in the accent color, until you try again or move on. Before, a bad key, no network, or a failed cut fell back to the usual sentence with no word of what happened.
 - Stop sits beside the progress button and ends the running job, along with any ffmpeg it started. It is not a failure and says nothing.
 - Saving an xAI key asks xAI whether it accepts it. A refused key is forgotten and Settings says so. With no network the key is kept. Save key does nothing with an empty field, Forget key is its own button, and Done keeps a key you typed but did not save.

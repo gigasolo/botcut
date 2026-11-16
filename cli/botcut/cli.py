@@ -47,6 +47,11 @@ from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
 from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
 
 
+# Shots sent to the transcriber at once, and stills grabbed at once.
+TRANSCRIBE_WORKERS = 4
+STILL_WORKERS = 4
+
+
 def check_key() -> None:
     """Exit 0 when xAI accepts the key. BOTCUT_FAKE accepts any key, offline."""
     key = os.environ.get("XAI_API_KEY")
@@ -236,37 +241,66 @@ def run(
     backend = "local" if stt == "local" else "xai"
     work = os.path.join(out, "work")
     os.makedirs(work, exist_ok=True)
-    words_by_clip = []
-    silences_by_clip = []
+    words_by_clip: list[list] = [[] for _ in clips]
+    silences_by_clip: list[list] = [[] for _ in clips]
     beats_by_clip: dict[int, list] = {}
-    speech = [clip for clip in clips if not is_card(clip["path"]) and not is_broll(clip)]
-    speech_i = 0
+    label = _stt_label(fake, stt, whisper_model)
     for index, clip in enumerate(clips):
-        stem = Path(clip["path"]).stem
-        if is_card(clip["path"]):
-            words_by_clip.append([])
-            silences_by_clip.append([])
-            continue
+        # A card has nothing heard or measured, so nothing is kept for it.
+        if not is_card(clip["path"]):
+            _drop_stale_caches(work, index, clip, label)
+    speech = [
+        (index, clip)
+        for index, clip in enumerate(clips)
+        if not is_card(clip["path"]) and not is_broll(clip)
+    ]
+    for index, clip in enumerate(clips):
         if is_broll(clip):
             # B-roll is picture. It is not transcribed and never becomes a line.
-            words_by_clip.append([])
-            silences_by_clip.append([])
             if not beats_by_clip:
                 print("Reading beats", flush=True)
-            beats_by_clip[index] = _beats_for_clip(work, index, stem, clip)
-            continue
-        speech_i += 1
-        print(f"Transcribing {speech_i}/{len(speech)} {Path(clip['path']).name}", flush=True)
+            beats_by_clip[index] = _beats_for_clip(work, index, Path(clip["path"]).stem, clip)
+
+    def listen(index: int, clip: dict) -> tuple[list, list]:
+        stem = Path(clip["path"]).stem
         if fake:
             payload = transcribe_fake()
             cache = word_cache_candidates(work, index, stem, "fake")[0]
             Path(cache).write_text(json.dumps(payload) + "\n")
-            words_by_clip.append(payload["words"])
-            silences_by_clip.append([])
-            continue
+            return payload["words"], []
         flac = os.path.join(work, f"{index}-{stem}.flac")
-        words_by_clip.append(_words_for_clip(work, index, stem, backend, flac, clip, whisper_model))
-        silences_by_clip.append(_silences_for_clip(work, index, stem, flac, clip))
+        words = _words_for_clip(work, index, stem, backend, flac, clip, whisper_model)
+        return words, _silences_for_clip(work, index, stem, flac, clip)
+
+    def said(count: int) -> None:
+        # The window reads this as progress: the shot being worked on, of how many.
+        name = Path(speech[count - 1][1]["path"]).name
+        print(f"Transcribing {count}/{len(speech)} {name}", flush=True)
+
+    # xAI transcribes several shots at once. Whisper on this machine takes them one by one.
+    workers = 1 if fake or backend == "local" else min(TRANSCRIBE_WORKERS, len(speech))
+    if speech:
+        said(1)
+    if workers <= 1:
+        for count, (index, clip) in enumerate(speech, start=1):
+            if count > 1:
+                said(count)
+            words_by_clip[index], silences_by_clip[index] = listen(index, clip)
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            waiting = {pool.submit(listen, index, clip): index for index, clip in speech}
+            try:
+                for done, future in enumerate(as_completed(waiting), start=1):
+                    index = waiting[future]
+                    words_by_clip[index], silences_by_clip[index] = future.result()
+                    if done < len(speech):
+                        said(done + 1)
+            except BaseException:
+                # One shot failing stops the cut. The shots not yet started are not sent.
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
 
     utts = utterances(words_by_clip)
     movie = intent.strip() or DEFAULT_INTENT
@@ -354,17 +388,26 @@ def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
     """One JPEG at the middle of each line. A missed frame does not stop the cut."""
     from botcut.media import grab_still
 
+    from concurrent.futures import ThreadPoolExecutor
+
     print("Reading pictures", flush=True)
     os.makedirs(directory, exist_ok=True)
-    for utt in utts:
+
+    def grab(utt: dict) -> None:
         clip = clips[int(utt["clip"])]
         dur = float(clip.get("duration") or 0)
         mid = (float(utt["start"]) + float(utt["end"])) / 2
         if dur > 0:
             mid = min(max(0.0, mid), max(0.0, dur - 0.05))
         dest = os.path.join(directory, f"{int(utt['id'])}.jpg")
-        if grab_still(clip["path"], mid, dest):
+        # A still from an earlier run of this cut is the same frame. One older than the shot is not.
+        fresh = os.path.isfile(dest) and os.path.getmtime(dest) >= os.path.getmtime(clip["path"])
+        if fresh or grab_still(clip["path"], mid, dest):
             utt["still"] = os.path.abspath(dest)
+
+    # Each still is one short ffmpeg seek, so several at once is the quick way through a long list.
+    with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
+        list(pool.map(grab, utts))
 
 
 def _write_doc(out: str, doc: dict) -> str:
@@ -507,6 +550,33 @@ def _words_for_clip(
     cache = word_cache_candidates(work, index, stem, backend)[0]
     Path(cache).write_text(json.dumps(result) + "\n")
     return result["words"]
+
+
+def _drop_stale_caches(work: str, index: int, clip: dict, stt_label: str) -> None:
+    """Forget what was heard in a shot if the file, or the transcriber, has changed.
+
+    Caches are named by position and file name. A re-exported file with the
+    same name, or another Whisper model, must not be answered from the old one.
+    """
+    stem = Path(clip["path"]).stem
+    stamp_path = os.path.join(work, f"{index}-{stem}.stamp.json")
+    try:
+        info = os.stat(clip["path"])
+    except OSError:
+        return
+    stamp = {"size": info.st_size, "mtime_ns": info.st_mtime_ns, "stt": stt_label}
+    try:
+        known = json.loads(Path(stamp_path).read_text())
+    except (OSError, ValueError):
+        known = None
+    if known == stamp:
+        return
+    if known is not None:
+        prefix = f"{index}-{stem}."
+        for name in os.listdir(work):
+            if name.startswith(prefix) and name != os.path.basename(stamp_path):
+                os.remove(os.path.join(work, name))
+    Path(stamp_path).write_text(json.dumps(stamp) + "\n")
 
 
 def _beats_for_clip(work: str, index: int, stem: str, clip: dict) -> list:

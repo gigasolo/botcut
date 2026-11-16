@@ -135,6 +135,9 @@ def scene_changes(path: str, threshold: float = 0.3) -> list[float]:
         capture_output=True,
         text=True,
     )
+    # A failed read must not pass for a file with no cuts in it.
+    if proc.returncode != 0:
+        raise SystemExit(f"Could not read {os.path.basename(path)}: {ffmpeg_error_detail(proc.stderr or '')}")
     return parse_scene_changes(proc.stderr or "")
 
 
@@ -172,6 +175,9 @@ def silences(flac: str, duration: float) -> list[tuple[float, float]]:
         capture_output=True,
         text=True,
     )
+    # A failed read must not pass for a recording with no pauses in it.
+    if proc.returncode != 0:
+        raise SystemExit(f"Could not read the sound: {ffmpeg_error_detail(proc.stderr or '')}")
     return parse_silences(proc.stderr or "", duration)
 
 

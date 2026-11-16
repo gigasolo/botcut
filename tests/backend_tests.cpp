@@ -182,6 +182,7 @@ public:
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY infoChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY infoChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
+    Q_PROPERTY(bool movieStale READ movieStale NOTIFY infoChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY infoChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY infoChanged)
     Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY infoChanged)
@@ -238,6 +239,14 @@ public:
     bool apiKeySet() const { return false; }
     bool renderedUnsaved() const { return m_renderedUnsaved; }
     bool roughCut() const { return m_roughCut; }
+    bool movieStale() const { return m_movieStale; }
+    void setMovieStale(bool stale) {
+        m_movieStale = stale;
+        emit infoChanged();
+    }
+    Q_INVOKABLE void updateMovie() { ++updateCount; }
+    int updateCount = 0;
+    bool m_movieStale = false;
     void setRoughCut(bool value) {
         if (m_roughCut == value)
             return;
@@ -722,6 +731,11 @@ private slots:
     void qmlStopButtonCancelsTheJob();
     void refusedKeyIsForgotten();
     void qmlSettingsSavesOnlyATypedKey();
+    void cutMakesTheMovieInOnePress();
+    void aWholeCutIsOneProgressBar();
+    void failedRenderKeepsTheLines();
+    void recentMovieComesBackWithItsProject();
+    void qmlUpdateMovieIsTheButtonWhenTheMovieIsBehind();
     void qmlQuitAsksWhileAJobIsRunning();
     void grabWindowScreens();
 
@@ -744,6 +758,9 @@ void BackendTests::initTestCase() {
 
     QVERIFY2(m_dir.isValid(), "temporary directory is valid");
     QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, m_dir.path());
+    // Projects and finished movies stay inside the test folder, never the person's own.
+    qputenv("XDG_DATA_HOME", m_dir.filePath(QStringLiteral("data")).toUtf8());
+    qputenv("BOTCUT_MOVIES_DIR", m_dir.filePath(QStringLiteral("movies")).toUtf8());
     m_videoPath = m_dir.filePath(QStringLiteral("clip.mp4"));
 
     QVERIFY2(!QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty(), "ffmpeg is available");
@@ -2003,7 +2020,7 @@ void BackendTests::showFileOpensTheSavedFolder() {
             labels.append(row.text);
         QCOMPARE(labels, (QStringList{QStringLiteral("Show the file"), QStringLiteral("Captions"),
                                       QStringLiteral("Vertical short"),
-                                      QStringLiteral("Export another size…")}));
+                                      QStringLiteral("Save a copy…")}));
         for (const FooterButton &row : rows)
             QVERIFY(!row.filled);
         QVERIFY(!visibleItemWithText(window, QStringLiteral("Export…")));
@@ -2698,8 +2715,7 @@ void BackendTests::listsAsksBeforeLeavingAHandTrim() {
         QTest::qWait(80);
         QVERIFY(window->property("unexported").toBool());
 
-        const QString sentence = QStringLiteral(
-            "Trimmed by hand. Export writes a new file. Captions and the short wait until then.");
+        const QString sentence = QStringLiteral("Trimmed by hand. Export writes a new file.");
         QQuickItem *footer = visibleItemWithText(window, sentence);
         QVERIFY(footer);
         QVERIFY(footer->isVisible());
@@ -3378,7 +3394,7 @@ void BackendTests::pictureSentenceUnderThePicture() {
         QVERIFY(movieSentence);
         QTRY_VERIFY_WITH_TIMEOUT(movieSentence->isVisible(), 3000);
         QCOMPARE(movieSentence->property("text").toString(),
-                 QStringLiteral("Your movie is ready. It's only in a temporary folder until you save it."));
+                 QStringLiteral("Your movie is ready, but it could not be put in your movies folder. Save says where it goes."));
         QVERIFY(!watchWindow->findChild<QQuickItem *>(QStringLiteral("lineTimeline"))->isVisible());
     }
 }
@@ -4152,7 +4168,8 @@ void BackendTests::assembleLaunchOmitsBroll() {
     QCOMPARE(args.at(pause + 3), roomPath);
     QCOMPARE(args.count(QStringLiteral("--b-roll-file")), 1);
     QCOMPARE(args.at(args.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("mix"));
-    QCOMPARE(args.last(), QStringLiteral("--decide"));
+    // One press makes the movie, so the cut never stops at the line list.
+    QVERIFY(!args.contains(QStringLiteral("--decide")));
     QVERIFY(!args.contains(QStringLiteral("not-a-real-key")));
     backend.setBrollMix(false);
     backend.startCut();
@@ -4160,7 +4177,7 @@ void BackendTests::assembleLaunchOmitsBroll() {
     const QStringList voiceArgs = backend.m_cutProcess->arguments();
     QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--b-roll-sound")) + 1), QStringLiteral("voice"));
     QCOMPARE(voiceArgs.at(voiceArgs.indexOf(QStringLiteral("--max-pause")) + 2), QStringLiteral("--b-roll-file"));
-    QCOMPARE(voiceArgs.last(), QStringLiteral("--decide"));
+    QVERIFY(!voiceArgs.contains(QStringLiteral("--decide")));
     QVERIFY(!voiceArgs.contains(QStringLiteral("not-a-real-key")));
     backend.setBrollMix(true);
 
@@ -7969,6 +7986,282 @@ void BackendTests::qmlSettingsSavesOnlyATypedKey() {
     QCOMPARE(backend.savedKeys.first().trimmed(), QStringLiteral("xai-typed"));
     QCOMPARE(backend.keyCheckCount, 1);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
+}
+
+namespace {
+// Stands in for botcut-cli: `run` writes a two-line cuts.json and a rough cut
+// into --out, and `render` writes the rough cut again. With failRender, the
+// line list is written and the render fails.
+QString writeCutStub(const QString &path, const QString &talk, bool failRender = false) {
+    QJsonObject clip;
+    clip.insert(QStringLiteral("index"), 0);
+    clip.insert(QStringLiteral("path"), talk);
+    clip.insert(QStringLiteral("duration"), 4.0);
+    QJsonArray segments;
+    QJsonArray lines;
+    for (int id = 1; id <= 2; ++id) {
+        QJsonObject segment;
+        segment.insert(QStringLiteral("clip"), 0);
+        segment.insert(QStringLiteral("start"), id * 1.0 - 0.5);
+        segment.insert(QStringLiteral("end"), id * 1.0 + 0.4);
+        segments.append(segment);
+        QJsonObject line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("clip"), 0);
+        line.insert(QStringLiteral("start"), id * 1.0 - 0.5);
+        line.insert(QStringLiteral("end"), id * 1.0 + 0.4);
+        line.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(id));
+        line.insert(QStringLiteral("keep"), true);
+        line.insert(QStringLiteral("reason"), QStringLiteral("story"));
+        lines.append(line);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("clips"), QJsonArray{clip});
+    root.insert(QStringLiteral("segments"), segments);
+    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("covers_reply"), QStringLiteral("I stayed on you throughout."));
+    const QString cutsTemplate = path + QStringLiteral(".cuts.json");
+    QFile file(cutsTemplate);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return {};
+    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    file.close();
+    QByteArray body = "#!/bin/sh\n"
+                      "if [ \"$1\" = run ]; then\n"
+                      "  out=''; prev=''\n"
+                      "  for a in \"$@\"; do [ \"$prev\" = --out ] && out=\"$a\"; prev=\"$a\"; done\n"
+                      "  mkdir -p \"$out\"\n"
+                      "  echo 'Transcribing 1/1 talk'\n"
+                      "  cp '" + cutsTemplate.toUtf8() + "' \"$out/cuts.json\"\n"
+                      "  echo '2 kept, 0 dropped'\n";
+    if (failRender) {
+        body += "  echo 'ffmpeg failed' >&2\n  exit 1\n";
+    } else {
+        body += "  echo 'Rendering 50%'\n  cp '" + talk.toUtf8() + "' \"$out/rough_cut.mp4\"\n";
+    }
+    body += "elif [ \"$1\" = render ]; then\n"
+            "  cp '" + talk.toUtf8() + "' \"$2/rough_cut.mp4\"\n"
+            "fi\n"
+            "exit 0\n";
+    return writeStubScript(path, body);
+}
+}
+
+void BackendTests::cutMakesTheMovieInOnePress() {
+    const QString talk = makeVideo(QStringLiteral("press-talk.mp4"), 4.0, true);
+    QVERIFY(!talk.isEmpty());
+    const QString stub = writeCutStub(m_dir.filePath(QStringLiteral("press-stub.sh")), talk);
+    QVERIFY(!stub.isEmpty());
+    const QString movies = m_dir.filePath(QStringLiteral("movies"));
+    const QString movie = QDir(movies).filePath(QStringLiteral("press-talk.mp4"));
+    QFile::remove(movie);
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_tray = {talk};
+    backend.setCutMode(QStringLiteral("speech"));
+    backend.setApiKey(QStringLiteral("supersecret"));
+    backend.m_launchProgram = stub;
+    QSignalSpy doneSpy(&backend, &Backend::exportDone);
+    QSignalSpy failedSpy(&backend, &Backend::exportFailed);
+
+    // One press: the cut renders and the movie lands in the movies folder, with no dialog.
+    backend.startCut();
+    QVERIFY(backend.busy());
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+    QCOMPARE(failedSpy.count(), 0);
+    QCOMPARE(backend.lastError(), QString());
+    QVERIFY(QFileInfo(movie).isFile());
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(movie));
+    QCOMPARE(doneSpy.count(), 1);
+    QCOMPARE(doneSpy.at(0).at(0).toString(), movie);
+    QVERIFY(!backend.renderedUnsaved());
+    QVERIFY(!backend.gathering());
+    QVERIFY(backend.planCut());
+    QCOMPARE(backend.step(), QStringLiteral("movieSaved"));
+    // The lines are there to change it, and the editor's sentence opens the chat.
+    QCOMPARE(backend.selects().size(), 2);
+    QCOMPARE(backend.chat().size(), 1);
+    QCOMPARE(backend.chat().first().toMap().value(QStringLiteral("text")).toString(),
+             QStringLiteral("I stayed on you throughout."));
+    // The project is kept where a reboot does not take it.
+    const QString projects = m_dir.filePath(QStringLiteral("data/botcut/projects"));
+    QVERIFY2(backend.m_cutOut.startsWith(projects), qPrintable(backend.m_cutOut));
+    QVERIFY(QFileInfo(QDir(backend.m_cutOut).filePath(QStringLiteral("cuts.json"))).isFile());
+    QFile project(QDir(backend.m_cutOut).filePath(QStringLiteral("project.json")));
+    QVERIFY(project.open(QIODevice::ReadOnly));
+    QCOMPARE(QJsonDocument::fromJson(project.readAll()).object().value(QStringLiteral("movie")).toString(), movie);
+    const QString firstProject = backend.m_cutOut;
+    waitForBackgroundWork(backend);
+
+    // Dropping a line puts the movie behind the lines, on either view.
+    QVERIFY(!backend.movieStale());
+    backend.dropSelect(2);
+    QVERIFY(backend.movieStale());
+    QCOMPARE(backend.step(), QStringLiteral("movieStale"));
+    backend.showShots();
+    QCOMPARE(backend.step(), QStringLiteral("linesStale"));
+
+    // Update movie renders the same project over the same file.
+    backend.updateMovie();
+    QVERIFY(backend.busy());
+    QCOMPARE(backend.m_cutProcess->arguments().first(), QStringLiteral("render"));
+    QCOMPARE(backend.m_cutProcess->arguments().at(1), firstProject);
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+    QVERIFY(!backend.movieStale());
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(movie));
+    QCOMPARE(backend.step(), QStringLiteral("movieSaved"));
+    QCOMPARE(backend.selects().size(), 2);
+    QVERIFY(!backend.selects().at(1).toMap().value(QStringLiteral("keep")).toBool());
+    QCOMPARE(QDir(movies).entryList({QStringLiteral("press-talk*.mp4")}, QDir::Files).size(), 1);
+    waitForBackgroundWork(backend);
+    backend.showShots();
+    QCOMPARE(backend.step(), QStringLiteral("linesCurrent"));
+
+    // A second cut of the same shots is a new project and a new file, not an overwrite.
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+    QVERIFY(backend.m_cutOut != firstProject);
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(QDir(movies).filePath(QStringLiteral("press-talk 2.mp4"))));
+    QVERIFY(QFileInfo(movie).isFile());
+    waitForBackgroundWork(backend);
+}
+
+void BackendTests::failedRenderKeepsTheLines() {
+    const QString talk = makeVideo(QStringLiteral("fail-talk.mp4"), 4.0, true);
+    QVERIFY(!talk.isEmpty());
+    const QString stub = writeCutStub(m_dir.filePath(QStringLiteral("fail-render-stub.sh")), talk, true);
+    QVERIFY(!stub.isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_tray = {talk};
+    backend.setCutMode(QStringLiteral("speech"));
+    backend.setApiKey(QStringLiteral("supersecret"));
+    backend.m_launchProgram = stub;
+
+    backend.startCut();
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+    // The transcript and the choices are not thrown away with the render.
+    QCOMPARE(backend.lastError(), QStringLiteral("ffmpeg failed"));
+    QCOMPARE(backend.selects().size(), 2);
+    QVERIFY(backend.source().isEmpty());
+    QCOMPARE(backend.step(), QStringLiteral("lines"));
+    QCOMPARE(backend.chat().size(), 1);
+}
+
+void BackendTests::recentMovieComesBackWithItsProject() {
+    const QString talk = makeVideo(QStringLiteral("again-talk.mp4"), 4.0, true);
+    QVERIFY(!talk.isEmpty());
+    const QString stub = writeCutStub(m_dir.filePath(QStringLiteral("again-stub.sh")), talk);
+    QVERIFY(!stub.isEmpty());
+    QString movie;
+    QString project;
+    {
+        ThumbProvider provider;
+        Backend backend(&provider, new FakeFilePicker);
+        backend.m_tray = {talk};
+        backend.setCutMode(QStringLiteral("speech"));
+        backend.setApiKey(QStringLiteral("supersecret"));
+        backend.m_launchProgram = stub;
+        backend.startCut();
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+        movie = backend.source().toLocalFile();
+        project = backend.m_cutOut;
+        QVERIFY(QFileInfo(movie).isFile());
+        waitForBackgroundWork(backend);
+    }
+
+    // Another day: the window starts empty and the movie is opened from Recents.
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    QVERIFY(backend.tray().isEmpty());
+    backend.watchRecent(movie);
+    QCOMPARE(backend.source(), QUrl::fromLocalFile(movie));
+    QVERIFY(backend.planCut());
+    QCOMPARE(backend.selects().size(), 2);
+    // Its shots and its project come back with it, so the lines can still be changed.
+    QCOMPARE(backend.tray(), (QStringList{talk}));
+    QCOMPARE(backend.m_cutOut, project);
+    backend.dropSelect(1);
+    QVERIFY(backend.movieStale());
+    QFile cuts(QDir(project).filePath(QStringLiteral("cuts.json")));
+    QVERIFY(cuts.open(QIODevice::ReadOnly));
+    const QJsonArray lines = QJsonDocument::fromJson(cuts.readAll()).object().value(QStringLiteral("lines")).toArray();
+    QCOMPARE(lines.at(0).toObject().value(QStringLiteral("keep")).toBool(), false);
+    waitForBackgroundWork(backend);
+}
+
+void BackendTests::qmlUpdateMovieIsTheButtonWhenTheMovieIsBehind() {
+    ShortcutBackend backend(QUrl::fromLocalFile(m_dir.filePath(QStringLiteral("shortcut-placeholder.mp4"))), 20.0);
+    backend.setPlanCut(true);
+    backend.setRoughCut(true);
+    QList<PlanFilm::Segment> segments;
+    PlanFilm::Segment head;
+    head.clip = 0;
+    head.path = QStringLiteral("/tmp/shot.mp4");
+    head.fileDuration = 60;
+    head.start = 10;
+    head.end = 14;
+    segments.append(head);
+    backend.planFilm.load(segments);
+    QmlHarness harness(backend);
+    QQuickWindow *window = showEditor(harness, backend);
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    QQuickItem *filled = window->findChild<QQuickItem *>(QStringLiteral("cutButton"));
+    QQuickItem *sentence = window->findChild<QQuickItem *>(QStringLiteral("actionSentence"));
+    QVERIFY(filled && sentence);
+    // A movie that has its lines needs nothing pressed.
+    QCOMPARE(window->property("displayStep").toString(), QStringLiteral("movieSaved"));
+    QVERIFY(!filled->isVisible());
+
+    backend.setMovieStale(true);
+    QTRY_COMPARE(window->property("displayStep").toString(), QStringLiteral("movieStale"));
+    QVERIFY(filled->isVisible());
+    QCOMPARE(filled->property("text").toString(), QStringLiteral("Update movie"));
+    QCOMPARE(sentence->property("text").toString(),
+             QStringLiteral("The lines changed since this movie was made. Update movie renders them."));
+    // Captions and the short are of the movie on disk, so they wait for the update.
+    QVERIFY(!window->findChild<QQuickItem *>(QStringLiteral("captionsButton"))->isVisible());
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(filled));
+    QTRY_COMPARE(backend.updateCount, 1);
+
+    backend.setMovieStale(false);
+    QTRY_COMPARE(window->property("displayStep").toString(), QStringLiteral("movieSaved"));
+    QVERIFY(!filled->isVisible());
+}
+
+void BackendTests::aWholeCutIsOneProgressBar() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_busy = true;
+    backend.m_cutStage = Backend::CutStage::Run;
+    // The bar moves forward through the stages. It does not start over at each one.
+    QList<qreal> seen;
+    for (const QString &line : {QStringLiteral("Reading files"), QStringLiteral("Transcribing 1/2 a.mp4"),
+                                QStringLiteral("Transcribing 2/2 b.mp4"), QStringLiteral("Choosing takes"),
+                                QStringLiteral("Choosing covers"), QStringLiteral("Rendering 0%"),
+                                QStringLiteral("Rendering 50%"), QStringLiteral("Rendering 100%")}) {
+        backend.setStatus(line);
+        seen.append(backend.progress());
+    }
+    for (int i = 1; i < seen.size(); ++i)
+        QVERIFY2(seen.at(i) > seen.at(i - 1), qPrintable(QStringLiteral("stage %1").arg(i)));
+    QVERIFY(seen.first() > 0.0);
+    QVERIFY(seen.last() < 1.0);
+    // The count of kept lines is a result. It leaves the job and the bar where they were.
+    backend.setStatus(QStringLiteral("Choosing takes"));
+    const qreal choosing = backend.progress();
+    backend.setStatus(QStringLiteral("12 kept, 3 dropped"));
+    QCOMPARE(backend.job(), QStringLiteral("choosing"));
+    QCOMPARE(backend.progress(), choosing);
+
+    // A render on its own is its own bar.
+    backend.m_cutStage = Backend::CutStage::Render;
+    backend.setStatus(QStringLiteral("Rendering 50%"));
+    QCOMPARE(backend.progress(), 0.5);
+    backend.m_cutStage = Backend::CutStage::Idle;
+    backend.m_busy = false;
 }
 
 QTEST_MAIN(BackendTests)

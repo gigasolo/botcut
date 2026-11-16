@@ -55,21 +55,21 @@ Item {
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Cut finds the lines worth keeping.")
+                text: qsTr("Cut makes the movie. It keeps the lines worth saying and saves the result in your movies folder.")
             }
             Label {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Drop lines or tell BotCut what to change, then Render.")
+                text: qsTr("To change it, drop or keep lines, or tell BotCut what you want. Then Update movie.")
             }
             Label {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Watch, trim by hand if you need to, then Save.")
+                text: qsTr("Trim an edge by hand on the filmstrip if you need to.")
             }
 
             Row {

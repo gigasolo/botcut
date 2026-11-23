@@ -534,6 +534,87 @@ def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> lis
     return [item for answer in answers for item in answer]
 
 
+# A shoot that fits in one request is read and cut in the same one: every retake is
+# already side by side there, so a first pass that only outlines it is time spent twice.
+FOLD_EFFORT = "medium"
+
+FOLD_NOTE = (
+    "\nRead all of it first, the way an editor reads a shoot before cutting it. "
+    "Besides keep, return the beats of the movie in order, each with a title of two to five words "
+    "and its first and last line ids. "
+    "Return as retakes every group of lines that say the same thing, however far apart, each group's "
+    "ids in order, and keep one of each group: the last complete clean take unless an earlier one is "
+    "clearly better. "
+    "Return as hook the id of the one line that would open the movie best if it were moved to the "
+    "very front, a complete thought that makes a viewer want the rest, or -1. "
+    "Return as target_seconds the length the movie sentence asks for, in seconds, or 0 when it names "
+    "no length. When it names one, keep about that many seconds of lines, the ones the movie cannot "
+    "do without; each line shows its start and end in seconds, and the length wins over keeping every beat. "
+    "Do not invent ids. Do not return times."
+)
+
+FOLD_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "cut",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["beats", "retakes", "hook", "target_seconds", "keep"],
+            "properties": {
+                **OUTLINE_SCHEMA["json_schema"]["schema"]["properties"],
+                **KEEP_SCHEMA["json_schema"]["schema"]["properties"],
+            },
+        },
+    },
+}
+
+
+def folds(utts: list[dict]) -> bool:
+    """True when the shoot is read and cut in one request. BOTCUT_FOLD=0 keeps the two apart."""
+    if os.environ.get("BOTCUT_FAKE") == "1" or os.environ.get("BOTCUT_FOLD", "").strip() == "0":
+        return False
+    return OUTLINE_MIN_LINES <= len(utts) <= CHUNK_LINES
+
+
+def read_and_choose(utts: list[dict], intent: str = "") -> tuple[dict, list[dict]]:
+    """The outline and the kept lines of a shoot that fits in one request."""
+
+    def parse(parsed):
+        kept = [
+            _kept(item["id"], item["reason"], item.get("cuts") or [], item.get("trim") or [])
+            for item in parsed["keep"]
+        ]
+        return read_outline(parsed, utts), kept
+
+    return ask(
+        [
+            {"role": "system", "content": system_prompt(intent) + FOLD_NOTE},
+            {"role": "user", "content": user_content(utts)},
+        ],
+        FOLD_SCHEMA,
+        what="a keep list",
+        parse=parse,
+        read_timeout=300,
+        tries=2,
+        effort=FOLD_EFFORT,
+    )
+
+
+def read_shoot(utts: list[dict], intent: str = "", plan: dict | None = None) -> tuple[dict, list[dict]]:
+    """Read the shoot and choose its lines: in one request when it fits, otherwise outline, then choose.
+
+    `plan` is an outline already in hand, for a long shoot whose outline was
+    asked for while the stills were being read.
+    """
+    if folds(utts):
+        return read_and_choose(utts, intent)
+    if plan is None:
+        plan = outline(utts, intent)
+    return plan, pick(utts, intent, plan)
+
+
 def _kept(uid, reason, cuts, trim=()) -> dict:
     """One kept line. The cuts taken inside it are listed only when there are some."""
     row = {"id": int(uid), "reason": str(reason)}

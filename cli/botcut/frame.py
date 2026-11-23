@@ -18,7 +18,13 @@ PUNCH_IN = 1.12
 # Below this height an enlarged picture starts to look soft, so it is left alone.
 PUNCH_MIN_HEIGHT = 1080
 # The ways a spoken shot can be zoomed. Off is the default.
-ZOOMS = ("off", "cuts", "push", "lines")
+ZOOMS = ("off", "auto", "cuts", "push", "lines")
+# Auto: a tight framing shows this much of the frame less. It is enough to read as another shot.
+TIGHT = 1.2
+# Auto: a wide stretch has to run this long before it is worth a slow push.
+PUSH_STRETCH = 8.0
+# A face found this far from the moment being framed says nothing about it.
+FACE_REACH = 20.0
 # On cuts: a framing is held this long before it may change.
 ZOOM_HOLD = 4.0
 # Slow push: this much closer every second, up to this much.
@@ -138,12 +144,99 @@ def find_faces(work: str, clips: list[dict], is_spoken) -> None:
         list(pool.map(look, enumerate(clips)))
 
 
-def focus(clip: dict) -> tuple[float, float]:
-    """The point to hold in frame: the middle of the face, or where a talking head usually is."""
+def focus(clip: dict, at: float | None = None) -> tuple[float, float]:
+    """The point to hold in frame: the middle of the face, or where a talking head usually is.
+
+    `at` is the moment of the shot being framed. When faces were found along
+    the shot, the nearest one in time is used, so a speaker who has moved is
+    still the middle of the picture.
+    """
+    seen = clip.get("faces") or []
+    if at is not None and seen:
+        when, cx, cy = min(seen, key=lambda row: abs(float(row[0]) - at))
+        if abs(float(when) - at) <= FACE_REACH:
+            return float(cx), float(cy)
     face = parse_face({"found": True, **face}) if isinstance(face := clip.get("face"), dict) else None
     if not face:
         return DEFAULT_FOCUS
     return face["x"] + face["w"] / 2, face["y"] + face["h"] / 2
+
+
+_MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "face_detection_yunet_2023mar.onnx")
+
+
+def find_face(still: str) -> dict | None:
+    """The largest face in a still, as fractions of the picture, found on this machine. None when there is none."""
+    os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
+    try:
+        import cv2
+    except ImportError:
+        return None
+    if not os.path.isfile(_MODEL) or not os.path.isfile(still):
+        return None
+    image = cv2.imread(still)
+    if image is None:
+        return None
+    height, width = image.shape[:2]
+    try:
+        detector = cv2.FaceDetectorYN.create(_MODEL, "", (width, height), 0.7, 0.3, 20)
+        _count, faces = detector.detect(image)
+    except cv2.error:
+        return None
+    if faces is None or not len(faces):
+        return None
+    x, y, w, h = (float(value) for value in max(faces, key=lambda face: face[2] * face[3])[:4])
+    x, y = max(0.0, x), max(0.0, y)
+    w, h = min(w, width - x), min(h, height - y)
+    return parse_face({"found": True, "x": x / width, "y": y / height, "w": w / width, "h": h / height})
+
+
+def faces_along(work: str, clips: list[dict], lines: list[dict] | None) -> None:
+    """Note on each spoken shot where the speaker's face is at the middle of each line.
+
+    The stills the cut already took of every line are looked at here, on this
+    machine, and what is found is kept in work/faces.json. A still that
+    shows no face adds nothing.
+    """
+    if os.environ.get("BOTCUT_FAKE") == "1":
+        return
+    cache = os.path.join(work, "faces.json")
+    try:
+        known = json.loads(Path(cache).read_text())
+    except (OSError, ValueError):
+        known = {}
+    if not isinstance(known, dict):
+        known = {}
+    changed = False
+    seen: dict[int, list] = {}
+    for line in lines or []:
+        try:
+            uid, clip = int(line["id"]), int(line["clip"])
+            middle = (float(line["start"]) + float(line["end"])) / 2
+        except (KeyError, TypeError, ValueError):
+            continue
+        still = os.path.join(work, "stills", f"{uid}.jpg")
+        if not os.path.isfile(still):
+            continue
+        stamp = os.path.getmtime(still)
+        row = known.get(str(uid))
+        if not isinstance(row, dict) or row.get("stamp") != stamp:
+            row = {"stamp": stamp, "face": find_face(still)}
+            known[str(uid)] = row
+            changed = True
+        face = parse_face({"found": True, **row["face"]}) if isinstance(row.get("face"), dict) else None
+        if face:
+            seen.setdefault(clip, []).append(
+                [round(middle, 2), round(face["x"] + face["w"] / 2, 4), round(face["y"] + face["h"] / 2, 4)]
+            )
+    if changed:
+        try:
+            Path(cache).write_text(json.dumps(known) + "\n")
+        except OSError:
+            pass
+    for index, clip in enumerate(clips):
+        if seen.get(index):
+            clip["faces"] = sorted(seen[index])
 
 
 def can_punch_in(clip: dict) -> bool:
@@ -153,12 +246,12 @@ def can_punch_in(clip: dict) -> bool:
         return False
 
 
-def punch_crop(clip: dict, amount: float = PUNCH_IN) -> str:
+def punch_crop(clip: dict, amount: float = PUNCH_IN, at: float | None = None) -> str:
     """The crop that shows 1/amount of the frame around the speaker, kept inside the picture."""
     width, height = int(clip["width"]), int(clip["height"])
     crop_w = int(width / amount) // 2 * 2
     crop_h = int(height / amount) // 2 * 2
-    cx, cy = focus(clip)
+    cx, cy = focus(clip, at)
     left = min(max(0, round(cx * width - crop_w / 2)), width - crop_w)
     top = min(max(0, round(cy * height - crop_h / 2)), height - crop_h)
     return f"crop={crop_w}:{crop_h}:{left}:{top}"
@@ -242,14 +335,14 @@ def push_starts(segments: list[dict], lines: list[dict] | None = None) -> list[f
     return starts
 
 
-def push_filter(clip: dict, started: float = 0.0) -> str:
+def push_filter(clip: dict, started: float = 0.0, at: float | None = None) -> str:
     """A slow, even move in toward the speaker, PUSH_RATE a second up to PUSH_MAX.
 
     `started` is how many seconds the push has already run when this piece
     begins. The picture is resampled between pixels on every frame, so the move
     does not step the way a crop that grows by whole pixels does.
     """
-    cx, cy = focus(clip)
+    cx, cy = focus(clip, at)
     fps = float(clip.get("fps") or 0) or 30.0
     zoom = f"min(1+{PUSH_RATE:g}*(on/{fps:g}+{max(0.0, started):.3f}),{PUSH_MAX:g})"
     left = f"W*{cx:.4f}*(1-1/({zoom}))"
@@ -261,6 +354,64 @@ def push_filter(clip: dict, started: float = 0.0) -> str:
         f":x2='{left}':y2='{bottom}':x3='{right}':y3='{bottom}'"
         ":sense=source:eval=frame:interpolation=cubic"
     )
+
+
+def stretch_lengths(segments: list[dict], lines: list[dict] | None = None) -> list[float]:
+    """For each segment, how long the unbroken stretch of speech it belongs to runs.
+
+    A cut inside a line does not break a stretch. A join between lines does.
+    """
+    lengths = [max(0.0, float(seg["end"]) - float(seg["start"])) for seg in segments]
+    totals = list(lengths)
+    first = 0
+    for index in range(1, len(segments) + 1):
+        if index < len(segments) and inside_a_line(segments[index - 1], segments[index], lines):
+            continue
+        whole = sum(lengths[first:index])
+        for inner in range(first, index):
+            totals[inner] = whole
+        first = index
+    return totals
+
+
+class AutoFraming:
+    """Decide, piece by piece as the movie plays, whether the speaker is shown wide or tight.
+
+    Wide and tight are the two set-ups of a one-camera shoot. The picture
+    goes from one to the other at a jump cut, once the framing has been
+    held, so the jump reads as a change of shot; a line that carries the
+    point is tight; and anything that is already a change of picture, a new
+    shot, B-roll, another camera, comes back wide.
+    """
+
+    def __init__(self) -> None:
+        self.tight = False
+        self.held = 0.0
+        self.clip: int | None = None
+
+    def other_picture(self) -> None:
+        """B-roll, a card, or another camera played. The speaker comes back wide."""
+        self.clip = None
+
+    def frame(self, clip: int, length: float, *, close: bool, runs_on: bool, same_footage: bool) -> bool:
+        """True when this piece of the speaker plays tight.
+
+        `close` is a line named to be shown close, `runs_on` a cut inside a
+        line, and `same_footage` a piece that follows the one before it in
+        the file with nothing taken out.
+        """
+        fresh = self.clip != clip
+        if close:
+            tight = True
+        elif fresh or same_footage:
+            tight = False
+        elif runs_on or self.held < ZOOM_HOLD:
+            tight = self.tight
+        else:
+            tight = not self.tight
+        self.held = length if fresh or tight != self.tight else self.held + length
+        self.tight, self.clip = tight, clip
+        return tight
 
 
 def close_ids(close: object, lines: list[dict] | None) -> list[int]:

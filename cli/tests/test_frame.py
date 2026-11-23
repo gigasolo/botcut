@@ -198,7 +198,7 @@ def test_no_zoom_unless_asked_and_only_the_speaker_is_zoomed():
 def test_a_small_shot_is_never_zoomed():
     clips, segs, lines, covers = _zoom_case()
     clips[0] = _clip("/tmp/talk.mp4", 1280, 720)
-    for zoom in ("cuts", "push", "lines"):
+    for zoom in ("auto", "cuts", "push", "lines"):
         args = render_args(segs, clips, "/tmp/o.mp4", lines=lines, zoom=zoom, close=[3])
         graph = args[args.index("-filter_complex") + 1]
         assert "crop=" not in graph and "perspective=" not in graph
@@ -219,7 +219,7 @@ def test_every_zoom_encodes_at_the_same_size(tmp_path):
         {"clip": 0, "start": 6.0, "end": 11.0, "reason": "b"},
     ]
     lines = [_said(0, 0.2, 5.0), _said(1, 6.0, 8.0), _said(2, 8.6, 11.0)]
-    for zoom in ("cuts", "push", "lines"):
+    for zoom in ("auto", "cuts", "push", "lines"):
         out = tmp_path / f"{zoom}.mp4"
         args = render_args(segs, clips, str(out), polish=True, lines=lines, zoom=zoom, close=[2])
         graph = args[args.index("-filter_complex") + 1]
@@ -309,3 +309,102 @@ def test_faces_are_asked_for_once_per_spoken_shot_and_never_stop_a_cut(monkeypat
     still = tmp_path / "still.jpg"
     still.write_bytes(b"jpeg")
     assert ask_face(str(still)) is None
+
+
+def _auto_pieces(segs, lines, close=None, clips=None, **more):
+    from botcut.media import cut_pieces
+
+    clips = clips or [_clip("/tmp/talk.mp4", duration=200.0)]
+    return cut_pieces(segs, clips, polish=True, lines=lines, zoom="auto", close=close, **more)
+
+
+def _look(piece):
+    return "tight" if piece["punch"].startswith("crop=") else ("push" if piece["punch"] else "wide")
+
+
+def test_auto_goes_tight_at_a_jump_cut_once_the_framing_has_been_held():
+    # Five lines of five seconds, each its own piece: a jump cut between every two.
+    lines = [_said(i, 10 * i, 10 * i + 5) for i in range(5)]
+    segs = [{"clip": 0, "start": 10 * i, "end": 10 * i + 5, "reason": "x"} for i in range(5)]
+    assert [_look(piece) for piece in _auto_pieces(segs, lines)] == ["wide", "tight", "wide", "tight", "wide"]
+    # Tight is a fifth closer: 1920 / 1.2 = 1600, 1080 / 1.2 = 900.
+    assert _auto_pieces(segs, lines)[1]["punch"].startswith("crop=1600:900:")
+    # Jumps that come two seconds apart do not make the framing flicker: it is held four seconds.
+    quick = [_said(i, 4 * i, 4 * i + 2) for i in range(6)]
+    pieces = [{"clip": 0, "start": 4 * i, "end": 4 * i + 2, "reason": "x"} for i in range(6)]
+    assert [_look(piece) for piece in _auto_pieces(pieces, quick)] == ["wide", "wide", "tight", "tight", "wide", "wide"]
+
+
+def test_auto_never_changes_framing_at_a_cut_inside_a_line():
+    lines = [
+        {**_said(0, 0.0, 12.0), "cuts": [{"from": 1, "through": 1, "start": 5.0, "end": 5.6, "cut": True}]},
+        _said(1, 20.0, 26.0),
+    ]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 5.0, "reason": "x"},
+        {"clip": 0, "start": 5.6, "end": 12.0, "reason": "x"},
+        {"clip": 0, "start": 20.0, "end": 26.0, "reason": "x"},
+    ]
+    pieces = _auto_pieces(segs, lines)
+    # The first line runs eleven seconds across its cut: one slow push, carried over the cut. Then tight.
+    assert [_look(piece) for piece in pieces] == ["push", "push", "tight"]
+    assert "+0.000)" in pieces[0]["punch"] and "+5.000)" in pieces[1]["punch"]
+
+
+def test_auto_shows_a_line_that_matters_tight_and_comes_back_wide_from_other_pictures():
+    clips, segs, lines, covers = _zoom_case()
+    clips[0]["duration"] = 20.0
+    pieces = _auto_pieces(segs, lines, close=[3], clips=clips, covers=covers)
+    # Line 0 wide. After the jump, tight. B-roll over line 2 is left as shot. Line 3 matters: tight.
+    assert [(piece["clip"], _look(piece)) for piece in pieces] == [
+        (0, "wide"), (0, "tight"), (1, "wide"), (0, "tight"),
+    ]
+    # Without the line that matters, the speaker comes back from the B-roll wide, on the slow
+    # push the ten-second stretch around the B-roll is given.
+    plain = _auto_pieces(segs, lines, clips=clips, covers=covers)
+    assert [_look(piece) for piece in plain] == ["wide", "tight", "wide", "push"]
+
+
+def test_the_zoom_follows_a_speaker_who_moves():
+    from botcut.frame import focus, punch_crop
+
+    clip = _clip("/tmp/talk.mp4", face={"x": 0.4, "y": 0.2, "w": 0.2, "h": 0.3})
+    assert focus(clip) == (0.5, 0.35) and focus(clip, at=30.0) == (0.5, 0.35)
+    clip["faces"] = [[10.0, 0.3, 0.4], [60.0, 0.7, 0.4]]
+    assert focus(clip, at=12.0) == (0.3, 0.4) and focus(clip, at=55.0) == (0.7, 0.4)
+    # Nothing was seen within twenty seconds of this moment: the shot's one face is used.
+    assert focus(clip, at=100.0) == (0.5, 0.35)
+    left, right = punch_crop(clip, 1.2, at=12.0), punch_crop(clip, 1.2, at=55.0)
+    assert left == "crop=1600:900:0:0" and right == "crop=1600:900:320:0"
+
+
+def test_faces_are_found_once_per_still_and_a_still_without_one_adds_nothing(tmp_path, monkeypatch):
+    import numpy as np
+
+    from botcut import frame
+
+    monkeypatch.delenv("BOTCUT_FAKE", raising=False)
+    stills = tmp_path / "stills"
+    stills.mkdir()
+    import cv2
+
+    for uid in (0, 1):
+        cv2.imwrite(str(stills / f"{uid}.jpg"), np.full((180, 320, 3), 90, dtype=np.uint8))
+    # A plain gray frame has nobody in it.
+    assert frame.find_face(str(stills / "0.jpg")) is None
+    assert frame.find_face(str(stills / "missing.jpg")) is None
+    looked = []
+
+    def found(still):
+        looked.append(still)
+        return {"x": 0.1, "y": 0.2, "w": 0.2, "h": 0.2} if still.endswith("0.jpg") else None
+
+    monkeypatch.setattr(frame, "find_face", found)
+    lines = [_said(0, 2.0, 6.0), _said(1, 8.0, 10.0), _said(2, 12.0, 14.0)]
+    clips = [_clip("/tmp/talk.mp4")]
+    frame.faces_along(str(tmp_path), clips, lines)
+    assert clips[0]["faces"] == [[4.0, 0.2, 0.3]]
+    assert len(looked) == 2
+    again = [_clip("/tmp/talk.mp4")]
+    frame.faces_along(str(tmp_path), again, lines)
+    assert again[0]["faces"] == [[4.0, 0.2, 0.3]] and len(looked) == 2

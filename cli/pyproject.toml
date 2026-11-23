@@ -16,6 +16,9 @@ botcut-cli = "botcut.cli:main"
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+botcut = ["data/*.onnx", "data/*.md"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["botcut*"]

@@ -34,12 +34,14 @@ from botcut.pick import (
     DEFAULT_INTENT,
     cut_words,
     decision_lines,
+    folds,
     model_name,
     hook_line,
     no_outline,
     outline,
     pick,
     play_order,
+    read_shoot,
     segments,
     settle,
     snap,
@@ -48,7 +50,7 @@ from botcut.pick import (
     unknown_warnings,
     utterances,
 )
-from botcut.frame import ZOOMS, close_ids, find_faces, focus
+from botcut.frame import ZOOMS, close_ids, faces_along, find_faces, focus
 from botcut.revise import apply_proposal, revise
 from botcut.proof import apply_changes, changed, no_changes, proof
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
@@ -56,8 +58,8 @@ from botcut.stt import key_terms, terms_mark, transcribe_fake, transcribe_local,
 
 
 ZOOM_HELP = (
-    "zoom in on the speaker: at a join between lines (cuts), slowly between joins (push), "
-    "or on the lines that carry the point (lines)"
+    "zoom in on the speaker: all three ways together (auto), or only at a join between lines (cuts), "
+    "slowly between joins (push), or on the lines that carry the point (lines)"
 )
 
 # Shots sent to the transcriber at once, and stills grabbed at once.
@@ -426,13 +428,25 @@ def run(
     clock.lap("listen")
     movie = intent.strip() or DEFAULT_INTENT
     if speech:
-        _attach_stills(utts, clips, os.path.join(work, "stills"))
-        find_faces(work, clips, lambda clip: not is_card(clip["path"]) and not is_broll(clip))
-        clock.lap("stills")
-        print("Choosing takes", flush=True)
-        plan = outline(utts, movie)
-        clock.lap("outline")
-        chosen = pick(utts, movie, plan)
+        # A long shoot is outlined while its stills are read: the outline is words only.
+        ahead = None
+        if not folds(utts):
+            from concurrent.futures import ThreadPoolExecutor
+
+            ahead = ThreadPoolExecutor(max_workers=1)
+            outlined = ahead.submit(outline, utts, movie)
+        try:
+            _attach_stills(utts, clips, os.path.join(work, "stills"))
+            find_faces(work, clips, lambda clip: not is_card(clip["path"]) and not is_broll(clip))
+            clock.lap("stills")
+            print("Choosing takes", flush=True)
+            plan = outlined.result() if ahead else None
+            if ahead:
+                clock.lap("outline")
+        finally:
+            if ahead:
+                ahead.shutdown(wait=False, cancel_futures=True)
+        plan, chosen = read_shoot(utts, movie, plan)
         clock.lap("choose")
     else:
         plan = no_outline()
@@ -522,6 +536,7 @@ def run(
         doc["usage"] = tally
         print(llm.usage_line(tally), flush=True)
     if decide:
+        _review(doc, segs, zoom)
         _write_doc(out, doc)
         kept_n = sum(1 for line in doc["lines"] if line["keep"])
         print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
@@ -727,6 +742,19 @@ def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
         list(pool.map(grab, utts))
 
 
+def _review(doc: dict, segs: list, zoom: str = "off") -> None:
+    """Note on the cut the few spots worth a look, so the window can lead the person to them."""
+    from botcut import check
+
+    doc.pop("review", None)
+    if doc.get("mode") != "speech" or not doc.get("lines"):
+        return
+    target = float((doc.get("outline") or {}).get("target_seconds") or 0)
+    found = check.review(doc["lines"], segs, target, hidden=zoom != "off" or bool(doc.get("angles")))
+    if found:
+        doc["review"] = found
+
+
 def _write_doc(out: str, doc: dict) -> str:
     os.makedirs(out, exist_ok=True)
     cuts_path = os.path.join(out, "cuts.json")
@@ -746,11 +774,15 @@ def _write_cut(
     fresh: bool = False,
     zoom: str = "off",
 ) -> None:
+    _review(doc, segs, zoom)
     _write_doc(out, doc)
     if not segs:
         raise SystemExit("No segments to render")
     dst = os.path.join(out, "rough_cut.mp4")
     _level_clips(os.path.join(out, "work"), clips)
+    if zoom != "off":
+        # Where the speaker is at each line, so a zoom follows someone who moves.
+        faces_along(os.path.join(out, "work"), clips, doc.get("lines"))
     if clock:
         clock.lap("level")
     made = render_with_progress(

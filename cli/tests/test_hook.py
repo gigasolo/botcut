@@ -204,6 +204,8 @@ def test_a_render_puts_the_opening_first_and_forgets_it_when_its_line_goes(monke
 
 
 def test_a_cut_opens_on_the_line_the_proof_names(monkeypatch, tmp_path):
+    # The two-request way, as a shoot too long for one request is cut.
+    monkeypatch.setenv("BOTCUT_FOLD", "0")
     monkeypatch.setenv("XAI_API_KEY", "secret")
     monkeypatch.delenv("BOTCUT_FAKE", raising=False)
     shot = tmp_path / "talk.mp4"

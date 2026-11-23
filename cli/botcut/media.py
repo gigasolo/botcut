@@ -760,6 +760,15 @@ def cut_pieces(
         from botcut.frame import close_spans
 
         close_by_clip = close_spans(lines, close)
+    auto = None
+    stretches: list[float] = []
+    if zoom == "auto":
+        from botcut.frame import AutoFraming, close_spans, push_starts, stretch_lengths
+
+        auto = AutoFraming()
+        close_by_clip = close_spans(lines, close)
+        pushed = push_starts(segments, lines)
+        stretches = stretch_lengths(segments, lines)
     found: list[dict] = []
     # Outer fades are chosen on the spoken segments. A cover cut inside one
     # segment is not a scene change, so it does not get those fades.
@@ -843,17 +852,39 @@ def cut_pieces(
                 a_in, a_out = _fit_pair(shown, raw_in, raw_out) if polish else (0.0, 0.0)
             # Only the speaker's own picture is zoomed. B-roll over the line is left as shot.
             punch = ""
-            if zoom != "off" and int(piece["clip"]) == spoken and "voice" not in piece:
-                from botcut.frame import CLOSE_IN, can_punch_in, punch_crop, push_filter
+            middle = float(video_start) + float(span) / 2
+            own = int(piece["clip"]) == spoken and "voice" not in piece
+            if zoom != "off" and own:
+                from botcut.frame import (
+                    CLOSE_IN,
+                    PUSH_STRETCH,
+                    TIGHT,
+                    can_punch_in,
+                    inside_a_line,
+                    punch_crop,
+                    push_filter,
+                )
 
                 if not (plain(video) and can_punch_in(video)):
-                    pass
+                    if auto:
+                        auto.other_picture()
                 elif zoom == "cuts" and tight[i]:
-                    punch = punch_crop(video)
+                    punch = punch_crop(video, at=middle)
                 elif zoom == "lines" and piece.get("tight"):
-                    punch = punch_crop(video, CLOSE_IN)
+                    punch = punch_crop(video, CLOSE_IN, at=middle)
                 elif zoom == "push":
-                    punch = push_filter(video, pushed[i] + float(video_start) - seg_start)
+                    punch = push_filter(video, pushed[i] + float(video_start) - seg_start, at=middle)
+                elif auto:
+                    runs_on = j == 0 and i > 0 and inside_a_line(segments[i - 1], seg, lines)
+                    if auto.frame(
+                        spoken, float(span), close=bool(piece.get("tight")), runs_on=runs_on, same_footage=j > 0
+                    ):
+                        punch = punch_crop(video, TIGHT, at=middle)
+                    elif stretches[i] >= PUSH_STRETCH:
+                        # A long wide stretch creeps in, so it is not a locked-off frame for half a minute.
+                        punch = push_filter(video, pushed[i] + float(video_start) - seg_start, at=middle)
+            elif auto and not own:
+                auto.other_picture()
             row = {
                 "segment": i,
                 "spoken": spoken,
@@ -1029,7 +1060,7 @@ def render_args(
     return args
 
 
-ZOOM_NAMES = ("off", "cuts", "push", "lines")
+ZOOM_NAMES = ("off", "auto", "cuts", "push", "lines")
 
 
 def encoder_args(encoder: str) -> list[str]:

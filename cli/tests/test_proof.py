@@ -208,6 +208,8 @@ def test_a_few_lines_and_an_offline_run_are_not_proofed(live, monkeypatch):
 
 
 def test_a_cut_reads_the_shoot_chooses_then_reads_itself_back(live, monkeypatch, tmp_path, capsys):
+    # The two-request way, as a shoot too long for one request is cut.
+    monkeypatch.setenv("BOTCUT_FOLD", "0")
     from botcut import cli
 
     shot = tmp_path / "talk.mp4"
@@ -299,3 +301,58 @@ def test_lines_to_show_close_are_kept_lines_never_neighbours_and_only_a_few():
     old.pop("close", None)
     assert read_proof(old, lines)["close"] == []
     assert no_changes()["close"] == []
+
+
+def test_a_shoot_that_fits_in_one_request_is_read_and_cut_in_it(live, monkeypatch, tmp_path):
+    from botcut import cli
+
+    shot = tmp_path / "talk.mp4"
+    shot.write_bytes(b"x")
+    said = ["Hello there.", "We make chairs.", "We make chairs.", "By hand.", "And they last.", "Come by.", "Goodbye now."]
+    words = []
+    for index, text in enumerate(said):
+        for offset, word in enumerate(text.split()):
+            start = index * 5.0 + offset * 0.4
+            words.append({"text": word, "start": start, "end": start + 0.3})
+    monkeypatch.setattr(cli, "probe", lambda path, need_audio=True: {"path": path, "duration": 40.0})
+    monkeypatch.setattr(cli, "_words_for_clip", lambda *a: words)
+    monkeypatch.setattr(cli, "_silences_for_clip", lambda *a: [])
+    monkeypatch.setattr(cli, "_attach_stills", lambda *a: None)
+    monkeypatch.setattr(cli, "find_faces", lambda *a: None)
+    asked = []
+    answers = {
+        "cut": {
+            "beats": [{"title": "Chairs", "first": 0, "last": 6}],
+            "retakes": [{"ids": [1, 2]}],
+            "hook": -1,
+            "target_seconds": 30,
+            "keep": [
+                {"id": uid, "reason": "ok", "cuts": [], "trim": ["there"] if uid == 0 else []}
+                for uid in (0, 2, 3, 4, 5, 6)
+            ],
+        },
+        "proof": _answer(reply="It holds as cut."),
+    }
+
+    def post(url, headers=None, json=None, timeout=None):
+        name = json["response_format"]["json_schema"]["name"]
+        asked.append((name, json))
+        return _Reply(answers[name])
+
+    monkeypatch.setattr("botcut.net.requests.post", post)
+    cli.run([str(shot)], str(tmp_path / "out"), intent="A thirty second word about our chairs", decide=True)
+    # One request reads the shoot and chooses, with more thought than a plain choice. Then the proof.
+    assert [name for name, _ in asked] == ["cut", "proof"]
+    assert asked[0][1]["reasoning_effort"] == "medium"
+    assert "Read all of it first" in asked[0][1]["messages"][0]["content"]
+    doc = json.loads((tmp_path / "out" / "cuts.json").read_text())
+    assert [line["id"] for line in doc["lines"] if line["keep"]] == [0, 2, 3, 4, 5, 6]
+    assert doc["outline"] == {
+        "beats": [{"title": "Chairs", "first": 0, "last": 6}],
+        "retakes": [[1, 2]],
+        "target_seconds": 30,
+    }
+    # The length it read out of the sentence is what the proof holds the cut to.
+    assert "About 30s was asked for." in asked[1][1]["messages"][1]["content"]
+    took = json.loads((tmp_path / "out" / "work" / "seconds.json").read_text())
+    assert "outline" not in took and "choose" in took

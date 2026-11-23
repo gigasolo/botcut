@@ -25,8 +25,8 @@ from botcut.pick import (
     OUTLINE_PROMPT,
     TRIM_NOTE,
     decision_lines,
-    outline,
-    pick,
+    FOLD_NOTE,
+    read_shoot,
     system_prompt,
     utterances,
 )
@@ -100,7 +100,7 @@ def case_names() -> list[str]:
 
 def prompt_version() -> str:
     """A short name for the wording now in use, so history rows can be told apart."""
-    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE + TRIM_NOTE + OUTLINE_PROMPT + PROOF_SYSTEM
+    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE + TRIM_NOTE + FOLD_NOTE + OUTLINE_PROMPT + PROOF_SYSTEM
     return hashlib.sha1(text.encode()).hexdigest()[:8]
 
 
@@ -155,8 +155,8 @@ def score(name: str, replay: bool = False) -> dict:
     try:
         # The same passes a cut makes: read the shoot, choose the lines, read the cut back.
         intent = str(doc.get("intent") or "")
-        plan = outline(utts, intent)
-        got = decision_lines(utts, pick(utts, intent, plan))
+        plan, chosen = read_shoot(utts, intent)
+        got = decision_lines(utts, chosen)
         changes = proof(got, _pieces(doc, case, got), intent=intent, outline=plan)
         if changed(changes):
             got = apply_changes(got, changes)

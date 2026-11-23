@@ -85,7 +85,7 @@ def flags(lines: list[dict], segments: list[dict] | None = None, target: float =
             found.append(
                 {
                     "kind": "flash",
-                    "ids": [],
+                    "ids": _lines_in(seg, kept),
                     "text": f"A piece of shot {int(seg.get('clip', 0))} is only {length:.1f}s long.",
                 }
             )
@@ -134,3 +134,76 @@ def jumps(segments: list[dict] | None, lines: list[dict] | None = None) -> int:
             continue
         count += 1
     return count
+
+
+def _lines_in(seg: dict, kept: list[dict]) -> list[int]:
+    """The kept line a piece is part of, so a person can be taken to it."""
+    try:
+        clip, start, end = int(seg["clip"]), float(seg["start"]), float(seg["end"])
+    except (KeyError, TypeError, ValueError):
+        return []
+    best, most = None, 0.0
+    for line in kept:
+        try:
+            if int(line["clip"]) != clip:
+                continue
+            shared = min(end, float(line["end"]) + 0.4) - max(start, float(line["start"]) - 0.25)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if shared > most:
+            best, most = int(line["id"]), shared
+    return [] if best is None else [best]
+
+
+# The most spots a person is asked to look at. More than this is a list nobody reads.
+REVIEW_MAX = 10
+# This many jump cuts with nothing to hide them is worth a word.
+JUMPS_WORTH_SAYING = 5
+
+
+def review(
+    lines: list[dict],
+    segments: list[dict] | None = None,
+    target: float = 0.0,
+    *,
+    hidden: bool = False,
+) -> list[dict]:
+    """The few spots in a finished cut worth a person's look, most telling first.
+
+    These are the flags, said to the person and not to the model, and a line
+    that was dropped though nothing like it is kept. `hidden` is true when a
+    zoom or a second camera is hiding the jump cuts.
+    """
+    found = flags(lines, segments, target)
+    order = {"long": 0, "short": 0, "twice": 1, "leans": 2, "flash": 4}
+    rows = []
+    for flag in found:
+        ids = list(flag.get("ids") or [])
+        kind = flag["kind"]
+        if kind == "twice":
+            text = "These two lines say the same thing."
+        elif kind == "leans":
+            text = "This line leans on the one before it, which is dropped."
+        elif kind == "flash":
+            text = "A piece here is on screen for a blink."
+        else:
+            text = flag["text"]
+        rows.append({"kind": kind, "ids": ids, "text": text})
+    for line in _spoken(lines):
+        if not line.get("keep") and str(line.get("reason") or "") == "unique?":
+            rows.append(
+                {"kind": "unique", "ids": [int(line["id"])], "text": "Dropped, and said nowhere else."}
+            )
+    order["unique"] = 3
+    rows.sort(key=lambda row: order.get(row["kind"], 9))
+    shown = rows[:REVIEW_MAX]
+    count = jumps(segments, lines)
+    if not hidden and count >= JUMPS_WORTH_SAYING:
+        shown.append(
+            {
+                "kind": "jumps",
+                "ids": [],
+                "text": f"{count} jump cuts show. Zoom, in Settings, makes each read as a change of shot.",
+            }
+        )
+    return shown

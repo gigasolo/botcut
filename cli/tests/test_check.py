@@ -102,3 +102,37 @@ def test_a_jump_is_a_join_inside_one_shot_and_not_a_change_of_shot():
     pieces[0]["start"] = 2.8
     assert jumps(pieces, lines) == 2
     assert jumps([], lines) == 0
+
+
+def test_the_spots_worth_a_look_are_few_and_said_to_a_person():
+    from botcut.check import review
+
+    lines = [
+        {"id": 0, "clip": 0, "start": 0.0, "end": 4.0, "keep": True, "text": "We make chairs by hand here.", "reason": "ok"},
+        {"id": 1, "clip": 0, "start": 5.0, "end": 9.0, "keep": False, "text": "Oak, mostly, from the valley.", "reason": "unique?"},
+        {"id": 2, "clip": 0, "start": 10.0, "end": 14.0, "keep": True, "text": "And they last a lifetime.", "reason": "ok"},
+        {"id": 3, "clip": 0, "start": 15.0, "end": 19.0, "keep": True, "text": "We make chairs by hand here.", "reason": "ok"},
+        {"id": 4, "clip": 0, "start": 20.0, "end": 24.0, "keep": False, "text": "We make chairs by hand.", "reason": "retake"},
+    ]
+    pieces = [
+        {"clip": 0, "start": -0.25, "end": 4.4, "reason": "ok"},
+        {"clip": 0, "start": 9.75, "end": 10.05, "reason": "ok"},
+        {"clip": 0, "start": 10.3, "end": 14.4, "reason": "ok"},
+        {"clip": 0, "start": 14.75, "end": 19.4, "reason": "ok"},
+    ]
+    found = review(lines, pieces)
+    assert [(row["kind"], row["ids"]) for row in found] == [
+        ("twice", [0, 3]), ("leans", [2]), ("unique", [1]), ("flash", [2]),
+    ]
+    assert found[0]["text"] == "These two lines say the same thing."
+    assert found[2]["text"] == "Dropped, and said nowhere else."
+    # A retake that was dropped is not something to look at.
+    assert all(4 not in row["ids"] for row in found)
+    # Many jump cuts with nothing hiding them get one word, and none when a zoom or a second camera is on.
+    many = [{"clip": 0, "start": 30.0 + 10 * i, "end": 35.0 + 10 * i, "reason": "ok"} for i in range(7)]
+    said = [{"id": 10 + i, "clip": 0, "start": 30.0 + 10 * i, "end": 35.0 + 10 * i, "keep": True, "text": text, "reason": "ok"} for i, text in enumerate(
+        ["Oak comes first.", "Glue takes a day.", "Sanding is quiet work.", "Varnish smells strong.",
+         "Customers visit Fridays.", "Shipping costs plenty.", "Winter slows everything."]
+    )]
+    assert review(said, many)[-1]["text"].startswith("6 jump cuts show.")
+    assert review(said, many, hidden=True) == []

@@ -16,6 +16,8 @@ from botcut.llm import ask
 
 # Fewer lines than this is a cut a person reads at a glance.
 PROOF_MIN_LINES = 4
+# How hard the model thinks when it reads the cut back.
+PROOF_EFFORT = "high"
 # With no length asked for, a proof that takes out more than this share of the
 # kept seconds is a second cut, not a proof, and is not applied.
 DROP_SHARE_MAX = 0.3
@@ -320,7 +322,7 @@ def proof(
             parse=lambda parsed: read_proof(parsed, lines, target),
             read_timeout=300,
             tries=2,
-            effort="high",
+            effort=PROOF_EFFORT,
         )
     except SystemExit as stop:
         if "XAI_API_KEY" in str(stop):

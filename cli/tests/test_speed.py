@@ -8,7 +8,7 @@ import pytest
 
 from botcut import cli
 from botcut.media import silences
-from botcut.pick import chunks, pick
+from botcut.pick import chunks, no_outline, pick
 
 
 def _utts(count):
@@ -134,7 +134,11 @@ def test_shots_are_transcribed_together_and_land_in_their_own_order(monkeypatch,
     monkeypatch.setattr(cli, "_words_for_clip", words_for)
     monkeypatch.setattr(cli, "_silences_for_clip", lambda *a: [])
     monkeypatch.setattr(cli, "_attach_stills", lambda *a: None)
-    monkeypatch.setattr(cli, "pick", lambda utts, intent="", outline=None: [{"id": u["id"], "reason": "ok"} for u in utts])
+    monkeypatch.setattr(
+        cli,
+        "read_shoot",
+        lambda utts, intent="", plan=None: (no_outline(), [{"id": u["id"], "reason": "ok"} for u in utts]),
+    )
     cli.run(paths, str(tmp_path / "out"), decide=True)
     doc = json.loads((tmp_path / "out" / "cuts.json").read_text())
     assert [(line["clip"], line["text"]) for line in doc["lines"]] == [(0, "a"), (1, "b"), (2, "c")]

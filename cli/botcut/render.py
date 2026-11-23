@@ -395,6 +395,13 @@ def render(
         raise SystemExit("No segments to render")
     print(f"{label} 0%", flush=True)
 
+    # A render that was stopped part way leaves its working sound behind. It goes before this one starts.
+    for name in os.listdir(work):
+        if name.startswith("sound-") and name.endswith(".raw"):
+            try:
+                os.remove(os.path.join(work, name))
+            except OSError:
+                pass
     # The sound first: it is quick, and a file that cannot be read stops the cut before the long part.
     wav = os.path.join(work, "cut.wav")
     sounds = Sounds(work, clips)

@@ -341,9 +341,10 @@ def test_a_shoot_that_fits_in_one_request_is_read_and_cut_in_it(live, monkeypatc
 
     monkeypatch.setattr("botcut.net.requests.post", post)
     cli.run([str(shot)], str(tmp_path / "out"), intent="A thirty second word about our chairs", decide=True)
-    # One request reads the shoot and chooses, with more thought than a plain choice. Then the proof.
+    # One request reads the shoot and chooses. Then the proof, which is the one given time to think.
     assert [name for name, _ in asked] == ["cut", "proof"]
-    assert asked[0][1]["reasoning_effort"] == "medium"
+    assert asked[0][1]["reasoning_effort"] == "low"
+    assert asked[1][1]["reasoning_effort"] == "high"
     assert "Read all of it first" in asked[0][1]["messages"][0]["content"]
     doc = json.loads((tmp_path / "out" / "cuts.json").read_text())
     assert [line["id"] for line in doc["lines"] if line["keep"]] == [0, 2, 3, 4, 5, 6]

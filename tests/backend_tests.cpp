@@ -189,6 +189,9 @@ public:
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY infoChanged)
     Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY infoChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY infoChanged)
+    Q_PROPERTY(QStringList angleFiles READ angleFiles NOTIFY infoChanged)
+    Q_PROPERTY(QVariantList angles READ angles NOTIFY infoChanged)
+    Q_PROPERTY(QVariantList review READ review NOTIFY infoChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY infoChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY infoChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY infoChanged)
@@ -309,6 +312,32 @@ public:
     }
     QVariantList covers() const { return m_covers; }
     void setCovers(const QVariantList &covers) { m_covers = covers; }
+    QStringList angleFiles() const { return m_angleFiles; }
+    Q_INVOKABLE void toggleAngle(int index) {
+        lastAngleIndex = index;
+        if (index <= 0 || index >= m_tray.size())
+            return;
+        const QString path = m_tray.at(index);
+        if (m_angleFiles.removeAll(path) == 0)
+            m_angleFiles.append(path);
+        m_brollFiles.removeAll(path);
+        emit infoChanged();
+    }
+    QVariantList angles() const { return m_angles; }
+    void setAngles(const QVariantList &angles) {
+        m_angles = angles;
+        emit infoChanged();
+    }
+    Q_INVOKABLE void stayOnMain(int lineId) {
+        lastStayLine = lineId;
+        m_angles.clear();
+        emit infoChanged();
+    }
+    QVariantList review() const { return m_review; }
+    void setReview(const QVariantList &review) {
+        m_review = review;
+        emit infoChanged();
+    }
     QStringList cutClips() const { return m_cutClips; }
     void setCutClips(const QStringList &clips) { m_cutClips = clips; }
     Q_INVOKABLE void clearCover(int lineId) {
@@ -481,6 +510,8 @@ public:
     int lastDropId = -1;
     int lastRestoreId = -1;
     int lastToggleIndex = -1;
+    int lastAngleIndex = -1;
+    int lastStayLine = -1;
     int renderCount = 0;
 
 signals:
@@ -506,6 +537,9 @@ private:
     bool m_renderedUnsaved = false;
     QString m_sceneTransition = QStringLiteral("dip");
     QStringList m_brollFiles;
+    QStringList m_angleFiles;
+    QVariantList m_angles;
+    QVariantList m_review;
     bool m_brollMix = true;
     QString m_zoom = QStringLiteral("off");
     QVariantList m_covers;
@@ -680,6 +714,9 @@ private slots:
     void brollRoleRoundTrips();
     void coversKeepTheBeatWindow();
     void shotRowBrollWord();
+    void secondCameraIsARoleInTheListAndTheLaunch();
+    void secondCameraRunsAndSpotsShowOnLines();
+    void stayOnMainHoldsTheRunOnTheFirstCamera();
     void coverAtWindow();
     void linesSentenceCountsCovers();
     void coverShowsInThePreview();
@@ -1619,19 +1656,20 @@ void BackendTests::gatherLabelsFit() {
     QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
 
-    // Zoom is four words, off until one is chosen, and the note says what the choice does.
+    // Zoom is two words, off until it is chosen, and the note says what the choice does.
     QCOMPARE(backend.zoom(), QStringLiteral("off"));
     QQuickItem *zoomNote = window->findChild<QQuickItem *>(QStringLiteral("zoomNote"));
     QVERIFY(zoomNote);
     QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("The picture plays")));
-    for (const QString &word : {QStringLiteral("Off"), QStringLiteral("On cuts"), QStringLiteral("Slow push"),
-                                QStringLiteral("Key lines")})
+    for (const QString &word : {QStringLiteral("Off"), QStringLiteral("Auto")})
         QVERIFY2(visibleItemWithText(window, word), qPrintable(word));
-    QQuickItem *slowPush = visibleItemWithText(window, QStringLiteral("Slow push"));
-    QVERIFY(slowPush);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(slowPush));
-    QCOMPARE(backend.zoom(), QStringLiteral("push"));
-    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Moves in slowly")));
+    for (const QString &word : {QStringLiteral("On cuts"), QStringLiteral("Slow push"), QStringLiteral("Key lines")})
+        QVERIFY2(!visibleItemWithText(window, word), qPrintable(word));
+    QQuickItem *zoomAuto = visibleItemWithText(window, QStringLiteral("Auto"));
+    QVERIFY(zoomAuto);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomAuto));
+    QCOMPARE(backend.zoom(), QStringLiteral("auto"));
+    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Goes closer at a cut")));
     QQuickItem *zoomOff = visibleItemWithText(window, QStringLiteral("Off"));
     QVERIFY(zoomOff);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomOff));
@@ -3907,8 +3945,8 @@ void BackendTests::sceneTransitionRoundTrips() {
     QCOMPARE(first.brollMix(), true);
     // No zoom until one is chosen.
     QCOMPARE(first.zoom(), QStringLiteral("off"));
-    first.setZoom(QStringLiteral("push"));
-    QCOMPARE(first.zoom(), QStringLiteral("push"));
+    first.setZoom(QStringLiteral("auto"));
+    QCOMPARE(first.zoom(), QStringLiteral("auto"));
     QCOMPARE(first.pace(), QStringLiteral("open"));
     QCOMPARE(first.maxPause(), 0.8);
     first.setSceneTransition(QStringLiteral("off"));
@@ -3927,7 +3965,14 @@ void BackendTests::sceneTransitionRoundTrips() {
     Backend again(&provider, againPicker);
     QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
     QCOMPARE(again.brollMix(), false);
-    QCOMPARE(again.zoom(), QStringLiteral("push"));
+    QCOMPARE(again.zoom(), QStringLiteral("auto"));
+    // One of the older kinds, chosen before there was Auto, comes back as Auto.
+    QSettings().setValue(QStringLiteral("zoom"), QStringLiteral("push"));
+    {
+        auto *olderPicker = new FakeFilePicker;
+        Backend older(&provider, olderPicker);
+        QCOMPARE(older.zoom(), QStringLiteral("auto"));
+    }
     again.setZoom(QStringLiteral("sideways"));
     QCOMPARE(again.zoom(), QStringLiteral("off"));
     QCOMPARE(again.pace(), QStringLiteral("measured"));
@@ -4499,6 +4544,246 @@ void BackendTests::coverAtWindow() {
     QVERIFY(at(QStringLiteral("coverAt(lines, 2, [{clip: 1, line: 7}], paths, 15, 0.8)")).isNull());
     // A clip that is not in the list shows nothing.
     QVERIFY(at(QStringLiteral("coverAt(lines, 1, [{clip: 5, line: 7, through: 8, start: 0, end: 3}], paths, 11)")).isNull());
+}
+
+void BackendTests::secondCameraIsARoleInTheListAndTheLaunch() {
+    const QString talk = QStringLiteral("/tmp/talk.mp4");
+    const QString side = QStringLiteral("/tmp/side.mp4");
+    const QString room = QStringLiteral("/tmp/room.mp4");
+    const QStringList files{talk, side, room};
+    // A second camera goes to the command by name. The first file is nobody's, and B-roll is not one.
+    const CutLaunch cut = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                        QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(), QString(),
+                                        false, QStringLiteral("dip"), 0.8, {room}, true, QStringLiteral("auto"),
+                                        {talk, side, room});
+    QCOMPARE(cut.arguments.count(QStringLiteral("--angle-file")), 1);
+    QCOMPARE(cut.arguments.at(cut.arguments.indexOf(QStringLiteral("--angle-file")) + 1), side);
+    QCOMPARE(cut.arguments.at(cut.arguments.indexOf(QStringLiteral("--zoom")) + 1), QStringLiteral("auto"));
+    const CutLaunch assemble = cutRunLaunch(files, QStringLiteral("assemble"), QStringLiteral("/tmp/out"),
+                                             QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                             QString(), false, QStringLiteral("dip"), 0.8, {}, true,
+                                             QStringLiteral("off"), {side});
+    QVERIFY(!assemble.arguments.contains(QStringLiteral("--angle-file")));
+    QCOMPARE(zoomValue(QStringLiteral("auto")), QStringLiteral("auto"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Listening for a second camera")),
+             QStringLiteral("Listening for a second camera"));
+
+    // A saved list keeps the mark, and drops one on the first file or on a B-roll file.
+    const QByteArray bytes = writeCutList(QStringLiteral("speech"), files, QString(), {}, {room}, {side, room});
+    QString mode;
+    QStringList parsed;
+    QString error;
+    QStringList broll;
+    QStringList angles;
+    QVERIFY(parseCutList(bytes, QStringLiteral("/tmp"), &mode, &parsed, &error, nullptr, nullptr, &broll, &angles));
+    QCOMPARE(broll, QStringList{room});
+    QCOMPARE(angles, QStringList{side});
+    QJsonObject edited = QJsonDocument::fromJson(bytes).object();
+    edited.insert(QStringLiteral("angles"), QJsonArray{talk, side, QStringLiteral("/tmp/elsewhere.mp4")});
+    QVERIFY(parseCutList(QJsonDocument(edited).toJson(), QStringLiteral("/tmp"), &mode, &parsed, &error,
+                         nullptr, nullptr, &broll, &angles));
+    QCOMPARE(angles, QStringList{side});
+    // An older list has no second cameras.
+    QVERIFY(parseCutList(writeCutList(QStringLiteral("speech"), files), QStringLiteral("/tmp"), &mode, &parsed,
+                         &error, nullptr, nullptr, &broll, &angles));
+    QVERIFY(angles.isEmpty());
+
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_tray = files;
+    backend.toggleAngle(0);
+    QVERIFY(backend.angleFiles().isEmpty());
+    backend.toggleAngle(1);
+    QCOMPARE(backend.angleFiles(), QStringList{side});
+    // B-roll or a second camera, never both.
+    backend.toggleBroll(1);
+    QVERIFY(backend.angleFiles().isEmpty());
+    QCOMPARE(backend.brollFiles(), QStringList{side});
+    backend.toggleAngle(1);
+    QCOMPARE(backend.angleFiles(), QStringList{side});
+    QVERIFY(backend.brollFiles().isEmpty());
+    backend.toggleAngle(1);
+    QVERIFY(backend.angleFiles().isEmpty());
+}
+
+void BackendTests::stayOnMainHoldsTheRunOnTheFirstCamera() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QString dir = m_dir.filePath(QStringLiteral("second-camera"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString talk = QStringLiteral("/tmp/talk.mp4");
+    const QString side = QStringLiteral("/tmp/side.mp4");
+    backend.m_tray = {talk, side};
+    backend.m_cutOut = dir;
+    QJsonArray lines;
+    for (int id = 4; id <= 7; ++id) {
+        QJsonObject line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("clip"), 0);
+        line.insert(QStringLiteral("start"), id * 10.0);
+        line.insert(QStringLiteral("end"), id * 10.0 + 5.0);
+        line.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(id));
+        line.insert(QStringLiteral("keep"), true);
+        line.insert(QStringLiteral("reason"), QStringLiteral("story"));
+        lines.append(line);
+    }
+    QJsonObject main;
+    main.insert(QStringLiteral("index"), 0);
+    main.insert(QStringLiteral("path"), talk);
+    QJsonObject other;
+    other.insert(QStringLiteral("index"), 1);
+    other.insert(QStringLiteral("path"), side);
+    other.insert(QStringLiteral("role"), QStringLiteral("angle"));
+    other.insert(QStringLiteral("of"), 0);
+    other.insert(QStringLiteral("offset"), -2.5);
+    QJsonObject run;
+    run.insert(QStringLiteral("clip"), 1);
+    run.insert(QStringLiteral("of"), 0);
+    run.insert(QStringLiteral("line"), 5);
+    run.insert(QStringLiteral("through"), 6);
+    run.insert(QStringLiteral("reason"), QStringLiteral("hides a cut"));
+    QJsonObject later = run;
+    later.insert(QStringLiteral("line"), 7);
+    later.insert(QStringLiteral("through"), 7);
+    QJsonObject spot;
+    spot.insert(QStringLiteral("kind"), QStringLiteral("leans"));
+    spot.insert(QStringLiteral("ids"), QJsonArray{6});
+    spot.insert(QStringLiteral("text"), QStringLiteral("This line leans on the one before it, which is dropped."));
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("clips"), QJsonArray{main, other});
+    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("angles"), QJsonArray{run, later});
+    root.insert(QStringLiteral("review"), QJsonArray{spot, QJsonObject()});
+    const QString cuts = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    {
+        QFile file(cuts);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(QJsonDocument(root).toJson());
+    }
+    QSignalSpy reviewed(&backend, &Backend::reviewChanged);
+    backend.loadSelects(cuts);
+    // The runs and the spots come in with the lines, and the file the cut found is marked in the list.
+    QCOMPARE(backend.angles().size(), 2);
+    QCOMPARE(backend.review().size(), 1);
+    QCOMPARE(backend.review().at(0).toMap().value(QStringLiteral("ids")).toList(), QVariantList{6});
+    QCOMPARE(reviewed.count(), 1);
+    QCOMPARE(backend.angleFiles(), QStringList{side});
+
+    // Staying on the main camera from any line of a run holds every line of it, and takes the run.
+    backend.stayOnMain(6);
+    QCOMPARE(backend.angles().size(), 1);
+    QCOMPARE(backend.angles().at(0).toMap().value(QStringLiteral("line")).toInt(), 7);
+    QFile after(cuts);
+    QVERIFY(after.open(QIODevice::ReadOnly));
+    const QJsonObject written = QJsonDocument::fromJson(after.readAll()).object();
+    QCOMPARE(written.value(QStringLiteral("cameras")).toObject().value(QStringLiteral("stay")).toArray(),
+             (QJsonArray{5, 6}));
+    QCOMPARE(written.value(QStringLiteral("angles")).toArray().size(), 1);
+    // The second camera is still lined up for the next render, and the words are untouched.
+    QCOMPARE(written.value(QStringLiteral("clips")).toArray().at(1).toObject().value(QStringLiteral("offset")).toDouble(),
+             -2.5);
+    QCOMPARE(written.value(QStringLiteral("lines")).toArray().size(), 4);
+    // A line that is on the main camera already changes nothing.
+    backend.stayOnMain(4);
+    QCOMPARE(backend.angles().size(), 1);
+}
+
+void BackendTests::secondCameraRunsAndSpotsShowOnLines() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    const QString talk = QStringLiteral("/tmp/talk.mp4");
+    const QString side = QStringLiteral("/tmp/side.mp4");
+    backend.setTray({talk, side});
+    backend.setCutClips({talk, side});
+    QVariantList lines;
+    for (int id = 1; id <= 4; ++id) {
+        QVariantMap line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("clip"), 0);
+        line.insert(QStringLiteral("start"), id * 10.0);
+        line.insert(QStringLiteral("end"), id * 10.0 + 5.0);
+        line.insert(QStringLiteral("keep"), true);
+        line.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(id));
+        lines.append(line);
+    }
+    backend.setSelects(lines);
+    QVariantMap run;
+    run.insert(QStringLiteral("clip"), 1);
+    run.insert(QStringLiteral("line"), 2);
+    run.insert(QStringLiteral("through"), 3);
+    run.insert(QStringLiteral("reason"), QStringLiteral("hides a cut"));
+    backend.setAngles({run});
+    QVariantMap spot;
+    spot.insert(QStringLiteral("kind"), QStringLiteral("leans"));
+    spot.insert(QStringLiteral("ids"), QVariantList{4});
+    spot.insert(QStringLiteral("text"), QStringLiteral("This line leans on the one before it, which is dropped."));
+    QVariantMap word;
+    word.insert(QStringLiteral("kind"), QStringLiteral("jumps"));
+    word.insert(QStringLiteral("ids"), QVariantList{});
+    word.insert(QStringLiteral("text"), QStringLiteral("6 jump cuts show."));
+    backend.setReview({spot, word});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(50);
+    QCOMPARE(window->property("viewStep").toString(), QStringLiteral("lines"));
+    // The first line of the run says why the picture changes. The next says it goes on.
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Second camera · hides a cut")));
+    QVERIFY(visibleItemWithText(window, QStringLiteral("Second camera goes on")));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Stay on main")));
+
+    // What is worth a look is under the chat, by line number. A click goes to that line.
+    QVERIFY(visibleItemWithText(window, QStringLiteral("2 spots worth a look")));
+    QQuickItem *leans = visibleItemWithText(
+        window, QStringLiteral("Line 4 · This line leans on the one before it, which is dropped."));
+    QVERIFY(leans);
+    QVERIFY(visibleItemWithText(window, QStringLiteral("6 jump cuts show.")));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(leans));
+    QTest::qWait(50);
+    QCOMPARE(window->property("currentLine").toInt(), 3);
+
+    // On a line of the run, the selected row offers to stay on the main camera, and not to remove B-roll.
+    QVERIFY(QMetaObject::invokeMethod(window, "showSpot", Q_ARG(QVariant, 3)));
+    QTest::qWait(50);
+    QCOMPARE(window->property("currentLine").toInt(), 2);
+    QQuickItem *stay = visibleItemWithText(window, QStringLiteral("Stay on main"));
+    QVERIFY(stay);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Remove B-roll")));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(stay));
+    QTest::qWait(50);
+    QCOMPARE(backend.lastStayLine, 3);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Second camera goes on")));
+
+    // On Shots, a second file can be marked as the second camera, and the first cannot.
+    backend.setSelects({});
+    emit backend.infoChanged();
+    backend.setTrayIndex(0);
+    QTest::qWait(50);
+    QCOMPARE(window->property("viewStep").toString(), QStringLiteral("shots"));
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("Second camera")));
+    backend.setTrayIndex(1);
+    QTest::qWait(50);
+    QQuickItem *mark = visibleItemWithText(window, QStringLiteral("Second camera"));
+    QVERIFY(mark);
+    QCOMPARE(mark->objectName(), QStringLiteral("angleToggle"));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(mark));
+    QTest::qWait(50);
+    QCOMPARE(backend.lastAngleIndex, 1);
+    // Marked, the row says so, and the one word left puts it back to a shot.
+    QList<QQuickItem *> said;
+    collectVisibleText(window->contentItem(), QStringLiteral("Second camera"), &said);
+    QCOMPARE(said.size(), 1);
+    QVERIFY(said.first()->objectName() != QStringLiteral("angleToggle"));
+    QQuickItem *back = visibleItemWithText(window, QStringLiteral("Shot"));
+    QVERIFY(back);
+    QVERIFY(!visibleItemWithText(window, QStringLiteral("B-roll")));
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(back));
+    QTest::qWait(50);
+    QCOMPARE(backend.lastAngleIndex, 1);
+    QVERIFY(backend.angleFiles().isEmpty());
 }
 
 void BackendTests::linesSentenceCountsCovers() {

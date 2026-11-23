@@ -470,6 +470,29 @@ ApplicationWindow {
         ensureAudioOutput();
         movie.player.armLine();
     }
+    // Where a line sits in the list, counted from one, for a person to read.
+    function lineNumber(id) {
+        var rows = backend.selects;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && Number(rows[i].id) === Number(id))
+                return i + 1;
+        }
+        return Number(id) + 1;
+    }
+    // Go to a line the cut said is worth a look: Lines, that row, that moment in the picture.
+    function showSpot(id) {
+        var rows = backend.selects;
+        for (var i = 0; i < rows.length; i++) {
+            if (!rows[i] || Number(rows[i].id) !== Number(id))
+                continue;
+            shotsPinned = false;
+            if (hasVideo && !gathering)
+                backend.showShots();
+            currentLine = i;
+            showLine(rows[i]);
+            return;
+        }
+    }
     // Play, then seek, then pause. A seek while paused clears the picture.
     function showLine(line) {
         if (!line || line.start === undefined || line.start === null)

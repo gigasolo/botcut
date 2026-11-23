@@ -55,6 +55,12 @@ class Backend : public QObject {
     // The zoom on the speaker: off, cuts, push, or lines.
     Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
+    // The tray files that are a second camera on a take another file filmed.
+    Q_PROPERTY(QStringList angleFiles READ angleFiles NOTIFY trayChanged)
+    // The stretches the movie plays on a second camera, as runs of lines like covers.
+    Q_PROPERTY(QVariantList angles READ angles NOTIFY coversChanged)
+    // The few spots in the cut worth a look: {kind, ids, text}.
+    Q_PROPERTY(QVariantList review READ review NOTIFY reviewChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY paceChanged)
@@ -115,6 +121,9 @@ public:
     bool brollMix() const { return m_brollMix; }
     QString zoom() const { return m_zoom; }
     QVariantList covers() const { return m_covers; }
+    QStringList angleFiles() const;
+    QVariantList angles() const { return m_angles; }
+    QVariantList review() const { return m_review; }
     QStringList cutClips() const { return m_cutClips; }
     QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
@@ -175,6 +184,10 @@ public:
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void clearCover(int lineId);
+    // A shot becomes the second camera of the take before it, and back.
+    Q_INVOKABLE void toggleAngle(int index);
+    // Keep the run of lines this one is in on the main camera.
+    Q_INVOKABLE void stayOnMain(int lineId);
     // Flip one cut inside a line: an um or a restart, taken out or put back.
     Q_INVOKABLE void toggleWordCut(int id, int index);
     // The line that opens the movie goes back to its place.
@@ -237,6 +250,7 @@ signals:
     void brollMixChanged();
     void zoomChanged();
     void coversChanged();
+    void reviewChanged();
     void cutClipsChanged();
     void paceChanged();
     void intentChanged();
@@ -400,6 +414,9 @@ private:
     QVariantList m_undoCovers;
     QVariantList m_selects;
     QVariantList m_covers;
+    QVariantList m_angles;
+    QVariantList m_review;
+    QSet<QString> m_angleFiles;
     // Paths from cuts.json, in clip-index order. The live tray can move without rewriting that file.
     QStringList m_cutClips;
     bool m_gathering = true;

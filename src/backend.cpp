@@ -243,6 +243,9 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     m_brollMix = storedMix != QLatin1String("false");
     // No zoom unless one was chosen.
     m_zoom = zoomValue(QSettings().value(QStringLiteral("zoom")).toString());
+    // The window offers Off and Auto. One of the older kinds, chosen before, is Auto now.
+    if (m_zoom != QLatin1String("off"))
+        m_zoom = QStringLiteral("auto");
 
     pruneProjects();
 
@@ -588,10 +591,16 @@ void Backend::closeProject() {
     const bool wasUnsaved = renderedUnsaved();
     m_tray.clear();
     m_brollFiles.clear();
+    m_angleFiles.clear();
     m_trayIndex = -1;
     m_selects.clear();
     m_undoSelects.clear();
     m_covers.clear();
+    m_angles.clear();
+    if (!m_review.isEmpty()) {
+        m_review.clear();
+        emit reviewChanged();
+    }
     m_undoCovers.clear();
     m_cutClips.clear();
     m_cutOut.clear();
@@ -1063,6 +1072,30 @@ void Backend::toggleBroll(int index) {
         return;
     if (!m_brollFiles.remove(path))
         m_brollFiles.insert(path);
+    // A file is B-roll or a second camera, never both.
+    m_angleFiles.remove(path);
+    emit trayChanged();
+}
+
+QStringList Backend::angleFiles() const {
+    QStringList found;
+    for (const QString &path : m_tray) {
+        if (m_angleFiles.contains(path))
+            found.append(path);
+    }
+    return found;
+}
+
+void Backend::toggleAngle(int index) {
+    // The first file has no take before it to be the second camera of.
+    if (m_busy || index <= 0 || index >= m_tray.size())
+        return;
+    const QString path = m_tray.at(index);
+    if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
+        return;
+    if (!m_angleFiles.remove(path))
+        m_angleFiles.insert(path);
+    m_brollFiles.remove(path);
     emit trayChanged();
 }
 
@@ -1083,6 +1116,7 @@ void Backend::removeTray() {
     if (m_trayIndex < 0 || m_trayIndex >= m_tray.size())
         return;
     m_brollFiles.remove(m_tray.at(m_trayIndex));
+    m_angleFiles.remove(m_tray.at(m_trayIndex));
     m_tray.removeAt(m_trayIndex);
     if (m_tray.isEmpty())
         m_trayIndex = -1;
@@ -1170,13 +1204,15 @@ bool Backend::loadCutListFile(const QUrl &url) {
     QString intent;
     QVariantList lines;
     QStringList broll;
+    QStringList angleList;
     if (!parseCutList(file.readAll(), QFileInfo(file).absolutePath(), &mode, &files, &error, &intent,
-                      &lines, &broll)) {
+                      &lines, &broll, &angleList)) {
         setStatus(error);
         return false;
     }
     m_tray = files;
     m_brollFiles = QSet<QString>(broll.begin(), broll.end());
+    m_angleFiles = QSet<QString>(angleList.begin(), angleList.end());
     m_trayIndex = 0;
     m_selects = lines;
     m_covers.clear();
@@ -1205,7 +1241,7 @@ void Backend::writeCutListFile(const QUrl &url) {
     }
     if (!path.endsWith(QStringLiteral(".botcut.json"), Qt::CaseInsensitive))
         path += QStringLiteral(".botcut.json");
-    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles());
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles(), angleFiles());
     if (bytes.isEmpty()) {
         setStatus(QStringLiteral("Could not save the list"));
         return;
@@ -1371,7 +1407,7 @@ QString Backend::listForCurrentTray() {
                                   + QString::number(QDateTime::currentMSecsSinceEpoch())
                                   + QStringLiteral(".botcut.json"));
     }
-    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles());
+    const QByteArray bytes = writeCutList(m_cutMode, m_tray, intentForCut(), m_selects, brollFiles(), angleFiles());
     if (bytes.isEmpty())
         return {};
     QFile file(path);
@@ -1459,6 +1495,7 @@ void Backend::adoptProjectTray() {
               [](const QPair<int, QJsonObject> &a, const QPair<int, QJsonObject> &b) { return a.first < b.first; });
     QStringList tray;
     QSet<QString> broll;
+    QSet<QString> secondCameras;
     for (const auto &entry : ordered) {
         QString path = entry.second.value(QStringLiteral("path")).toString();
         if (path.isEmpty())
@@ -1470,11 +1507,14 @@ void Backend::adoptProjectTray() {
         tray.append(path);
         if (entry.second.value(QStringLiteral("role")).toString() == QLatin1String("broll"))
             broll.insert(path);
+        if (entry.second.value(QStringLiteral("role")).toString() == QLatin1String("angle"))
+            secondCameras.insert(path);
     }
     if (tray.isEmpty() || tray == m_tray)
         return;
     m_tray = tray;
     m_brollFiles = broll;
+    m_angleFiles = secondCameras;
     m_trayIndex = 0;
     m_listPath.clear();
     for (const QVariant &row : recentCuts()) {
@@ -1504,7 +1544,8 @@ void Backend::startCut() {
     const QString out = newProjectDir();
     // One press makes the movie. The lines are there to change it afterwards.
     const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, tool.cli, tool.uv, tool.project, intentForCut(), false,
-                                          m_sceneTransition, maxPause(), brollFiles(), m_brollMix, m_zoom);
+                                          m_sceneTransition, maxPause(), brollFiles(), m_brollMix, m_zoom,
+                                          angleFiles());
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -1628,6 +1669,67 @@ void Backend::clearHook() {
         touchMovie();
         return;
     }
+}
+
+void Backend::stayOnMain(int lineId) {
+    if (m_busy)
+        return;
+    const QString cuts = m_cutOut.isEmpty() ? QString() : QDir(m_cutOut).filePath(QStringLiteral("cuts.json"));
+    if (cuts.isEmpty() || !QFileInfo::exists(cuts))
+        return;
+    // The run this line is in, and every line of it: those are the ones to hold on the main camera.
+    QHash<int, int> positions;
+    for (int i = 0; i < m_selects.size(); ++i)
+        positions.insert(m_selects.at(i).toMap().value(QStringLiteral("id")).toInt(), i);
+    const int at = positions.value(lineId, -1);
+    int found = -1;
+    int first = -1;
+    int last = -1;
+    for (int i = 0; i < m_angles.size() && found < 0; ++i) {
+        const QVariantMap run = m_angles.at(i).toMap();
+        first = positions.value(run.value(QStringLiteral("line")).toInt(), -1);
+        last = run.contains(QStringLiteral("through"))
+                   ? positions.value(run.value(QStringLiteral("through")).toInt(), first)
+                   : first;
+        if (at >= 0 && first >= 0 && at >= first && at <= std::max(first, last))
+            found = i;
+    }
+    if (found < 0)
+        return;
+    QFile file(cuts);
+    if (!file.open(QIODevice::ReadOnly))
+        return;
+    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    if (!doc.isObject())
+        return;
+    QJsonObject root = doc.object();
+    QJsonObject cameras = root.value(QStringLiteral("cameras")).toObject();
+    QJsonArray stay = cameras.value(QStringLiteral("stay")).toArray();
+    for (int i = first; i <= std::max(first, last); ++i) {
+        const int id = m_selects.at(i).toMap().value(QStringLiteral("id")).toInt();
+        if (!stay.contains(id))
+            stay.append(id);
+    }
+    cameras.insert(QStringLiteral("stay"), stay);
+    root.insert(QStringLiteral("cameras"), cameras);
+    QJsonArray runs = root.value(QStringLiteral("angles")).toArray();
+    if (found < runs.size())
+        runs.removeAt(found);
+    if (runs.isEmpty())
+        root.remove(QStringLiteral("angles"));
+    else
+        root.insert(QStringLiteral("angles"), runs);
+    QSaveFile out(cuts);
+    const QByteArray bytes = QJsonDocument(root).toJson(QJsonDocument::Indented);
+    if (!out.open(QIODevice::WriteOnly) || out.write(bytes) != bytes.size() || !out.commit()) {
+        out.cancelWriting();
+        setStatus(QStringLiteral("Could not save the line list"));
+        return;
+    }
+    m_angles.removeAt(found);
+    emit coversChanged();
+    touchMovie();
 }
 
 void Backend::clearCover(int lineId) {
@@ -1854,6 +1956,41 @@ void Backend::loadSelects(const QString &cutsPath) {
     }
     m_selects = rows;
     m_covers = coversFromJson(doc.object().value(QStringLiteral("covers")), cutsPath);
+    m_angles = coversFromJson(doc.object().value(QStringLiteral("angles")), cutsPath);
+    // What the cut noted as worth a look.
+    QVariantList spots;
+    for (const QJsonValue &value : doc.object().value(QStringLiteral("review")).toArray()) {
+        const QJsonObject spot = value.toObject();
+        const QString text = spot.value(QStringLiteral("text")).toString().simplified();
+        if (text.isEmpty())
+            continue;
+        QVariantList ids;
+        for (const QJsonValue &id : spot.value(QStringLiteral("ids")).toArray()) {
+            if (id.isDouble())
+                ids.append(id.toInt());
+        }
+        QVariantMap row;
+        row.insert(QStringLiteral("kind"), spot.value(QStringLiteral("kind")).toString());
+        row.insert(QStringLiteral("ids"), ids);
+        row.insert(QStringLiteral("text"), text);
+        spots.append(row);
+    }
+    if (spots != m_review) {
+        m_review = spots;
+        emit reviewChanged();
+    }
+    // A file the cut found to be a second camera is marked as one in the shot list.
+    QSet<QString> secondCameras = m_angleFiles;
+    for (const QJsonValue &value : doc.object().value(QStringLiteral("clips")).toArray()) {
+        const QJsonObject clip = value.toObject();
+        const QString path = clip.value(QStringLiteral("path")).toString();
+        if (clip.value(QStringLiteral("role")).toString() == QLatin1String("angle") && m_tray.contains(path))
+            secondCameras.insert(path);
+    }
+    if (secondCameras != m_angleFiles) {
+        m_angleFiles = secondCameras;
+        emit trayChanged();
+    }
     QStringList clipPaths;
     for (const QJsonValue &value : doc.object().value(QStringLiteral("clips")).toArray()) {
         if (!value.isObject())
@@ -2915,7 +3052,8 @@ void Backend::sayCovers(const QString &cutsPath) {
         return;
     const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
     const QString reply = QStringList{root.value(QStringLiteral("cut_reply")).toString().simplified(),
-                                      root.value(QStringLiteral("covers_reply")).toString().simplified()}
+                                      root.value(QStringLiteral("covers_reply")).toString().simplified(),
+                                      root.value(QStringLiteral("angles_reply")).toString().simplified()}
                               .filter(QRegularExpression(QStringLiteral(".")))
                               .join(QLatin1Char(' '));
     // What the cut asked of the model is said once, here, and nowhere else.

@@ -23,14 +23,15 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &intent = QString(), bool decide = false,
                        const QString &sceneTransition = QStringLiteral("dip"),
                        double maxPause = 0.8, const QStringList &brollFiles = {},
-                       bool brollMix = true, const QString &zoom = QStringLiteral("off"));
+                       bool brollMix = true, const QString &zoom = QStringLiteral("off"),
+                       const QStringList &angleFiles = {});
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
                           const QString &sceneTransition = QStringLiteral("dip"),
                           bool brollMix = true, const QString &zoom = QStringLiteral("off"));
 
-// The zoom on the speaker: off, cuts, push, or lines. Anything else is off.
+// The zoom on the speaker: off, or auto. The command line's cuts, push, and lines still pass. Anything else is off.
 QString zoomValue(const QString &zoom);
 
 
@@ -78,9 +79,10 @@ QString cardDestinationError(const QString &dest);
 // still opens, and so does an older list with no "broll".
 bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode, QStringList *files,
                   QString *error, QString *intent = nullptr, QVariantList *lines = nullptr,
-                  QStringList *brollFiles = nullptr);
+                  QStringList *brollFiles = nullptr, QStringList *angleFiles = nullptr);
 QByteArray writeCutList(const QString &mode, const QStringList &files, const QString &intent = QString(),
-                        const QVariantList &lines = {}, const QStringList &brollFiles = {});
+                        const QVariantList &lines = {}, const QStringList &brollFiles = {},
+                        const QStringList &angleFiles = {});
 
 // Child environment for botcut-cli. A typed key is inserted here, never into argv.
 QProcessEnvironment cutProcessEnvironment(const QProcessEnvironment &base, const QString &uiKey);

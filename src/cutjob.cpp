@@ -91,14 +91,16 @@ QString defaultCutIntent() {
 }
 
 QString zoomValue(const QString &zoom) {
-    static const QStringList known{QStringLiteral("cuts"), QStringLiteral("push"), QStringLiteral("lines")};
+    static const QStringList known{QStringLiteral("auto"), QStringLiteral("cuts"), QStringLiteral("push"),
+                                   QStringLiteral("lines")};
     return known.contains(zoom) ? zoom : QStringLiteral("off");
 }
 
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent, bool decide, const QString &sceneTransition,
-                       double maxPause, const QStringList &brollFiles, bool brollMix, const QString &zoom) {
+                       double maxPause, const QStringList &brollFiles, bool brollMix, const QString &zoom,
+                       const QStringList &angleFiles) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -116,6 +118,11 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
         for (const QString &path : brollFiles) {
             if (!path.isEmpty() && files.contains(path))
                 tail << QStringLiteral("--b-roll-file") << path;
+        }
+        // A second camera on a take another file filmed. The first file can be nobody's second camera.
+        for (const QString &path : angleFiles) {
+            if (!path.isEmpty() && files.indexOf(path) > 0 && !brollFiles.contains(path))
+                tail << QStringLiteral("--angle-file") << path;
         }
     }
     tail << QStringLiteral("--b-roll-sound")
@@ -258,7 +265,8 @@ CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QStr
 }
 
 bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode, QStringList *files,
-                  QString *error, QString *intent, QVariantList *lines, QStringList *brollFiles) {
+                  QString *error, QString *intent, QVariantList *lines, QStringList *brollFiles,
+                  QStringList *angleFiles) {
     const QJsonDocument doc = QJsonDocument::fromJson(json);
     if (!doc.isObject()) {
         *error = QStringLiteral("Cut list is not a JSON object");
@@ -349,11 +357,29 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
             brollFiles->append(path);
         }
     }
+    if (angleFiles != nullptr) {
+        angleFiles->clear();
+        // A second camera is one of the files, not the first, not a card, and not B-roll.
+        const QJsonArray brollArray = root.value(QStringLiteral("broll")).toArray();
+        for (const QJsonValue &value : root.value(QStringLiteral("angles")).toArray()) {
+            if (!value.isString() || value.toString().isEmpty())
+                continue;
+            const QFileInfo info(value.toString());
+            const QString path = info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
+                                                   : info.absoluteFilePath();
+            if (parsed.indexOf(path) <= 0 || angleFiles->contains(path) || brollArray.contains(value))
+                continue;
+            if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
+                continue;
+            angleFiles->append(path);
+        }
+    }
     return true;
 }
 
 QByteArray writeCutList(const QString &mode, const QStringList &files, const QString &intent,
-                        const QVariantList &lines, const QStringList &brollFiles) {
+                        const QVariantList &lines, const QStringList &brollFiles,
+                        const QStringList &angleFiles) {
     if ((mode != QLatin1String("speech") && mode != QLatin1String("assemble")) || files.isEmpty())
         return {};
     QJsonArray array;
@@ -372,6 +398,13 @@ QByteArray writeCutList(const QString &mode, const QStringList &files, const QSt
     }
     if (!broll.isEmpty())
         root.insert(QStringLiteral("broll"), broll);
+    QJsonArray angles;
+    for (const QString &path : files) {
+        if (angleFiles.contains(path) && !brollFiles.contains(path))
+            angles.append(QFileInfo(path).absoluteFilePath());
+    }
+    if (!angles.isEmpty())
+        root.insert(QStringLiteral("angles"), angles);
     if (!lines.isEmpty()) {
         QJsonArray lineArray;
         for (const QVariant &item : lines) {
@@ -412,6 +445,7 @@ QString cutStatusFromLine(const QString &line) {
         || trimmed == QLatin1String("Reading beats") || trimmed == QLatin1String("Choosing takes")
         || trimmed == QLatin1String("Checking the cut")
         || trimmed == QLatin1String("Choosing covers") || trimmed == QLatin1String("Trying again")
+        || trimmed == QLatin1String("Listening for a second camera")
         || trimmed == QLatin1String("Revising"))
         return trimmed;
     static const QRegularExpression decided(QStringLiteral("^\\d+ kept, \\d+ dropped$"));

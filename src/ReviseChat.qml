@@ -184,6 +184,46 @@ Item {
                         font.pixelSize: 12
                         wrapMode: Text.WordWrap
                     }
+                    // The few spots in this cut worth a look. A click goes to the line.
+                    Column {
+                        objectName: "reviewSpots"
+                        visible: backend.review.length > 0 && !backend.busy && !backend.proposalPending
+                        width: parent.width
+                        spacing: 4
+                        Label {
+                            text: backend.review.length === 1 ? qsTr("One spot worth a look")
+                                                                : qsTr("%1 spots worth a look").arg(backend.review.length)
+                            color: theme.foreground
+                            opacity: 0.62
+                            font.pixelSize: 12
+                        }
+                        Repeater {
+                            model: backend.review
+                            Label {
+                                id: spot
+                                required property var modelData
+                                readonly property var ids: modelData.ids || []
+                                readonly property bool goes: ids.length > 0
+                                width: parent.width
+                                text: goes ? qsTr("Line %1 · %2").arg(root.host ? root.host.lineNumber(ids[0]) : ids[0])
+                                                                 .arg(String(modelData.text))
+                                           : String(modelData.text)
+                                color: theme.foreground
+                                opacity: goes && spotArea.containsMouse ? 1 : 0.8
+                                font.pixelSize: 13
+                                font.underline: goes && spotArea.containsMouse
+                                wrapMode: Text.WordWrap
+                                MouseArea {
+                                    id: spotArea
+                                    anchors.fill: parent
+                                    enabled: spot.goes
+                                    hoverEnabled: true
+                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    onClicked: root.host.showSpot(spot.ids[0])
+                                }
+                            }
+                        }
+                    }
                 }
             }
             delegate: Item {

@@ -38,7 +38,13 @@ Item {
     }
     // The run this line is in, and whether the line is its first. Null when none.
     function coverOf(line) {
-        var rows = backend.covers
+        return runOf(line, backend.covers)
+    }
+    // The same for a stretch on a second camera. B-roll over a line is what shows, so it is what is said.
+    function angleOf(line) {
+        return coverOf(line) ? null : runOf(line, backend.angles)
+    }
+    function runOf(line, rows) {
         var lines = backend.selects
         if (!line || !rows || !lines)
             return null
@@ -78,6 +84,13 @@ Item {
     }
     function coverText(line) {
         var hit = coverOf(line)
+        var other = hit ? null : angleOf(line)
+        if (other) {
+            if (!other.first)
+                return qsTr("Second camera goes on")
+            return other.cover.reason ? qsTr("Second camera · %1").arg(String(other.cover.reason))
+                                      : qsTr("Second camera")
+        }
         if (!hit)
             return ""
         if (!hit.first)
@@ -97,7 +110,7 @@ Item {
         return words
     }
     function coverStill(line) {
-        var hit = coverOf(line)
+        var hit = coverOf(line) || angleOf(line)
         if (!hit || !hit.first || !hit.cover.still)
             return ""
         return host.fileUrl(String(hit.cover.still))
@@ -392,6 +405,7 @@ Item {
                         reasonText: root.reasonText(modelData.reason)
                         coverText: root.coverText(modelData)
                         coverStill: root.coverStill(modelData)
+                        secondCamera: root.angleOf(modelData) !== null
                         selected: host.viewStep === "lines" && index === host.currentLine
                         marked: host.viewStep === "movie" && index === root.playheadIndex
                         onPicked: {

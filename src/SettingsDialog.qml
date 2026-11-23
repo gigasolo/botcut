@@ -187,9 +187,7 @@ Item {
                 Repeater {
                     model: [
                         { value: "off", word: qsTr("Off") },
-                        { value: "cuts", word: qsTr("On cuts") },
-                        { value: "push", word: qsTr("Slow push") },
-                        { value: "lines", word: qsTr("Key lines") }
+                        { value: "auto", word: qsTr("Auto") }
                     ]
                     ActionButton {
                         required property var modelData
@@ -207,9 +205,7 @@ Item {
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 12
-                text: backend.zoom === "cuts" ? qsTr("Goes a little closer at a cut between lines, so the jump reads as a change of shot.")
-                    : backend.zoom === "push" ? qsTr("Moves in slowly on the speaker between cuts. The slowest to render.")
-                    : backend.zoom === "lines" ? qsTr("Goes closer on the few lines that carry the point. A movie cut before this was added has none until it is cut again.")
+                text: backend.zoom !== "off" ? qsTr("Goes closer at a cut between lines, so the jump reads as a change of shot, and on the few lines that carry the point. A long stretch moves in slowly. The first render takes longer.")
                     : qsTr("The picture plays as it was shot.")
             }
             RowLayout {

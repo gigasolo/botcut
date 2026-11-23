@@ -16,9 +16,12 @@ Rectangle {
     readonly property bool card: baseName(modelData).indexOf("botcut-card-") === 0
     // Read through the list so the row follows a toggle. A card is never B-roll.
     readonly property bool broll: !card && backend.brollFiles.indexOf(modelData) >= 0
+    // Another camera on a take a file above it filmed. Found by its sound, or marked by hand.
+    readonly property bool angle: !card && !broll && backend.angleFiles.indexOf(modelData) >= 0
     readonly property string title: card ? qsTr("Title card") : baseName(modelData)
     readonly property string fact: !exists ? qsTr("File missing")
-                                           : broll ? qsTr("B-roll") : backend.trayFileSize(modelData)
+                                           : broll ? qsTr("B-roll")
+                                           : angle ? qsTr("Second camera") : backend.trayFileSize(modelData)
 
     function baseName(path) {
         var s = String(path)
@@ -99,9 +102,11 @@ Rectangle {
             }
         }
 
-        Row {
+        // The words wrap onto a second line when the column is narrow.
+        Flow {
             id: actions
             visible: row.selected
+            width: parent.width
             spacing: 12
             Label {
                 text: qsTr("Move up")
@@ -155,10 +160,30 @@ Rectangle {
                 }
             }
             // A shot becomes B-roll, and B-roll becomes a shot again. A card is neither.
+            // The same take from another camera. The first file is nobody's second camera.
+            Label {
+                objectName: "angleToggle"
+                visible: !row.card && !row.broll && !row.angle && row.index > 0
+                text: qsTr("Second camera")
+                color: theme.foreground
+                opacity: angleArea.enabled ? 0.62 : 0.38
+                font.pixelSize: 13
+                enabled: !backend.busy
+                MouseArea {
+                    id: angleArea
+                    anchors.fill: parent
+                    enabled: parent.enabled
+                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        backend.trayIndex = row.index
+                        backend.toggleAngle(row.index)
+                    }
+                }
+            }
             Label {
                 objectName: "brollToggle"
                 visible: !row.card
-                text: row.broll ? qsTr("Shot") : qsTr("B-roll")
+                text: row.broll || row.angle ? qsTr("Shot") : qsTr("B-roll")
                 color: theme.foreground
                 opacity: brollArea.enabled ? 0.62 : 0.38
                 font.pixelSize: 13
@@ -170,7 +195,10 @@ Rectangle {
                     cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                     onClicked: {
                         backend.trayIndex = row.index
-                        backend.toggleBroll(row.index)
+                        if (row.angle)
+                            backend.toggleAngle(row.index)
+                        else
+                            backend.toggleBroll(row.index)
                     }
                 }
             }

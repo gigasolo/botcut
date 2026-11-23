@@ -536,7 +536,8 @@ def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> lis
 
 # A shoot that fits in one request is read and cut in the same one: every retake is
 # already side by side there, so a first pass that only outlines it is time spent twice.
-FOLD_EFFORT = "medium"
+# The bench found no gain from more thought here on the one case there is, at twice the wait.
+FOLD_EFFORT = "low"
 
 FOLD_NOTE = (
     "\nRead all of it first, the way an editor reads a shoot before cutting it. "

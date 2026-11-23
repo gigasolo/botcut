@@ -13,6 +13,8 @@ Item {
     property string reasonText: ""
     property string coverText: ""
     property string coverStill: ""
+    // The cover on this line is a second camera, not B-roll.
+    property bool secondCamera: false
     property bool selected: false
     property bool marked: false
     signal picked()
@@ -230,11 +232,20 @@ Item {
                 onChosen: backend.clearHook()
             }
             RowWord {
-                visible: row.selected && row.coverText !== ""
+                visible: row.selected && row.coverText !== "" && !row.secondCamera
                 word: qsTr("Remove B-roll")
                 onChosen: {
                     if (row.modelData)
                         backend.clearCover(row.modelData.id)
+                }
+            }
+            RowWord {
+                objectName: "stayOnMainWord"
+                visible: row.selected && row.secondCamera
+                word: qsTr("Stay on main")
+                onChosen: {
+                    if (row.modelData)
+                        backend.stayOnMain(row.modelData.id)
                 }
             }
         }

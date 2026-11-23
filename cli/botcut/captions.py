@@ -44,8 +44,8 @@ def load_words_by_clip(doc: dict, out_dir: str) -> list[list[dict]]:
         candidates = word_cache_candidates(work, index, stem, backend)
         found = next((path for path in candidates if os.path.isfile(path)), None)
         if found is None:
-            # A card or a B-roll file has no transcript. Captions skip it instead of failing the movie.
-            if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") == "broll":
+            # A card, a B-roll file, or a second camera has no transcript. Captions skip it instead of failing the movie.
+            if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") in ("broll", "angle"):
                 by_index[index] = []
                 continue
             raise SystemExit(f"No word cache: {candidates[0]}")

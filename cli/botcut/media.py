@@ -1046,7 +1046,7 @@ def frame_size(clips: list[dict]) -> tuple[int, int, float]:
     """
     ref = clips[0]
     for clip in clips:
-        if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") == "broll":
+        if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") in ("broll", "angle"):
             continue
         ref = clip
         break

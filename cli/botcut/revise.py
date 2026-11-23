@@ -25,6 +25,7 @@ from botcut.broll import (
     collect_beats,
     kept_covers,
 )
+from botcut import angles as cams
 from botcut.llm import ask
 from botcut.frame import close_ids
 from botcut.pick import hook_line
@@ -40,7 +41,10 @@ PACES = ("open", "measured", "tight", "frenzied")
 DELIVERS = ("none", "render", "captions", "short")
 # What to do with the cuts inside lines: fillers and words said twice.
 FILLERS = ("same", "cut", "keep")
-_FIELDS = {"reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers"}
+# How often the picture changes between cameras on the same take. same leaves it as it is.
+CAMERAS = ("same", "calm", "normal", "busy", "off")
+_FIELDS = {"reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers", "cameras", "favor"}
+_LATER_FIELDS = {"covers", "fillers", "cameras", "favor"}
 _KEEP_FIELDS = {"id", "reason"}
 _COVER_FIELDS = {"beat", "line", "through", "reason"}
 
@@ -52,7 +56,9 @@ REVISE_SCHEMA = {
         "schema": {
             "type": "object",
             "additionalProperties": False,
-            "required": ["reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers"],
+            "required": [
+                "reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers", "cameras", "favor",
+            ],
             "properties": {
                 "reply": {"type": "string"},
                 "intent": {"type": "string"},
@@ -72,6 +78,8 @@ REVISE_SCHEMA = {
                 },
                 "deliver": {"type": "string", "enum": list(DELIVERS)},
                 "fillers": {"type": "string", "enum": list(FILLERS)},
+                "cameras": {"type": "string", "enum": list(CAMERAS)},
+                "favor": {"type": "integer"},
                 "covers": {
                     "type": "array",
                     "items": {
@@ -103,6 +111,10 @@ REVISE_SYSTEM = (
     "Fillers is same, cut, or keep. cut takes every filler sound and stumbled restart out of the kept "
     "lines, keep leaves them all in, and same changes none of them. "
     "none only means not to mark render, captions, or short. "
+    "Cameras is same, calm, normal, busy, or off: how often the picture changes between cameras that "
+    "filmed the same take. same leaves the cameras and favor as they are, and off stays on the main "
+    "camera. Favor is the number of the camera to stay on most of the time, or -1 for none. "
+    "With no cameras listed, return same and -1. "
     "Do not return times, padding, or any join other than dip on or off. "
     "A listed id is kept. An id you leave out is dropped. Do not invent ids. "
     "Covers is the full list of B-roll runs to keep. "
@@ -152,9 +164,14 @@ def apply_revise(lines: list[dict], keep: list[dict]) -> list[dict]:
 
 def parse_revise(payload: dict) -> dict:
     # A proposal saved before cuts inside lines has no fillers, and one with no B-roll has no covers.
-    if not isinstance(payload, dict) or not (
-        _FIELDS - {"covers", "fillers"} <= set(payload) <= _FIELDS
-    ):
+    if not isinstance(payload, dict) or not (_FIELDS - _LATER_FIELDS <= set(payload) <= _FIELDS):
+        raise SystemExit("LLM response was not a revise")
+    # A proposal saved before there were second cameras says nothing about them.
+    cameras = payload.get("cameras") or "same"
+    favor = payload.get("favor")
+    if favor is None:
+        favor = -1
+    if cameras not in CAMERAS or isinstance(favor, bool) or not isinstance(favor, int):
         raise SystemExit("LLM response was not a revise")
     fillers = payload.get("fillers", "same")
     if fillers is None:
@@ -205,6 +222,8 @@ def parse_revise(payload: dict) -> dict:
         "deliver": deliver,
         "covers": None if covers is None else [dict(item) for item in covers],
         "fillers": fillers,
+        "cameras": cameras,
+        "favor": favor if favor >= 0 else -1,
     }
 
 
@@ -271,7 +290,10 @@ def revise(
         covers=current_runs(doc.get("covers"), beats),
         clips=clips,
         still_dir=os.path.join(out_dir, "work", "stills"),
+        cameras=cameras_note(doc),
     )
+    if not cams.groups(clips):
+        result["cameras"], result["favor"] = "same", -1
     if not beats:
         # No B-roll in this cut: the proposal says nothing about runs, and the window does not either.
         result["covers"] = None
@@ -343,6 +365,18 @@ def _land(cuts_path: str, doc: dict, lines: list[dict], result: dict) -> None:
         doc["covers"] = covers
     else:
         doc.pop("covers", None)
+    if result.get("cameras", "same") != "same" and cams.groups(clips):
+        asked = cams.read_cameras(doc.get("cameras"), clips)
+        if result["cameras"] == "off":
+            asked["off"] = True
+        else:
+            asked["off"] = False
+            asked["pace"] = result["cameras"]
+        asked["favor"] = cams.read_cameras({"favor": result.get("favor")}, clips)["favor"]
+        if cams.write_cameras(asked):
+            doc["cameras"] = cams.write_cameras(asked)
+        else:
+            doc.pop("cameras", None)
     doc["intent"] = result["intent"]
     doc["lines"] = new_lines
     doc["dropped"] = [
@@ -376,13 +410,14 @@ def _plan(
     covers: list[dict] | None = None,
     clips: list[dict] | None = None,
     still_dir: str | None = None,
+    cameras: str = "",
 ) -> dict:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return parse_revise(_fake(lines, covers))
     key = os.environ.get("XAI_API_KEY")
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
-    text = _user_message(lines, note, intent, pace, dip, beats, covers)
+    text = _user_message(lines, note, intent, pace, dip, beats, covers, cameras)
     content: str | list = text
     if beats and clips and still_dir:
         from botcut.pick import _jpeg_data_url
@@ -428,7 +463,30 @@ def _fake(lines: list[dict], covers: list[dict] | None = None) -> dict:
         "deliver": "render",
         "covers": list(covers or []),
         "fillers": "same",
+        "cameras": "same",
+        "favor": -1,
     }
+
+
+def cameras_note(doc: dict) -> str:
+    """The cameras on each take and how they are cut now, for the model. Empty with one camera."""
+    clips = doc.get("clips") or []
+    by_main = cams.groups(clips)
+    if not by_main:
+        return ""
+    asked = cams.read_cameras(doc.get("cameras"), clips)
+    rows = ["Cameras that filmed the same take:"]
+    for main, others in by_main.items():
+        for cam in (main, *others):
+            what = "the main camera" if cam == main else "another camera"
+            view = str(clips[cam].get("view") or "")
+            name = os.path.basename(str(clips[cam].get("path") or ""))
+            rows.append(f"camera {cam}, {what}{', the ' + view + ' view' if view else ''}, {name}")
+    now = "off" if asked["off"] else asked["pace"]
+    favor = asked["favor"] if asked["favor"] is not None else -1
+    runs = len(doc.get("angles") or [])
+    rows.append(f"Cameras now: {now}, favor {favor}. The picture goes to another camera {runs} times.")
+    return "\n".join(rows)
 
 
 def _user_message(
@@ -439,6 +497,7 @@ def _user_message(
     dip: bool,
     beats: list[dict] | None = None,
     covers: list[dict] | None = None,
+    cameras: str = "",
 ) -> str:
     body = [
         f"The movie is: {intent}",
@@ -468,6 +527,9 @@ def _user_message(
                 )
         else:
             body.append("No B-roll is laid now.")
+    if cameras:
+        body.append("")
+        body.append(cameras)
     body.append("")
     body.append(f"Note: {note}")
     return "\n".join(body)

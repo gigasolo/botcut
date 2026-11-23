@@ -88,7 +88,7 @@ def test_parse_rejects_times_padding_and_a_bad_pace():
         parse_revise(bad_pace)
     schema = REVISE_SCHEMA["json_schema"]["schema"]
     assert set(schema["properties"]) == {
-            "reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers",
+            "reply", "intent", "pace", "dip", "keep", "deliver", "covers", "fillers", "cameras", "favor",
         }
     assert set(schema["properties"]["covers"]["items"]["properties"]) == {"beat", "line", "through", "reason"}
     assert "A listed run stays." in REVISE_SYSTEM

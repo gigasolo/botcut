@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 
+from botcut import angles as cameras
 from botcut import llm, net
 from botcut.broll import beats_from_cuts, choose_covers, fake_beats, is_broll
 from botcut.card import is_card, make_card, merge_cards
@@ -161,6 +162,13 @@ def main(argv: list[str] | None = None) -> None:
         default="mix",
         help="mix the B-roll sound under the voice, or play the voice alone",
     )
+    run_p.add_argument(
+        "--angle-file",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="this file is another camera on a take one of the other files filmed",
+    )
     run_p.add_argument("--zoom", choices=ZOOMS, default="off", help=ZOOM_HELP)
     render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
     render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
@@ -239,6 +247,7 @@ def main(argv: list[str] | None = None) -> None:
                 broll_files=args.b_roll_file,
                 broll_sound=args.b_roll_sound,
                 zoom=args.zoom,
+                angle_files=args.angle_file,
             )
         elif args.cmd == "render":
             render_saved(
@@ -297,6 +306,7 @@ def run(
     broll_files: list[str] | None = None,
     broll_sound: str = "mix",
     zoom: str = "off",
+    angle_files: list[str] | None = None,
 ) -> None:
     if mode not in ("speech", "assemble"):
         raise SystemExit(f"Unknown mode: {mode}")
@@ -304,6 +314,13 @@ def run(
     paths = resolve_inputs(files)
     # Assemble plays every file in order with its own sound, so a B-roll mark means nothing there.
     roles = _broll_roles(paths, [*(broll_files or []), *resolve_broll(files)]) if mode == "speech" else set()
+    other_cameras = (
+        _broll_roles(paths, [*(angle_files or []), *resolve_angles(files)], what="A second camera")
+        if mode == "speech"
+        else set()
+    )
+    if roles & other_cameras:
+        raise SystemExit("A file is B-roll or a second camera, not both")
     print("Reading files", flush=True)
     clips = []
     for index, path in enumerate(paths):
@@ -347,10 +364,12 @@ def run(
         # A card has nothing heard or measured, so nothing is kept for it.
         if not is_card(clip["path"]):
             _drop_stale_caches(work, index, clip, label)
+    # Two files that heard the same take are two cameras on it. The second is never transcribed.
+    find_cameras(work, clips, other_cameras)
     speech = [
         (index, clip)
         for index, clip in enumerate(clips)
-        if not is_card(clip["path"]) and not is_broll(clip)
+        if not is_card(clip["path"]) and not is_broll(clip) and not cameras.is_angle(clip)
     ]
     clock.lap("read")
     for index, clip in enumerate(clips):
@@ -485,10 +504,15 @@ def run(
         doc["covers_reply"] = covers_reply
     if hook is not None:
         doc["hook"] = hook
+    if cameras.groups(clips):
+        cameras.name_views(clips, os.path.join(work, "stills"))
+        doc["clips"] = [_clip_row(i, clip) for i, clip in enumerate(clips)]
+        clock.lap("cameras")
     # The lines that carry the point, kept whatever the zoom is, so choosing Key lines later needs no new cut.
     close = close_ids(changes.get("close"), lines)
     if close:
         doc["close"] = close
+    plan_cameras(doc, clips, segs, out)
     if changes["reply"]:
         # What the editor says about the cut it read back. The window opens the chat with it.
         doc["cut_reply"] = changes["reply"]
@@ -511,24 +535,170 @@ def _clip_row(index: int, clip: dict) -> dict:
     row = {"index": index, "path": clip["path"], "duration": clip["duration"]}
     if is_broll(clip):
         row["role"] = "broll"
+    if cameras.is_angle(clip):
+        # Another camera on the take shot `of` filmed, and where that take is in this file.
+        row["role"] = "angle"
+        for key in ("of", "offset", "drift", "view"):
+            if clip.get(key) not in (None, "", 0.0) or key in ("of", "offset"):
+                row[key] = clip.get(key)
+    elif clip.get("view"):
+        row["view"] = clip["view"]
     # Where the speaker is, so a later render and the short frame them the same way.
     if clip.get("face"):
         row["face"] = clip["face"]
     return row
 
 
-def _broll_roles(paths: list[str], broll_files: list[str]) -> set[int]:
-    """Clip indexes marked B-roll. The file has to be one of the shots, and not a card."""
+def _broll_roles(paths: list[str], broll_files: list[str], what: str = "B-roll") -> set[int]:
+    """Clip indexes marked B-roll, or a second camera. The file has to be one of the shots, and not a card."""
     absolute = [os.path.abspath(path) for path in paths]
     roles: set[int] = set()
     for wanted in broll_files or []:
         target = os.path.abspath(wanted)
         if target not in absolute:
-            raise SystemExit(f"B-roll file is not in the list: {wanted}")
+            raise SystemExit(f"{what} file is not in the list: {wanted}")
         if is_card(target):
-            raise SystemExit(f"A card cannot be B-roll: {wanted}")
+            raise SystemExit(f"A card cannot be {'B-roll' if what == 'B-roll' else 'a second camera'}: {wanted}")
         roles.add(absolute.index(target))
     return roles
+
+
+# Two files are taken for two cameras on one take only when they share this much of the shorter one.
+CAMERA_SHARE = 0.5
+
+
+def find_cameras(work: str, clips: list[dict], marked: set[int]) -> None:
+    """Mark each file that is another camera on a take an earlier file filmed.
+
+    A file the person marked is lined up with whichever shot matches it best,
+    and the cut stops if none does. Among the rest, a later file that heard
+    the same sound as an earlier one for at least half its length is taken
+    for its second camera. What is found is kept in work/cameras.json.
+    """
+    from botcut import sync
+
+    spoken = [
+        index
+        for index, clip in enumerate(clips)
+        if not is_card(clip["path"]) and not is_broll(clip) and clip.get("audio", True)
+    ]
+    for index in marked:
+        if index not in spoken:
+            raise SystemExit(f"A second camera needs sound to be lined up: {clips[index]['path']}")
+    if len(spoken) < 2:
+        if marked:
+            raise SystemExit("A second camera needs a shot to be the second camera of")
+        return
+    if os.environ.get("BOTCUT_FAKE") == "1":
+        # Offline, a marked file is the second camera of the shot before it, started at the same moment.
+        for index in sorted(marked):
+            before = [other for other in spoken if other < index and other not in marked]
+            if not before:
+                raise SystemExit("A second camera needs a shot to be the second camera of")
+            clips[index].update({"role": "angle", "of": before[-1], "offset": 0.0})
+        return
+    stamps = []
+    for index in spoken:
+        info = os.stat(clips[index]["path"])
+        stamps.append([clips[index]["path"], info.st_size, info.st_mtime_ns, index in marked])
+    cache = os.path.join(work, "cameras.json")
+    try:
+        known = json.loads(Path(cache).read_text())
+        found = known["found"] if known.get("stamps") == stamps else None
+    except (OSError, ValueError, KeyError, AttributeError):
+        found = None
+    if found is None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        print("Listening for a second camera", flush=True)
+        with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
+            sounds = dict(zip(spoken, pool.map(lambda index: sync.load(clips[index]["path"]), spoken)))
+        found = {}
+        for index in spoken:
+            if sounds[index] is None:
+                continue
+            best = None
+            for main in spoken:
+                # A second camera follows the shot it belongs to in the list, unless the person marked it.
+                if main == index or main in marked or str(main) in found or sounds[main] is None:
+                    continue
+                if index not in marked and main > index:
+                    continue
+                match = sync.line_up(
+                    sounds[main], sounds[index], sure=sync.LIKELY if index in marked else sync.SURE
+                )
+                if match is None:
+                    continue
+                shared = match["end"] - match["start"]
+                shorter = min(float(clips[main]["duration"]), float(clips[index]["duration"]))
+                if index not in marked and shared < CAMERA_SHARE * shorter:
+                    continue
+                if best is None or match["score"] > best[1]["score"]:
+                    best = (main, match)
+            if best is not None:
+                found[str(index)] = {"of": best[0], "offset": best[1]["offset"], "drift": best[1]["drift"]}
+        Path(cache).write_text(json.dumps({"stamps": stamps, "found": found}) + "\n")
+    for index in sorted(marked):
+        if str(index) not in found:
+            raise SystemExit(
+                f"Could not line up {os.path.basename(clips[index]['path'])} with another shot. "
+                "A second camera has to hear the same take."
+            )
+    for key, row in found.items():
+        index = int(key)
+        clips[index].update({"role": "angle", "of": int(row["of"]), "offset": float(row["offset"])})
+        if row.get("drift"):
+            clips[index]["drift"] = float(row["drift"])
+        print(
+            f"Two cameras: {os.path.basename(clips[index]['path'])} is the same take as "
+            f"{os.path.basename(clips[int(row['of'])]['path'])}",
+            flush=True,
+        )
+
+
+def plan_cameras(doc: dict, clips: list[dict], segs: list[dict], out: str) -> None:
+    """Decide where the picture goes to another camera, and write it on the cut as `angles`.
+
+    It is worked out again on every render, from the lines as they now are, so
+    a line dropped later still has its jump cut hidden. What the person asked
+    for in `cameras` is kept and followed.
+    """
+    from botcut.media import grab_still
+
+    for key in ("angles", "angles_reply"):
+        doc.pop(key, None)
+    if not cameras.groups(clips) or not doc.get("lines"):
+        return
+    asked = cameras.read_cameras(doc.get("cameras"), clips)
+    if cameras.write_cameras(asked):
+        doc["cameras"] = cameras.write_cameras(asked)
+    else:
+        doc.pop("cameras", None)
+    lines = doc["lines"]
+    runs = cameras.plan(
+        lines,
+        segs,
+        clips,
+        beats=(doc.get("outline") or {}).get("beats"),
+        close=doc.get("close"),
+        cameras=asked,
+    )
+    by_id = {int(line["id"]): line for line in lines if isinstance(line, dict) and "id" in line}
+    stills = os.path.join(out, "work", "stills")
+    for run in runs:
+        # A frame of the other camera at the moment the run starts, for the row that shows it.
+        first = by_id.get(run["line"])
+        clip = clips[run["clip"]]
+        if first is None or os.environ.get("BOTCUT_FAKE") == "1":
+            continue
+        at = cameras.angle_time(clip, (float(first["start"]) + float(first["end"])) / 2)
+        still = os.path.join(stills, f"angle-{run['clip']}-{run['line']}.jpg")
+        if os.path.isfile(still) or grab_still(clip["path"], at, still):
+            run["still"] = os.path.abspath(still)
+    if runs:
+        doc["angles"] = runs
+    if not asked["off"]:
+        doc["angles_reply"] = cameras.reply(runs, clips, cameras.shown_seconds(runs, lines, segs, clips))
 
 
 def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
@@ -634,6 +804,13 @@ def render_saved(
         clip = probe(row["path"], need_audio=not broll)
         if broll:
             clip["role"] = "broll"
+        if str(row.get("role") or "") == "angle":
+            clip["role"] = "angle"
+            for key in ("of", "offset", "drift"):
+                if key in row:
+                    clip[key] = row[key]
+        if row.get("view"):
+            clip["view"] = row["view"]
         if row.get("face"):
             clip["face"] = row["face"]
         clips.append(clip)
@@ -672,6 +849,7 @@ def render_saved(
         ]
     else:
         segs = doc.get("segments") or []
+    plan_cameras(doc, clips, segs, out)
     clock.lap("read")
     _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, zoom=zoom)
 
@@ -775,7 +953,7 @@ def _level_clips(work: str, clips: list[dict]) -> None:
 
     def heard(numbered: tuple[int, dict]) -> None:
         index, clip = numbered
-        if is_card(clip["path"]) or is_broll(clip) or not clip.get("audio", True):
+        if is_card(clip["path"]) or is_broll(clip) or cameras.is_angle(clip) or not clip.get("audio", True):
             return
         cache = os.path.join(work, f"{index}-{Path(clip['path']).stem}.loudness.json")
         try:
@@ -928,10 +1106,11 @@ def load_cuts(cuts_path: str) -> tuple[str, dict]:
 
 
 BROLL_PREFIX = "b-roll "
+ANGLE_PREFIX = "angle "
 
 
-def _shot_list(path: str) -> list[tuple[str, bool]]:
-    """One path per line. A line that starts with `b-roll ` marks that file."""
+def _shot_list(path: str) -> list[tuple[str, str]]:
+    """One path per line. A line that starts with `b-roll ` or `angle ` marks that file."""
     if not os.path.isfile(path):
         raise SystemExit(f"No such file: {path}")
     rows = []
@@ -940,9 +1119,11 @@ def _shot_list(path: str) -> list[tuple[str, bool]]:
         if not stripped or stripped.startswith("#"):
             continue
         if stripped.lower().startswith(BROLL_PREFIX):
-            rows.append((stripped[len(BROLL_PREFIX) :].strip(), True))
+            rows.append((stripped[len(BROLL_PREFIX) :].strip(), "broll"))
+        elif stripped.lower().startswith(ANGLE_PREFIX):
+            rows.append((stripped[len(ANGLE_PREFIX) :].strip(), "angle"))
         else:
-            rows.append((stripped, False))
+            rows.append((stripped, ""))
     if not rows:
         raise SystemExit(f"No paths in {path}")
     return rows
@@ -954,12 +1135,19 @@ def _is_shot_list(files: list[str]) -> bool:
 
 def resolve_inputs(files: list[str]) -> list[str]:
     if _is_shot_list(files):
-        return [path for path, _broll in _shot_list(files[0])]
+        return [path for path, _role in _shot_list(files[0])]
     return list(files)
 
 
 def resolve_broll(files: list[str]) -> list[str]:
     """The files a shot list marks B-roll. Plain arguments mark none."""
     if _is_shot_list(files):
-        return [path for path, broll in _shot_list(files[0]) if broll]
+        return [path for path, role in _shot_list(files[0]) if role == "broll"]
+    return []
+
+
+def resolve_angles(files: list[str]) -> list[str]:
+    """The files a shot list marks as a second camera."""
+    if _is_shot_list(files):
+        return [path for path, role in _shot_list(files[0]) if role == "angle"]
     return []

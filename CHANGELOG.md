@@ -2,6 +2,22 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-11-22
+
+- Two cameras on one take are cut between. Drop both files and press **Cut**: the second is found by its sound, lined up with the first to the frame, and never transcribed or heard. The picture goes to it at a jump cut, which hides the jump, at the start of a new beat, on a line that carries the point, or when one view has been on a long time. A view is held at least 4 seconds and never changes inside a line.
+- A file the cut finds to be a second camera reads **Second camera** in the shot list. **Second camera** on a selected shot marks one by hand, for a file the sound did not match strongly enough, and **Shot** puts it back. The first file is nobody's second camera.
+- A line that goes to the second camera shows a still from it and why, such as **Second camera · hides a cut**. **Stay on main** on any line of that stretch keeps it on the first camera. In the chat, "cut between the cameras less", "stay on the wide", or "one camera only" comes back as a change to apply.
+- **Zoom** in Settings is **Off** or **Auto**. Auto goes a fifth closer at a cut between lines, so a jump reads as a change of shot, and on the few lines that carry the point, and moves in slowly on a wide stretch of eight seconds or more. A zoom chosen before is Auto now.
+- The zoom follows a speaker who moves. The face is found in the still of every line, on this machine, where before it was found once per shot.
+- A flash of nobody speaking is left out. The quarter second kept in front of a line whose first "um" was cut used to play as its own piece.
+- The model can take words out of a line that were not on offer before: "you know", "I mean", the abandoned start of a thought said again in other words. It copies the words and never returns a time. They show struck through like any other cut, and a click puts them back.
+- A shot with traffic or wind behind the voice gets its own level for what counts as a pause, so its long pauses are found.
+- A join inside a shot is a crossfade of a fortieth of a second, where it used to be a fade down and a fade up with a hole between them.
+- **Update movie** only makes what changed. Each piece of picture is encoded once and kept, and the sound is put together again in one pass. On a seven minute movie, dropping one line took 22 seconds where the whole render had taken 2 minutes 22.
+- A shoot of 150 lines or fewer is read and cut in one request, where it was outlined first and cut second. A longer one is outlined while its stills are read.
+- The chat lists the few spots worth a look under the editor's sentence: two lines that say the same thing, a line that leans on a dropped one, a line dropped though it is said nowhere else, a piece on screen for a blink. A click goes to that line. With no zoom and one camera, it says how many jump cuts show.
+- `bench run` counts the joins that show as a jump, in the model's cut and in yours.
+
 ## 2026-11-21
 
 - The zoom on jump cuts is off unless you choose it. **Settings** has **Zoom**: **Off**, **On cuts**, **Slow push**, or **Key lines**. Before, every cut inside a shot flipped the framing, including the half-second pieces left by a cut "um".

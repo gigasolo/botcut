@@ -440,10 +440,10 @@ def test_decide_keeps_a_card_without_a_transcript(monkeypatch, tmp_path):
 
     seen = {}
 
-    def spy(utts, intent=""):
+    def spy(utts, intent="", outline=None):
         seen["utts"] = list(utts)
         seen["intent"] = intent
-        return real_pick(utts, intent)
+        return real_pick(utts, intent, outline)
 
     monkeypatch.setattr("botcut.cli.transcribe_fake", counting)
     monkeypatch.setattr("botcut.cli.pick", spy)

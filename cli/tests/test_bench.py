@@ -126,10 +126,19 @@ def test_a_run_scores_counts_tokens_and_says_what_changed_since_last_time(data, 
     out = capsys.readouterr().out
     assert "talk: precision 1.00, recall 1.00, flipped 0 of 3, cuts 1/1, 1,000 tokens" in out
     assert "(was" not in out
+    # Line 1 opens on "So" with the line before it dropped, and taking its um out leaves
+    # "So" as a piece of half a second. Both are in the model's cut and in the person's.
+    assert first["cases"]["talk"]["flags"] == {"leans": 1, "flash": 1}
+    assert first["cases"]["talk"]["want_flags"] == {"leans": 1, "flash": 1}
+    assert "flags leans 1, flash 1 (yours leans 1, flash 1)" in out
+    assert "flipped 0 of 3, 2 flags" in out
 
     second = bench.run(["talk"])
     assert second["overall"]["flipped"] == 2
-    assert "(was 1.00, 1.00, 0 with prompt" in capsys.readouterr().out
+    assert second["cases"]["talk"]["flags"] == {}
+    out = capsys.readouterr().out
+    assert "flags none (yours leans 1, flash 1)" in out
+    assert "(was 1.00, 1.00, 0, 2 flags with prompt" in out
     history = (data / "data" / "botcut" / "bench" / "history.jsonl").read_text().splitlines()
     assert len(history) == 2
     assert json.loads(history[0])["prompt"] == bench.prompt_version()

@@ -1277,14 +1277,17 @@ def test_unknown_broll_sound_is_rejected(capsys):
 def test_main_passes_voice_sound_and_broll_files(monkeypatch):
     seen = {}
 
-    def fake_render(cuts, scene_transition="dip", broll_sound="mix"):
+    def fake_render(cuts, scene_transition="dip", broll_sound="mix", zoom="off"):
         seen["cuts"] = cuts
         seen["sound"] = broll_sound
         seen["transition"] = scene_transition
+        seen["zoom"] = zoom
 
     monkeypatch.setattr("botcut.cli.render_saved", fake_render)
     main(["render", "out", "--b-roll-sound", "voice"])
-    assert seen == {"cuts": "out", "sound": "voice", "transition": "dip"}
+    assert seen == {"cuts": "out", "sound": "voice", "transition": "dip", "zoom": "off"}
+    main(["render", "out", "--zoom", "push"])
+    assert seen["zoom"] == "push"
 
     def fake_run(files, out, **kwargs):
         seen["files"] = files
@@ -1296,6 +1299,11 @@ def test_main_passes_voice_sound_and_broll_files(monkeypatch):
     assert seen["files"] == ["a.mp4", "b.mp4"]
     assert seen["kwargs"]["broll_files"] == ["b.mp4", "a.mp4"]
     assert seen["kwargs"]["broll_sound"] == "mix"
+    assert seen["kwargs"]["zoom"] == "off"
+    main(["run", "a.mp4", "--out", "out", "--zoom", "lines"])
+    assert seen["kwargs"]["zoom"] == "lines"
+    with pytest.raises(SystemExit):
+        main(["render", "out", "--zoom", "wild"])
     main(["run", "a.mp4", "--out", "out"])
     assert seen["kwargs"]["broll_files"] == []
 

@@ -311,12 +311,14 @@ def accept_runs(
     segments=None,
     durations=None,
     still_dir: str | None = None,
+    hook: int | None = None,
 ) -> list[dict]:
     """Runs the editor laid, in line order.
 
     A run starts on a beat that exists and covers kept spoken lines from `line`
     through `through`, in list order. The first and last kept lines stay on the
-    speaker. Runs do not overlap, and their beats go up, so the footage moves
+    speaker, and so does the line the movie opens on: it has left its place, so
+    a run cannot play across it. Runs do not overlap, and their beats go up, so the footage moves
     forward. A run past RUN_MAX is cut back a line at a time; one under RUN_MIN,
     or with too little file left after its beat, is dropped.
     """
@@ -345,6 +347,8 @@ def accept_runs(
         if j < i or i == 0 or j >= len(kept) - 1:
             continue
         if any(not (j < a or i > b) for a, b in taken):
+            continue
+        if hook is not None and hook in index_of and i <= index_of[hook] <= j:
             continue
         clip = int(beat["clip"])
         beat_start = float(beat["start"])
@@ -399,7 +403,9 @@ def fake_claims(beats: list[dict], lines: list[dict]) -> list[dict]:
     ]
 
 
-def cover_user_content(beats: list[dict], lines: list[dict], stills: dict, *, intent: str = "", segments=None):
+def cover_user_content(
+    beats: list[dict], lines: list[dict], stills: dict, *, intent: str = "", segments=None, hook: int | None = None
+):
     """The movie line, the beats, and every line in order. No paths and no timestamps.
 
     A kept line carries its length. A dropped line is marked. A cut row sits
@@ -431,7 +437,8 @@ def cover_user_content(beats: list[dict], lines: list[dict], stills: dict, *, in
         if line.get("keep"):
             if prev_kept is not None and not continuous(prev_kept, line, segments):
                 body.append("— cut —")
-            body.append(f"[{uid}] {line_length(line):.1f}s {text}")
+            opens = " (opens the movie, moved to the front; stay on the speaker)" if uid == hook else ""
+            body.append(f"[{uid}] {line_length(line):.1f}s {text}{opens}")
             prev_kept = line
         else:
             body.append(f"[{uid}] dropped: {text}")
@@ -471,7 +478,7 @@ def beat_stills(clips: list[dict], beats: list[dict], still_dir: str) -> dict[in
 
 
 def _ask(
-    clips: list[dict], beats: list[dict], lines: list[dict], still_dir: str, *, intent: str, segments
+    clips: list[dict], beats: list[dict], lines: list[dict], still_dir: str, *, intent: str, segments, hook=None
 ) -> tuple[list, str]:
     if not os.environ.get("XAI_API_KEY"):
         raise SystemExit("XAI_API_KEY is not set")
@@ -487,7 +494,9 @@ def _ask(
             {"role": "system", "content": COVER_SYSTEM},
             {
                 "role": "user",
-                "content": cover_user_content(beats, lines, stills, intent=intent, segments=segments),
+                "content": cover_user_content(
+                    beats, lines, stills, intent=intent, segments=segments, hook=hook
+                ),
             },
         ],
         COVER_SCHEMA,
@@ -517,6 +526,7 @@ def choose_covers(
     *,
     segments=None,
     intent: str = "",
+    hook: int | None = None,
 ) -> tuple[list[dict], str]:
     """The runs the editor laid and its sentence to the person. Empty when nothing can be laid."""
     beats = collect_beats(clips, beats_by_clip)
@@ -526,7 +536,7 @@ def choose_covers(
         claims = fake_claims(beats, lines)
         reply = FAKE_COVER_REPLY if claims else ""
     else:
-        claims, reply = _ask(clips, beats, lines, still_dir, intent=intent, segments=segments)
+        claims, reply = _ask(clips, beats, lines, still_dir, intent=intent, segments=segments, hook=hook)
     covers = accept_runs(
         claims,
         beats={int(beat["id"]): beat for beat in beats},
@@ -534,6 +544,7 @@ def choose_covers(
         segments=segments,
         durations=clip_durations(clips),
         still_dir=still_dir,
+        hook=hook,
     )
     return covers, (reply if covers else "")
 

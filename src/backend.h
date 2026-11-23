@@ -52,6 +52,8 @@ class Backend : public QObject {
     // The tray files marked B-roll, in tray order. Their picture covers spoken lines.
     Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY trayChanged)
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY brollMixChanged)
+    // The zoom on the speaker: off, cuts, push, or lines.
+    Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
@@ -111,6 +113,7 @@ public:
     QString sceneTransition() const { return m_sceneTransition; }
     QStringList brollFiles() const;
     bool brollMix() const { return m_brollMix; }
+    QString zoom() const { return m_zoom; }
     QVariantList covers() const { return m_covers; }
     QStringList cutClips() const { return m_cutClips; }
     QString pace() const { return m_pace; }
@@ -134,6 +137,7 @@ public:
     void setCutMode(const QString &mode);
     void setSceneTransition(const QString &value);
     void setBrollMix(bool value);
+    void setZoom(const QString &value);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
     Timeline *timeline() { return &m_timeline; }
@@ -173,6 +177,8 @@ public:
     Q_INVOKABLE void clearCover(int lineId);
     // Flip one cut inside a line: an um or a restart, taken out or put back.
     Q_INVOKABLE void toggleWordCut(int id, int index);
+    // The line that opens the movie goes back to its place.
+    Q_INVOKABLE void clearHook();
     Q_INVOKABLE void renderSelects();
     // Renders what changed, lines or a hand trim, over the movie this project already has.
     Q_INVOKABLE void updateMovie();
@@ -229,6 +235,7 @@ signals:
     void cutModeChanged();
     void sceneTransitionChanged();
     void brollMixChanged();
+    void zoomChanged();
     void coversChanged();
     void cutClipsChanged();
     void paceChanged();
@@ -374,6 +381,7 @@ private:
     // Absolute paths, a subset of m_tray. Keyed by path so a reorder needs no bookkeeping.
     QSet<QString> m_brollFiles;
     bool m_brollMix = true;
+    QString m_zoom = QStringLiteral("off");
     QString m_pace = QStringLiteral("open");
     QString m_planCuts;
     QString m_planMovie;

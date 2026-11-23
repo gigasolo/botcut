@@ -16,9 +16,19 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from botcut import llm
+from botcut import check, llm
 from botcut.captions import load_words_by_clip
-from botcut.pick import CUTS_NOTE, DEFAULT_INTENT, decision_lines, pick, system_prompt, utterances
+from botcut.proof import PROOF_SYSTEM, apply_changes, changed, proof
+from botcut.pick import (
+    CUTS_NOTE,
+    DEFAULT_INTENT,
+    OUTLINE_PROMPT,
+    decision_lines,
+    outline,
+    pick,
+    system_prompt,
+    utterances,
+)
 
 
 def bench_root() -> str:
@@ -89,7 +99,7 @@ def case_names() -> list[str]:
 
 def prompt_version() -> str:
     """A short name for the wording now in use, so history rows can be told apart."""
-    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE
+    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE + OUTLINE_PROMPT + PROOF_SYSTEM
     return hashlib.sha1(text.encode()).hexdigest()[:8]
 
 
@@ -142,16 +152,49 @@ def score(name: str, replay: bool = False) -> dict:
     llm.use_tape(llm.Tape(os.path.join(case, "replies"), replay=replay))
     began = time.monotonic()
     try:
-        chosen = pick(utts, str(doc.get("intent") or ""))
+        # The same passes a cut makes: read the shoot, choose the lines, read the cut back.
+        intent = str(doc.get("intent") or "")
+        plan = outline(utts, intent)
+        got = decision_lines(utts, pick(utts, intent, plan))
+        changes = proof(got, _pieces(doc, case, got), intent=intent, outline=plan)
+        if changed(changes):
+            got = apply_changes(got, changes)
     finally:
         llm.use_tape(None)
-    result = compare(doc.get("lines") or [], decision_lines(utts, chosen))
+    result = compare(doc.get("lines") or [], got)
+    # What a viewer would notice in the model's cut, and in the person's for scale.
+    result["flags"] = check.counts(check.flags(got, _pieces(doc, case, got)))
+    result["want_flags"] = check.counts(
+        check.flags(doc.get("lines") or [], _pieces(doc, case, doc.get("lines") or []))
+    )
     tally = llm.usage()
     result["seconds"] = round(time.monotonic() - began, 1)
     result["tokens"] = tally["input"] + tally["output"]
     if "usd" in tally:
         result["usd"] = tally["usd"]
     return result
+
+
+def _pieces(doc: dict, case: str, lines: list[dict]) -> list[dict]:
+    """The ranges these lines would render as, with the case's pace and silences."""
+    from botcut.cli import _load_silences, _segments_for_lines
+
+    clips = doc.get("clips") or []
+    tighten = doc.get("tighten") or {}
+    try:
+        return _segments_for_lines(
+            [line for line in lines if str(line.get("reason") or "") != "card"],
+            [float(clip.get("duration") or 0) for clip in clips],
+            _load_silences(case, clips),
+            bool(tighten.get("snap", True)),
+            float(tighten.get("max_pause", 0.8)),
+        )
+    except (KeyError, TypeError, ValueError, IndexError):
+        return []
+
+
+def _flag_words(tally: dict) -> str:
+    return ", ".join(f"{kind} {count}" for kind, count in tally.items()) or "none"
 
 
 def _row(name: str, result: dict) -> str:
@@ -161,6 +204,9 @@ def _row(name: str, result: dict) -> str:
         f"flipped {result['flipped']} of {result['lines']}, cuts {cuts}, "
         f"{result['tokens']:,} tokens, {result['seconds']}s"
     )
+    if result.get("flags") or result.get("want_flags"):
+        row += f", flags {_flag_words(result.get('flags') or {})}"
+        row += f" (yours {_flag_words(result.get('want_flags') or {})})"
     if "usd" in result:
         row += f", ${result['usd']:.2f}"
     return row
@@ -185,6 +231,7 @@ def run(names: list[str], replay: bool = False) -> dict:
         "flipped": sum(r["flipped"] for r in results.values()),
         "lines": sum(r["lines"] for r in results.values()),
         "tokens": sum(r["tokens"] for r in results.values()),
+        "flags": sum(sum((r.get("flags") or {}).values()) for r in results.values()),
     }
     entry = {
         "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -201,12 +248,12 @@ def run(names: list[str], replay: bool = False) -> dict:
         handle.write(json.dumps(entry) + "\n")
     line = (
         f"Overall: precision {overall['precision']:.2f}, recall {overall['recall']:.2f}, "
-        f"flipped {overall['flipped']} of {overall['lines']}"
+        f"flipped {overall['flipped']} of {overall['lines']}, {overall['flags']} flags"
     )
     if before is not None:
         line += (
             f" (was {before['precision']:.2f}, {before['recall']:.2f}, "
-            f"{before['flipped']} with prompt {before['prompt']})"
+            f"{before['flipped']}, {before.get('flags', 0)} flags with prompt {before['prompt']})"
         )
     print(line, flush=True)
     return entry

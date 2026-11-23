@@ -23,12 +23,15 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &intent = QString(), bool decide = false,
                        const QString &sceneTransition = QStringLiteral("dip"),
                        double maxPause = 0.8, const QStringList &brollFiles = {},
-                       bool brollMix = true);
+                       bool brollMix = true, const QString &zoom = QStringLiteral("off"));
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
                           const QString &sceneTransition = QStringLiteral("dip"),
-                          bool brollMix = true);
+                          bool brollMix = true, const QString &zoom = QStringLiteral("off"));
+
+// The zoom on the speaker: off, cuts, push, or lines. Anything else is off.
+QString zoomValue(const QString &zoom);
 
 
 // captions and short take the cuts.json file. A directory is not a valid path.

@@ -90,10 +90,15 @@ QString defaultCutIntent() {
         "Keep each moment in order. Drop flubs and true retakes. Keep a beat that appears only once.");
 }
 
+QString zoomValue(const QString &zoom) {
+    static const QStringList known{QStringLiteral("cuts"), QStringLiteral("push"), QStringLiteral("lines")};
+    return known.contains(zoom) ? zoom : QStringLiteral("off");
+}
+
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent, bool decide, const QString &sceneTransition,
-                       double maxPause, const QStringList &brollFiles, bool brollMix) {
+                       double maxPause, const QStringList &brollFiles, bool brollMix, const QString &zoom) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -115,18 +120,21 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
     }
     tail << QStringLiteral("--b-roll-sound")
          << (brollMix ? QStringLiteral("mix") : QStringLiteral("voice"));
+    tail << QStringLiteral("--zoom") << zoomValue(zoom);
     if (decide)
         tail << QStringLiteral("--decide");
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
-                          const QString &cliProject, const QString &sceneTransition, bool brollMix) {
+                          const QString &cliProject, const QString &sceneTransition, bool brollMix,
+                          const QString &zoom) {
     if (outDir.isEmpty())
         return {QString(), {}, QStringLiteral("No output directory")};
     const QStringList tail{QStringLiteral("render"), outDir, QStringLiteral("--scene-transition"),
                            sceneTransitionValue(sceneTransition), QStringLiteral("--b-roll-sound"),
-                           brollMix ? QStringLiteral("mix") : QStringLiteral("voice")};
+                           brollMix ? QStringLiteral("mix") : QStringLiteral("voice"),
+                           QStringLiteral("--zoom"), zoomValue(zoom)};
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -402,6 +410,7 @@ QString cutStatusFromLine(const QString &line) {
         return {};
     if (trimmed == QLatin1String("Reading files") || trimmed == QLatin1String("Reading pictures")
         || trimmed == QLatin1String("Reading beats") || trimmed == QLatin1String("Choosing takes")
+        || trimmed == QLatin1String("Checking the cut")
         || trimmed == QLatin1String("Choosing covers") || trimmed == QLatin1String("Trying again")
         || trimmed == QLatin1String("Revising"))
         return trimmed;

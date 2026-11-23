@@ -71,6 +71,200 @@ KEEP_SCHEMA = {
 }
 
 
+# The whole shoot is read once before any line is judged. A shoot of fewer lines
+# than this fits in one keep request, where every retake is already side by side.
+OUTLINE_MIN_LINES = 6
+OUTLINE_MAX_LINES = 1500
+# A length nobody would ask a rough cut for is not a length.
+TARGET_MAX = 4 * 3600
+
+OUTLINE_PROMPT = (
+    "You are the editor reading every line of a shoot before cutting it. "
+    "These clips are one movie, in order. Read all of it first. "
+    "Return the beats of the movie in order, each with a title of two to five words "
+    "and its first and last line ids. "
+    "Return every group of lines that say the same thing, however far apart they are, "
+    "as retakes, each group's ids in order. A group has at least two lines. "
+    "Return as hook the id of the one line that would open the movie best if it were "
+    "moved to the very front, a complete thought that makes a viewer want the rest, "
+    "or -1 when the movie already opens well or no line stands on its own. "
+    "Return as target_seconds the length the movie sentence asks for, in seconds, "
+    "or 0 when it names no length. "
+    "Do not invent ids. Do not return times."
+)
+
+OUTLINE_SCHEMA = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "outline",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["beats", "retakes", "hook", "target_seconds"],
+            "properties": {
+                "beats": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["title", "first", "last"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "first": {"type": "integer"},
+                            "last": {"type": "integer"},
+                        },
+                    },
+                },
+                "retakes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["ids"],
+                        "properties": {"ids": {"type": "array", "items": {"type": "integer"}}},
+                    },
+                },
+                "hook": {"type": "integer"},
+                "target_seconds": {"type": "integer"},
+            },
+        },
+    },
+}
+
+
+def no_outline() -> dict:
+    return {"beats": [], "retakes": [], "hook": -1, "target_seconds": 0}
+
+
+def _whole(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def read_outline(payload: object, utts: list[dict]) -> dict:
+    """The outline with only ids that exist. Anything else in it is left out, not trusted."""
+    if not isinstance(payload, dict):
+        raise ValueError("not an outline")
+    order = {int(u["id"]): index for index, u in enumerate(utts)}
+    beats = []
+    for item in payload["beats"]:
+        first, last = _whole(item.get("first")), _whole(item.get("last"))
+        title = " ".join(str(item.get("title") or "").split())[:60]
+        if first in order and last in order and order[first] <= order[last] and title:
+            beats.append({"title": title, "first": first, "last": last})
+    retakes = []
+    grouped: set[int] = set()
+    for item in payload["retakes"]:
+        ids = []
+        for value in item.get("ids") or []:
+            uid = _whole(value)
+            if uid in order and uid not in grouped and uid not in ids:
+                ids.append(uid)
+        if len(ids) >= 2:
+            ids.sort(key=lambda uid: order[uid])
+            retakes.append(ids)
+            grouped.update(ids)
+    hook = _whole(payload["hook"])
+    target = _whole(payload["target_seconds"]) or 0
+    return {
+        "beats": beats,
+        "retakes": retakes,
+        "hook": hook if hook in order else -1,
+        "target_seconds": target if 0 < target <= TARGET_MAX else 0,
+    }
+
+
+def _outline_rows(utts: list[dict]) -> str:
+    return "\n".join(
+        f"[{u['id']}] (clip {u['clip']}, {float(u['end']) - float(u['start']):.1f}s) {u['text']}"
+        for u in utts
+    )
+
+
+def outline(utts: list[dict], intent: str = "") -> dict:
+    """Read the whole shoot once: its beats, its retakes, a line to open on, a length.
+
+    One request carries every line, as words only. A cut still happens when
+    this cannot be had: the lines are then judged the way they were before.
+    """
+    if os.environ.get("BOTCUT_FAKE") == "1":
+        return no_outline()
+    if not OUTLINE_MIN_LINES <= len(utts) <= OUTLINE_MAX_LINES:
+        return no_outline()
+    line = intent.strip() or DEFAULT_INTENT
+    try:
+        return ask(
+            [
+                {"role": "system", "content": f"{OUTLINE_PROMPT}\nThe movie is: {line}"},
+                {"role": "user", "content": _outline_rows(utts)},
+            ],
+            OUTLINE_SCHEMA,
+            what="an outline",
+            parse=lambda parsed: read_outline(parsed, utts),
+            read_timeout=300,
+            tries=2,
+            effort="high",
+        )
+    except SystemExit as stop:
+        # With no key nothing can be asked, and the cut should say so.
+        if "XAI_API_KEY" in str(stop):
+            raise
+        print("Cutting without an outline", flush=True)
+        return no_outline()
+
+
+def outline_note(plan: dict | None, part: list[dict], utts: list[dict]) -> str:
+    """What the whole shoot says, for a request that may carry only part of it."""
+    if not plan:
+        return ""
+    by_id = {int(u["id"]): u for u in utts}
+    here = {int(u["id"]) for u in part}
+    body = []
+    beats = [beat for beat in plan.get("beats") or [] if beat["first"] in by_id and beat["last"] in by_id]
+    if beats:
+        body.append("The beats of the whole movie, in order:")
+        body.extend(
+            f"{number}. {beat['title']} (lines {beat['first']}-{beat['last']})"
+            for number, beat in enumerate(beats, start=1)
+        )
+    groups = [
+        group
+        for group in plan.get("retakes") or []
+        if any(uid in here for uid in group) and all(uid in by_id for uid in group)
+    ]
+    if groups:
+        body.append(
+            "Lines that say the same thing. Keep one of each group, the last complete clean take "
+            "unless an earlier one is clearly better. A line marked elsewhere is decided in "
+            "another part by this same rule, so drop yours when that one is the take to keep:"
+        )
+        for group in groups:
+            body.append(
+                " / ".join(
+                    f"[{uid}]{'' if uid in here else ' (elsewhere)'} {by_id[uid]['text']}" for uid in group
+                )
+            )
+    target = int(plan.get("target_seconds") or 0)
+    if target > 0:
+        total = sum(float(u["end"]) - float(u["start"]) for u in utts)
+        mine = sum(float(u["end"]) - float(u["start"]) for u in part)
+        body.append(
+            f"The movie should run about {target}s. Every line together runs {total:.0f}s, "
+            f"and the lines here run {mine:.0f}s, so keep about {_share(target, total, mine):.0f}s of them: "
+            "the ones the movie cannot do without. Each line shows its start and end in seconds. "
+            "Where this and keeping every beat disagree, the length wins."
+        )
+    return "\n".join(body) + "\n\n" if body else ""
+
+
+def _share(target: float, total: float, mine: float) -> float:
+    if total <= 0:
+        return mine
+    return min(mine, target * mine / total)
+
+
 def utterances(words_by_clip: list[list[dict]]) -> list[dict]:
     found = []
     next_id = 0
@@ -208,13 +402,14 @@ CHUNK_OVERLAP = 10
 CHUNK_WORKERS = 3
 
 
-def pick(utts: list[dict], intent: str = "") -> list[dict]:
+def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return [_kept(u["id"], "fake", range(len(u.get("cuts") or []))) for u in utts]
     # The key is asked for where the request is made, so a replayed answer needs none.
     parts = chunks(utts)
+    retaken = {uid for group in (outline or {}).get("retakes") or [] for uid in group}
     if len(parts) == 1:
-        return _ask_keep(utts, intent)
+        return _ask_keep(utts, intent, before=outline_note(outline, utts, utts), prefer=retaken)
     from concurrent.futures import ThreadPoolExecutor
 
     def ask(numbered: tuple[int, dict]) -> list[dict]:
@@ -223,7 +418,13 @@ def pick(utts: list[dict], intent: str = "") -> list[dict]:
             f"\nThese lines are part {number} of {len(parts)} of the movie. "
             "Lines before or after them exist and are judged separately."
         )
-        kept = _ask_keep(part["lines"], intent, note)
+        kept = _ask_keep(
+            part["lines"],
+            intent,
+            note,
+            before=outline_note(outline, part["lines"], utts),
+            prefer=retaken,
+        )
         return [item for item in kept if item["id"] in part["owned"]]
 
     with ThreadPoolExecutor(max_workers=CHUNK_WORKERS) as pool:
@@ -269,12 +470,19 @@ def chunks(utts: list[dict], size: int = CHUNK_LINES, overlap: int = CHUNK_OVERL
         start += step
 
 
-def _ask_keep(utts: list[dict], intent: str, note: str = "") -> list[dict]:
+def _ask_keep(
+    utts: list[dict],
+    intent: str,
+    note: str = "",
+    *,
+    before: str = "",
+    prefer: set[int] | None = None,
+) -> list[dict]:
     # A reply that is not the schema is asked for once more before the cut stops.
     return ask(
         [
             {"role": "system", "content": system_prompt(intent) + note},
-            {"role": "user", "content": user_content(utts)},
+            {"role": "user", "content": user_content(utts, before=before, prefer=prefer)},
         ],
         KEEP_SCHEMA,
         what="a keep list",
@@ -328,6 +536,61 @@ def segments(utts: list[dict], keep: list[dict], durations: list[float]) -> tupl
         else:
             collapsed.append(dict(seg))
     return collapsed, unknown
+
+
+def hook_line(lines: list[dict], hook: object) -> dict | None:
+    """The kept spoken line the movie opens on, or None when there is none."""
+    if isinstance(hook, bool) or not isinstance(hook, int) or hook < 0:
+        return None
+    for line in lines or []:
+        try:
+            if int(line["id"]) != hook:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        if line.get("keep") and str(line.get("reason") or "") != "card":
+            return line
+        return None
+    return None
+
+
+def play_order(segments: list[dict], lines: list[dict], hook: object) -> list[dict]:
+    """The pieces in the order they play: the hook line first, then everything as it was.
+
+    The hook is lifted out of the piece it sits in with its usual lead and tail,
+    and never more than half the air to a neighbour, and is gone from its place. Its pieces carry `hook`, so what
+    reads the cut later can tell the opening from the body. Nothing else moves.
+    """
+    segments = [{key: value for key, value in seg.items() if key != "hook"} for seg in segments]
+    line = hook_line(lines, hook)
+    if line is None:
+        return segments
+    clip = int(line["clip"])
+    start, end = float(line["start"]), float(line["end"])
+    low, high = start - PAD_BEFORE, end + PAD_AFTER
+    for other in lines:
+        try:
+            if int(other["clip"]) != clip or int(other["id"]) == int(line["id"]):
+                continue
+            other_start, other_end = float(other["start"]), float(other["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if other_end <= start:
+            low = max(low, (other_end + start) / 2)
+        elif other_start >= end:
+            high = min(high, (end + other_start) / 2)
+    opening, body = [], []
+    for seg in segments:
+        seg_start, seg_end = float(seg["start"]), float(seg["end"])
+        if int(seg["clip"]) != clip or seg_end <= low or seg_start >= high or seg.get("reason") == "card":
+            body.append(seg)
+            continue
+        if low - seg_start >= CUT_MIN:
+            body.append({**seg, "end": low})
+        opening.append({**seg, "start": max(seg_start, low), "end": min(seg_end, high), "hook": True})
+        if seg_end - high >= CUT_MIN:
+            body.append({**seg, "start": high})
+    return [*opening, *body]
 
 
 def snap(segments: list[dict], silences_by_clip: list[list[tuple[float, float]]]) -> list[dict]:
@@ -508,14 +771,40 @@ def _user_message(utts: list[dict]) -> str:
     return (CUTS_NOTE + rows) if any(u.get("cuts") for u in utts) else rows
 
 
-def user_content(utts: list[dict]) -> str | list[dict]:
-    """Text when no still exists. Otherwise the lines, then one JPEG per shown line."""
+def shown_stills(ready: list[dict], prefer: set[int] | None = None) -> list[dict]:
+    """At most MAX_STILLS lines to show, in order.
+
+    Retakes go first: which of two takes looks better is the question a picture
+    answers. What is left is spread evenly over the other lines.
+    """
+    if len(ready) <= MAX_STILLS:
+        return ready
+    first = [u for u in ready if int(u["id"]) in (prefer or set())]
+    if len(first) > MAX_STILLS:
+        step = len(first) / MAX_STILLS
+        first = [first[int(i * step)] for i in range(MAX_STILLS)]
+    rest = [u for u in ready if int(u["id"]) not in (prefer or set())]
+    room = MAX_STILLS - len(first)
+    if room > 0 and rest:
+        step = len(rest) / room
+        rest = [rest[int(i * step)] for i in range(room)] if len(rest) > room else rest
+    else:
+        rest = []
+    order = {int(u["id"]): index for index, u in enumerate(ready)}
+    return sorted([*first, *rest], key=lambda u: order[int(u["id"])])
+
+
+def user_content(
+    utts: list[dict], *, before: str = "", prefer: set[int] | None = None
+) -> str | list[dict]:
+    """Text when no still exists. Otherwise the lines, then one JPEG per shown line.
+
+    `before` is what the whole shoot says, and goes ahead of the lines.
+    """
     ready = [u for u in utts if u.get("still") and os.path.isfile(str(u["still"]))]
     if not ready:
-        return _user_message(utts)
-    if len(ready) > MAX_STILLS:
-        step = len(ready) / MAX_STILLS
-        ready = [ready[int(i * step)] for i in range(MAX_STILLS)]
+        return before + _user_message(utts)
+    ready = shown_stills(ready, prefer)
     parts: list[dict] = [
         {
             "type": "text",
@@ -523,6 +812,7 @@ def user_content(utts: list[dict]) -> str | list[dict]:
                 "A still from the middle of a line follows that line when one exists. "
                 "Drop a blurred, dark, or unusable picture. Keep a clean look. "
                 "Return ids and reasons only. A reason may mention the picture.\n\n"
+                + before
                 + _user_message(utts)
             ),
         }

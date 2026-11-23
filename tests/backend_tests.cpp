@@ -187,6 +187,7 @@ public:
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY infoChanged)
     Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY infoChanged)
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY infoChanged)
+    Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY infoChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY infoChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY infoChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY infoChanged)
@@ -249,6 +250,8 @@ public:
         lastWordCutLine = id;
         lastWordCut = index;
     }
+    Q_INVOKABLE void clearHook() { ++hookCleared; }
+    int hookCleared = 0;
     int lastWordCutLine = -1;
     int lastWordCut = -1;
     int updateCount = 0;
@@ -288,6 +291,13 @@ public:
         const QString path = m_tray.at(index);
         if (m_brollFiles.removeAll(path) == 0)
             m_brollFiles.append(path);
+        emit infoChanged();
+    }
+    QString zoom() const { return m_zoom; }
+    void setZoom(const QString &value) {
+        if (m_zoom == value)
+            return;
+        m_zoom = value;
         emit infoChanged();
     }
     bool brollMix() const { return m_brollMix; }
@@ -497,6 +507,7 @@ private:
     QString m_sceneTransition = QStringLiteral("dip");
     QStringList m_brollFiles;
     bool m_brollMix = true;
+    QString m_zoom = QStringLiteral("off");
     QVariantList m_covers;
     QStringList m_cutClips;
     QString m_pace = QStringLiteral("open");
@@ -740,6 +751,8 @@ private slots:
     void cutMakesTheMovieInOnePress();
     void aWholeCutIsOneProgressBar();
     void wordCutsLoadToggleAndSave();
+    void theOpeningLineLoadsSavesAndGoesBack();
+    void qmlTheOpeningLineSaysSoAndCanGoBack();
     void qmlLineMarksItsCutsAndAClickFlipsOne();
     void failedRenderKeepsTheLines();
     void recentMovieComesBackWithItsProject();
@@ -1605,6 +1618,24 @@ void BackendTests::gatherLabelsFit() {
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(spoken));
     QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
+
+    // Zoom is four words, off until one is chosen, and the note says what the choice does.
+    QCOMPARE(backend.zoom(), QStringLiteral("off"));
+    QQuickItem *zoomNote = window->findChild<QQuickItem *>(QStringLiteral("zoomNote"));
+    QVERIFY(zoomNote);
+    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("The picture plays")));
+    for (const QString &word : {QStringLiteral("Off"), QStringLiteral("On cuts"), QStringLiteral("Slow push"),
+                                QStringLiteral("Key lines")})
+        QVERIFY2(visibleItemWithText(window, word), qPrintable(word));
+    QQuickItem *slowPush = visibleItemWithText(window, QStringLiteral("Slow push"));
+    QVERIFY(slowPush);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(slowPush));
+    QCOMPARE(backend.zoom(), QStringLiteral("push"));
+    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Moves in slowly")));
+    QQuickItem *zoomOff = visibleItemWithText(window, QStringLiteral("Off"));
+    QVERIFY(zoomOff);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomOff));
+    QCOMPARE(backend.zoom(), QStringLiteral("off"));
 
     QTest::keyClick(window, Qt::Key_Escape);
     QTRY_COMPARE_WITH_TIMEOUT(window->property("settingsOpen").toBool(), false, 3000);
@@ -2871,6 +2902,19 @@ void BackendTests::nextKeptAir() {
     QVERIFY(equal.property(QStringLiteral("air")).toNumber() != 0.0);
     QCOMPARE(equal.property(QStringLiteral("next")).toInt(), 1);
 
+    // The line that opens the movie plays first. The first kept line follows it with no
+    // air, and its own place is passed over when the cut reaches it.
+    const QString opened = QStringLiteral(
+        "[{clip:0,keep:false,start:0,end:1},{clip:0,keep:true,start:2,end:3},"
+        "{clip:0,keep:true,hook:true,start:3.2,end:5},{clip:0,keep:true,start:5.1,end:6}]");
+    const QJSValue afterHook = run(QStringLiteral("nextKeptAir(%1, 2, 0.4)").arg(opened));
+    QVERIFY2(!afterHook.isError(), qPrintable(afterHook.toString()));
+    QCOMPARE(afterHook.property(QStringLiteral("next")).toInt(), 1);
+    QCOMPARE(afterHook.property(QStringLiteral("air")).toNumber(), 0.0);
+    const QJSValue pastHook = run(QStringLiteral("nextKeptAir(%1, 1, 0.4)").arg(opened));
+    QCOMPARE(pastHook.property(QStringLiteral("next")).toInt(), 3);
+    QCOMPARE(pastHook.property(QStringLiteral("air")).toNumber(), 0.4);
+
     // A cap hardcoded at 0.4 returns 0.4 here, and returning the whole gap returns 2.
     const QJSValue openPace = run(QStringLiteral(
         "nextKeptAir([{clip:0,keep:true,start:0,end:10},{clip:0,keep:true,start:12,end:14}], 0, 0.8)"));
@@ -3719,7 +3763,8 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                              defaultCutIntent(), QStringLiteral("--scene-transition"),
                                              QStringLiteral("dip"), QStringLiteral("--max-pause"),
                                              QStringLiteral("0.8"), QStringLiteral("--b-roll-sound"),
-                                             QStringLiteral("mix")}));
+                                             QStringLiteral("mix"), QStringLiteral("--zoom"),
+                                             QStringLiteral("off")}));
     QVERIFY(direct.error.isEmpty());
 
     const CutLaunch viaUv = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
@@ -3799,11 +3844,26 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
     QCOMPARE(rendered.arguments, (QStringList{QStringLiteral("render"), QStringLiteral("/tmp/out"),
                                                QStringLiteral("--scene-transition"),
                                                QStringLiteral("dip"), QStringLiteral("--b-roll-sound"),
-                                               QStringLiteral("mix")}));
+                                               QStringLiteral("mix"), QStringLiteral("--zoom"),
+                                               QStringLiteral("off")}));
     const CutLaunch renderedVoice = cutRenderLaunch(QStringLiteral("/tmp/out"),
                                                      QStringLiteral("/usr/bin/botcut-cli"), QString(),
-                                                     QString(), QStringLiteral("dip"), false);
-    QCOMPARE(renderedVoice.arguments.last(), QStringLiteral("voice"));
+                                                     QString(), QStringLiteral("dip"), false,
+                                                     QStringLiteral("push"));
+    QCOMPARE(renderedVoice.arguments.at(renderedVoice.arguments.indexOf(QStringLiteral("--b-roll-sound")) + 1),
+             QStringLiteral("voice"));
+    QCOMPARE(renderedVoice.arguments.mid(renderedVoice.arguments.size() - 2),
+             (QStringList{QStringLiteral("--zoom"), QStringLiteral("push")}));
+    // A cut carries the zoom too, and a value nobody offers is no zoom.
+    const CutLaunch closeLines = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
+                                               QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
+                                               QString(), true, QStringLiteral("dip"), 0.8, {}, true,
+                                               QStringLiteral("lines"));
+    QCOMPARE(closeLines.arguments.at(closeLines.arguments.indexOf(QStringLiteral("--zoom")) + 1),
+             QStringLiteral("lines"));
+    QCOMPARE(closeLines.arguments.last(), QStringLiteral("--decide"));
+    QCOMPARE(zoomValue(QStringLiteral("spin")), QStringLiteral("off"));
+    QCOMPARE(zoomValue(QString()), QStringLiteral("off"));
 
     const QString cutsPath = QStringLiteral("/tmp/out/cuts.json");
     const CutLaunch captions = cutCaptionsLaunch(cutsPath, QStringLiteral("/usr/bin/botcut-cli"),
@@ -3845,6 +3905,10 @@ void BackendTests::sceneTransitionRoundTrips() {
     Backend first(&provider, picker);
     QCOMPARE(first.sceneTransition(), QStringLiteral("dip"));
     QCOMPARE(first.brollMix(), true);
+    // No zoom until one is chosen.
+    QCOMPARE(first.zoom(), QStringLiteral("off"));
+    first.setZoom(QStringLiteral("push"));
+    QCOMPARE(first.zoom(), QStringLiteral("push"));
     QCOMPARE(first.pace(), QStringLiteral("open"));
     QCOMPARE(first.maxPause(), 0.8);
     first.setSceneTransition(QStringLiteral("off"));
@@ -3863,6 +3927,9 @@ void BackendTests::sceneTransitionRoundTrips() {
     Backend again(&provider, againPicker);
     QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
     QCOMPARE(again.brollMix(), false);
+    QCOMPARE(again.zoom(), QStringLiteral("push"));
+    again.setZoom(QStringLiteral("sideways"));
+    QCOMPARE(again.zoom(), QStringLiteral("off"));
     QCOMPARE(again.pace(), QStringLiteral("measured"));
     QCOMPARE(again.maxPause(), 0.4);
     again.setSceneTransition(QStringLiteral("nope"));
@@ -3877,6 +3944,7 @@ void BackendTests::sceneTransitionRoundTrips() {
     Backend third(&provider, thirdPicker);
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
     QCOMPARE(third.brollMix(), true);
+    QCOMPARE(third.zoom(), QStringLiteral("off"));
     QCOMPARE(third.pace(), QStringLiteral("open"));
     third.setSceneTransition(QStringLiteral("dip"));
     QCOMPARE(third.sceneTransition(), QStringLiteral("dip"));
@@ -4620,6 +4688,7 @@ void BackendTests::cutOpensTheChatWithTheEditorsReply() {
             " \"dropped\": [],\n"
             " \"covers\": [{\"clip\": 1, \"line\": 2, \"through\": 2, \"start\": 0.0, \"end\": 4.0,\n"
             "              \"reason\": \"shows the road\", \"still\": \"work/stills/broll-1-0.jpg\"}],\n"
+            " \"cut_reply\": \"A ride up the coast. I put one line back.\",\n"
             " \"covers_reply\": \"I laid the road over the middle line.\"}\n"
             "JSON\n"
             "exit 0\n";
@@ -4650,11 +4719,13 @@ void BackendTests::cutOpensTheChatWithTheEditorsReply() {
     // The still is resolved beside the cut.
     QCOMPARE(cover.value(QStringLiteral("still")).toString(),
              QDir(backend.m_cutOut).filePath(QStringLiteral("work/stills/broll-1-0.jpg")));
-    // The chat opens with the editor's sentence and what it laid. Nothing waits on Apply.
+    // The chat opens with what the editor says of the cut it read back, then what it laid.
+    // Nothing waits on Apply.
     QCOMPARE(backend.chat().size(), 1);
     const QVariantMap turn = backend.chat().first().toMap();
     QCOMPARE(turn.value(QStringLiteral("role")).toString(), QStringLiteral("bot"));
-    QCOMPARE(turn.value(QStringLiteral("text")).toString(), QStringLiteral("I laid the road over the middle line."));
+    QCOMPARE(turn.value(QStringLiteral("text")).toString(),
+             QStringLiteral("A ride up the coast. I put one line back. I laid the road over the middle line."));
     QCOMPARE(turn.value(QStringLiteral("change")).toString(), QStringLiteral("B-roll over 1 stretch, 4 s."));
     QVERIFY(!backend.proposalPending());
     QVERIFY(!backend.canRevert());
@@ -5541,6 +5612,10 @@ void BackendTests::cutStatusLines() {
     QCOMPARE(cutStatusFromLine(QStringLiteral("Transcribing 2/4 clip.MP4")),
              QStringLiteral("Transcribing 2/4 clip.MP4"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Choosing takes")), QStringLiteral("Choosing takes"));
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Checking the cut")), QStringLiteral("Checking the cut"));
+    // What the cut says when it goes on without a pass is not a stage.
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Cutting without an outline")), QString());
+    QCOMPARE(cutStatusFromLine(QStringLiteral("Kept the cut as first made")), QString());
     QCOMPARE(cutStatusFromLine(QStringLiteral("Revising")), QStringLiteral("Revising"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Rendering 42%")), QStringLiteral("Rendering 42%"));
     QCOMPARE(cutStatusFromLine(QStringLiteral("Opening 42%")), QStringLiteral("Opening 42%"));
@@ -8131,6 +8206,19 @@ void BackendTests::cutMakesTheMovieInOnePress() {
     QVERIFY(!backend.selects().at(1).toMap().value(QStringLiteral("keep")).toBool());
     QCOMPARE(QDir(movies).entryList({QStringLiteral("press-talk*.mp4")}, QDir::Files).size(), 1);
     waitForBackgroundWork(backend);
+
+    // Choosing a zoom puts the movie behind too, and the next render is told which.
+    backend.setZoom(QStringLiteral("cuts"));
+    QVERIFY(backend.movieStale());
+    backend.updateMovie();
+    QVERIFY(backend.busy());
+    const QStringList zoomed = backend.m_cutProcess->arguments();
+    QCOMPARE(zoomed.at(zoomed.indexOf(QStringLiteral("--zoom")) + 1), QStringLiteral("cuts"));
+    QTRY_VERIFY_WITH_TIMEOUT(!backend.busy(), 15000);
+    QVERIFY(!backend.movieStale());
+    waitForBackgroundWork(backend);
+    backend.m_zoom = QStringLiteral("off");
+    QSettings().remove(QStringLiteral("zoom"));
     backend.showShots();
     QCOMPARE(backend.step(), QStringLiteral("linesCurrent"));
 
@@ -8256,6 +8344,7 @@ void BackendTests::aWholeCutIsOneProgressBar() {
     QList<qreal> seen;
     for (const QString &line : {QStringLiteral("Reading files"), QStringLiteral("Transcribing 1/2 a.mp4"),
                                 QStringLiteral("Transcribing 2/2 b.mp4"), QStringLiteral("Choosing takes"),
+                                QStringLiteral("Checking the cut"),
                                 QStringLiteral("Choosing covers"), QStringLiteral("Rendering 0%"),
                                 QStringLiteral("Rendering 50%"), QStringLiteral("Rendering 100%")}) {
         backend.setStatus(line);
@@ -8271,6 +8360,10 @@ void BackendTests::aWholeCutIsOneProgressBar() {
     backend.setStatus(QStringLiteral("12 kept, 3 dropped"));
     QCOMPARE(backend.job(), QStringLiteral("choosing"));
     QCOMPARE(backend.progress(), choosing);
+    // Reading the cut back is a stage with its own words.
+    backend.setStatus(QStringLiteral("Checking the cut"));
+    QCOMPARE(backend.job(), QStringLiteral("checking"));
+    QCOMPARE(backend.jobText(), QStringLiteral("Checking the cut"));
 
     // A render on its own is its own bar.
     backend.m_cutStage = Backend::CutStage::Render;
@@ -8353,6 +8446,118 @@ void BackendTests::wordCutsLoadToggleAndSave() {
                                          QStringLiteral("A talk"), backend.selects());
     const QJsonObject listed = QJsonDocument::fromJson(list).object().value(QStringLiteral("lines")).toArray().first().toObject();
     QCOMPARE(listed.value(QStringLiteral("cuts")).toArray().size(), 1);
+}
+
+void BackendTests::theOpeningLineLoadsSavesAndGoesBack() {
+    const QString dir = m_dir.filePath(QStringLiteral("opening-line"));
+    QVERIFY(QDir().mkpath(dir));
+    const QString cutsPath = QDir(dir).filePath(QStringLiteral("cuts.json"));
+    QJsonArray lines;
+    for (int id = 0; id < 3; ++id) {
+        QJsonObject line;
+        line.insert(QStringLiteral("id"), id);
+        line.insert(QStringLiteral("clip"), 0);
+        line.insert(QStringLiteral("start"), id * 5.0);
+        line.insert(QStringLiteral("end"), id * 5.0 + 2.0);
+        line.insert(QStringLiteral("text"), QStringLiteral("line %1").arg(id));
+        line.insert(QStringLiteral("keep"), true);
+        line.insert(QStringLiteral("reason"), QStringLiteral("story"));
+        lines.append(line);
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("lines"), lines);
+    root.insert(QStringLiteral("hook"), 2);
+    {
+        QFile file(cutsPath);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write(QJsonDocument(root).toJson());
+    }
+    const auto saved = [&cutsPath] {
+        QFile file(cutsPath);
+        if (!file.open(QIODevice::ReadOnly))
+            return QJsonObject();
+        return QJsonDocument::fromJson(file.readAll()).object();
+    };
+    const auto opens = [](const Backend &backend) {
+        QList<int> ids;
+        for (const QVariant &item : backend.selects()) {
+            if (item.toMap().value(QStringLiteral("hook")).toBool())
+                ids.append(item.toMap().value(QStringLiteral("id")).toInt());
+        }
+        return ids;
+    };
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.m_cutOut = dir;
+    backend.loadSelects(cutsPath);
+    // The list stays in the order the lines were said. One row is marked as the opening.
+    QCOMPARE(backend.selects().size(), 3);
+    QCOMPARE(backend.selects().first().toMap().value(QStringLiteral("id")).toInt(), 0);
+    QCOMPARE(opens(backend), QList<int>{2});
+
+    // Another line changing leaves the opening where it is.
+    backend.dropSelect(0);
+    QCOMPARE(saved().value(QStringLiteral("hook")).toInt(-1), 2);
+    // Dropping the opening line means the movie opens on nothing moved.
+    backend.dropSelect(2);
+    QVERIFY(!saved().contains(QStringLiteral("hook")));
+    backend.restoreSelect(2);
+    QCOMPARE(saved().value(QStringLiteral("hook")).toInt(-1), 2);
+
+    // Put it back: the line stays kept, in its place, and the file says so at once.
+    backend.clearHook();
+    QCOMPARE(opens(backend), QList<int>{});
+    QVERIFY(!saved().contains(QStringLiteral("hook")));
+    QCOMPARE(saved().value(QStringLiteral("lines")).toArray().size(), 3);
+    QVERIFY(saved().value(QStringLiteral("lines")).toArray().at(2).toObject().value(QStringLiteral("keep")).toBool());
+    backend.loadSelects(cutsPath);
+    QCOMPARE(opens(backend), QList<int>{});
+    // With no opening line, there is nothing to put back.
+    backend.clearHook();
+    QVERIFY(!saved().contains(QStringLiteral("hook")));
+}
+
+void BackendTests::qmlTheOpeningLineSaysSoAndCanGoBack() {
+    ShortcutBackend backend(QUrl(), 0.0);
+    backend.setTray({QStringLiteral("/tmp/talk.mp4")});
+    backend.setCutClips({QStringLiteral("/tmp/talk.mp4")});
+    QVariantMap first;
+    first.insert(QStringLiteral("id"), 4);
+    first.insert(QStringLiteral("clip"), 0);
+    first.insert(QStringLiteral("start"), 1.0);
+    first.insert(QStringLiteral("end"), 3.9);
+    first.insert(QStringLiteral("keep"), true);
+    first.insert(QStringLiteral("text"), QStringLiteral("Hello there"));
+    QVariantMap opening = first;
+    opening.insert(QStringLiteral("id"), 5);
+    opening.insert(QStringLiteral("text"), QStringLiteral("Nobody else does this"));
+    opening.insert(QStringLiteral("hook"), true);
+    backend.setSelects({first, opening});
+
+    QmlHarness harness(backend);
+    QQuickWindow *window = harness.window();
+    QVERIFY2(window, qPrintable(mainQmlPath()));
+    window->show();
+    window->resize(960, 640);
+    QTest::qWait(80);
+    QList<QQuickItem *> shown;
+    QList<QQuickItem *> words;
+    std::function<void(QQuickItem *)> walk = [&](QQuickItem *item) {
+        if (item->objectName() == QLatin1String("opensLabel") && item->isVisible())
+            shown.append(item);
+        if (item->objectName() == QLatin1String("putBackWord"))
+            words.append(item);
+        for (QQuickItem *child : item->childItems())
+            walk(child);
+    };
+    walk(window->contentItem());
+    // Only the line that was moved says so, whether or not it is the selected row.
+    QCOMPARE(shown.size(), 1);
+    QCOMPARE(shown.first()->property("text").toString(), QStringLiteral("Opens the movie"));
+    QCOMPARE(words.size(), 2);
+    QCOMPARE(words.first()->property("word").toString(), QStringLiteral("Put it back"));
+    QVERIFY(QMetaObject::invokeMethod(words.last(), "chosen"));
+    QCOMPARE(backend.hookCleared, 1);
 }
 
 void BackendTests::qmlLineMarksItsCutsAndAClickFlipsOne() {

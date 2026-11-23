@@ -2,6 +2,24 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-11-21
+
+- The zoom on jump cuts is off unless you choose it. **Settings** has **Zoom**: **Off**, **On cuts**, **Slow push**, or **Key lines**. Before, every cut inside a shot flipped the framing, including the half-second pieces left by a cut "um".
+- **On cuts** is the old zoom, calmer: the framing changes only at a cut between lines, never at a cut inside a line, and is held at least 4 seconds.
+- **Slow push** moves in on the speaker by half a percent a second, up to 8 percent, and starts wide again at the next cut between lines.
+- **Key lines** shows the few lines that carry the point 15 percent closer. The editor names them when it reads the cut back, so a movie cut before this has none until it is cut again.
+- `bench run` also counts what a viewer would notice in the model's cut, and in yours for scale: a point kept twice, a line that opens on and, but, so, or because with the line before it dropped, and a piece shorter than 0.6 seconds. The counts are plain checks on the cut. No model is asked.
+
+## 2026-11-19
+
+- Before choosing lines, the model reads the whole shoot once and outlines it: the beats, the lines that say the same thing however far apart, and the length the movie sentence asks for. A retake on the far side of a long shoot is now compared with its twin, and "a ninety second update" is cut to about ninety seconds.
+- After choosing, the model reads the cut back as a viewer gets it and fixes what trips: a point made twice, a line that leans on a dropped one, a dropped line the story needs. It returns changes, not a new list, and a line it does not name stays as it was. What it made of the cut opens the chat. The progress bar shows **Checking the cut**.
+- The editor may move one line to the front to open the movie. Nothing else changes order. The row reads **Opens the movie**, and **Put it back** returns it to its place. B-roll never runs across it.
+- The two requests that read the whole movie ask for high reasoning effort. `BOTCUT_LLM_EFFORT` sets one effort for every request.
+- Names in `~/.config/botcut/names.txt`, one a line, are sent with every transcription as words to listen for, along with any names in the movie sentence. A shot is transcribed again when the names change.
+- A cut says where its time went, and keeps the seconds for each stage in `work/seconds.json`.
+- `bench run` scores the cut after all three passes.
+
 ## 2026-11-15
 
 - `botcut-cli bench` scores the prompts against cuts you finished by hand. `bench save MOVIE NAME` keeps a finished movie's project as a case, with what was heard and the lines as you left them. `bench run` asks the model to choose again and prints, per case, how much of what it kept you kept too, how much of what you kept it kept, the lines that differ, the cuts inside lines that agree, the tokens, and the seconds. Each run is added to a history, and the next run says what changed. `bench run --replay` uses the answers recorded last time and needs no network or key.

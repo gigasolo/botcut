@@ -24,7 +24,9 @@ Item {
     readonly property bool unsure: modelData && modelData.reason === "unique?"
     // The user flipped this line. Read off the reason the model already keeps.
     readonly property bool byYou: modelData && (modelData.reason === "dropped" || modelData.reason === "restored")
-    readonly property bool detailShown: reasonText !== "" || coverText !== "" || selected
+    // The one line the editor moved to the front. It keeps its place in this list.
+    readonly property bool opens: modelData && modelData.hook === true && !dropped
+    readonly property bool detailShown: reasonText !== "" || coverText !== "" || selected || opens
 
     Rectangle {
         id: fill
@@ -190,6 +192,14 @@ Item {
                 }
             }
             Label {
+                objectName: "opensLabel"
+                visible: row.opens
+                Layout.alignment: Qt.AlignVCenter
+                text: qsTr("Opens the movie")
+                color: theme.accent
+                font.pixelSize: 12
+            }
+            Label {
                 visible: row.reasonText !== ""
                 Layout.alignment: Qt.AlignVCenter
                 text: row.byYou ? qsTr("You · %1").arg(row.reasonText) : row.reasonText
@@ -212,6 +222,12 @@ Item {
                 visible: row.selected
                 word: qsTr("Play")
                 onChosen: row.playRequested()
+            }
+            RowWord {
+                objectName: "putBackWord"
+                visible: row.selected && row.opens
+                word: qsTr("Put it back")
+                onChosen: backend.clearHook()
             }
             RowWord {
                 visible: row.selected && row.coverText !== ""

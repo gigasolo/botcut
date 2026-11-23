@@ -177,6 +177,43 @@ Item {
             }
             RowLayout {
                 width: parent.width
+                spacing: 8
+                Label {
+                    text: qsTr("Zoom")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
+                Item { Layout.fillWidth: true }
+                Repeater {
+                    model: [
+                        { value: "off", word: qsTr("Off") },
+                        { value: "cuts", word: qsTr("On cuts") },
+                        { value: "push", word: qsTr("Slow push") },
+                        { value: "lines", word: qsTr("Key lines") }
+                    ]
+                    ActionButton {
+                        required property var modelData
+                        text: modelData.word
+                        filled: backend.zoom === modelData.value
+                        enabled: !backend.busy
+                        onClicked: backend.zoom = modelData.value
+                    }
+                }
+            }
+            Label {
+                objectName: "zoomNote"
+                width: parent.width
+                wrapMode: Text.WordWrap
+                color: theme.foreground
+                opacity: 0.62
+                font.pixelSize: 12
+                text: backend.zoom === "cuts" ? qsTr("Goes a little closer at a cut between lines, so the jump reads as a change of shot.")
+                    : backend.zoom === "push" ? qsTr("Moves in slowly on the speaker between cuts. The slowest to render.")
+                    : backend.zoom === "lines" ? qsTr("Goes closer on the few lines that carry the point. A movie cut before this was added has none until it is cut again.")
+                    : qsTr("The picture plays as it was shot.")
+            }
+            RowLayout {
+                width: parent.width
                 Item { Layout.fillWidth: true }
                 ActionButton {
                     text: qsTr("Done")

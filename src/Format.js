@@ -35,15 +35,18 @@ function nextKeptAir(lines, index, paceSec) {
     if (!isFinite(Number(current.start)) || !isFinite(end))
         return null;
     var pace = Number(paceSec);
-    for (var i = index + 1; i < lines.length; ++i) {
+    // The line that opens the movie plays first, away from its place. What follows
+    // it is the first kept line, and its place is passed over later.
+    var from = current.hook === true ? 0 : index + 1;
+    for (var i = from; i < lines.length; ++i) {
         var line = lines[i];
-        if (!line || line.keep === false)
+        if (!line || line.keep === false || line.hook === true)
             continue;
         var start = Number(line.start);
         if (!isFinite(start) || !isFinite(Number(line.end)))
             continue;
         var air = 0;
-        if (Number(line.clip) === clip) {
+        if (current.hook !== true && Number(line.clip) === clip) {
             var gap = start - end;
             if (gap > 0)
                 air = Math.min(gap, pace);

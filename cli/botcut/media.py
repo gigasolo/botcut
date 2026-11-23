@@ -211,7 +211,8 @@ def render_with_progress(
     lines=None,
     broll_sound: str = "mix",
     clean_sound: bool = True,
-    punch_in: bool = True,
+    zoom: str = "off",
+    close=None,
 ) -> None:
     """Encode segments and print '<label> N%' as ffmpeg advances.
 
@@ -249,7 +250,8 @@ def render_with_progress(
         broll_sound=broll_sound,
         clean_sound=clean_sound,
         measured=measured,
-        punch_in=punch_in,
+        zoom=zoom,
+        close=close,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -628,12 +630,15 @@ def render_args(
     clean_sound: bool = False,
     measured: dict | None = None,
     measure: bool = False,
-    punch_in: bool = False,
+    zoom: str = "off",
+    close=None,
 ) -> list[str]:
     """ffmpeg arguments for the cut.
 
-    `punch_in` shows every other piece of a shot a little tighter, around the
-    speaker, so a cut inside the shot reads as a change of framing.
+    `zoom` moves in on the speaker: `cuts` goes from wide to a little tighter
+    at a join between lines, so a jump cut reads as a change of framing;
+    `push` creeps in between joins; `lines` shows the lines named in `close`
+    tighter than the rest. `off` plays every piece as shot.
 
     `clean_sound` cleans the joined sound and, with `measured`, brings it to
     the target level. `measure` builds the sound alone, with no picture, and
@@ -645,6 +650,8 @@ def render_args(
         raise SystemExit(f"Unknown encoder {encoder}")
     if broll_sound not in ("mix", "voice"):
         raise SystemExit(f"Unknown b-roll sound {broll_sound}")
+    if zoom not in ("off", "cuts", "push", "lines"):
+        raise SystemExit(f"Unknown zoom {zoom}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
     # An open card is clips[0]. Its still is not the camera's size or rate.
@@ -678,17 +685,32 @@ def render_args(
                 durations.append(0.0)
         for window in cover_windows(covers, lines or [], segments, durations):
             by_segment.setdefault(int(window["segment"]), []).append(window)
+    if measure:
+        # Listening needs no picture, so there is nothing to zoom.
+        zoom = "off"
+
+    def plain(clip: dict) -> bool:
+        return (
+            not is_card(str(clip.get("path") or ""))
+            and str(clip.get("role") or "") != "broll"
+            and not _rotated(clip)
+        )
+
     tight = [False] * len(segments)
-    if punch_in and not measure:
+    pushed = [0.0] * len(segments)
+    close_by_clip: dict[int, list] = {}
+    if zoom == "cuts":
         from botcut.frame import punched
 
-        tight = punched(
-            segments,
-            clips,
-            lambda clip: not is_card(str(clip.get("path") or ""))
-            and str(clip.get("role") or "") != "broll"
-            and not _rotated(clip),
-        )
+        tight = punched(segments, clips, plain, lines)
+    elif zoom == "push":
+        from botcut.frame import push_starts
+
+        pushed = push_starts(segments, lines)
+    elif zoom == "lines":
+        from botcut.frame import close_spans
+
+        close_by_clip = close_spans(lines, close)
     filters = []
     out_i = 0
     in_i = 0
@@ -738,6 +760,19 @@ def render_args(
                     "end": seg_end,
                 }
             )
+        if close_by_clip.get(spoken) and seg.get("reason") != "card":
+            from botcut.frame import split_close
+
+            # A line shown close starts and ends inside the piece it is part of.
+            pieces = [
+                part
+                for piece in pieces
+                for part in (
+                    split_close(piece, close_by_clip[spoken])
+                    if piece["clip"] == spoken and "voice" not in piece
+                    else [piece]
+                )
+            ]
         single = len(pieces) == 1 and pieces[0]["clip"] == spoken
         last_piece = len(pieces) - 1
         for j, piece in enumerate(pieces):
@@ -757,13 +792,20 @@ def render_args(
                 raw_in = aud_in if j == 0 else 0.0
                 raw_out = aud_out if j == last_piece else 0.0
                 a_in, a_out = _fit_pair(shown, raw_in, raw_out) if polish else (0.0, 0.0)
-            # Only the speaker's own picture is punched in. B-roll over the line is left as shot.
+            # Only the speaker's own picture is zoomed. B-roll over the line is left as shot.
             punch = ""
-            if tight[i] and int(piece["clip"]) == spoken:
-                from botcut.frame import punch_crop
+            if zoom != "off" and int(piece["clip"]) == spoken and "voice" not in piece:
+                from botcut.frame import CLOSE_IN, can_punch_in, punch_crop, push_filter
 
-                punch = punch_crop(video)
-            # The crop runs on software frames, so a punched-in piece is decoded there.
+                if not (plain(video) and can_punch_in(video)):
+                    pass
+                elif zoom == "cuts" and tight[i]:
+                    punch = punch_crop(video)
+                elif zoom == "lines" and piece.get("tight"):
+                    punch = punch_crop(video, CLOSE_IN)
+                elif zoom == "push":
+                    punch = push_filter(video, pushed[i] + float(video_start) - seg_start)
+            # The zoom runs on software frames, so a zoomed piece is decoded there.
             on_gpu = (
                 encoder == "vaapi" and not punch and not _rotated(video) and _vaapi_decodable(video)
             )

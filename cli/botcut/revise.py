@@ -26,6 +26,8 @@ from botcut.broll import (
     kept_covers,
 )
 from botcut.llm import ask
+from botcut.frame import close_ids
+from botcut.pick import hook_line
 
 # The offscreen revise test expects these sentences.
 FAKE_INTENT = "A frenzied cut."
@@ -312,6 +314,17 @@ def _land(cuts_path: str, doc: dict, lines: list[dict], result: dict) -> None:
     out_dir = os.path.dirname(os.path.abspath(cuts_path))
     clips = doc.get("clips") or []
     beats = collect_beats(clips, load_beats(out_dir, clips))
+    # The line the movie opens on stays the opening while it is kept.
+    opening = hook_line(new_lines, doc.get("hook"))
+    hook = int(opening["id"]) if opening else None
+    if hook is None:
+        doc.pop("hook", None)
+    # A line shown close stays so while it is kept.
+    close = close_ids(doc.get("close"), new_lines)
+    if close:
+        doc["close"] = close
+    else:
+        doc.pop("close", None)
     claims = result.get("covers")
     if claims is None or not beats:
         # An older proposal, or no B-roll in the cut: the runs follow the lines.
@@ -324,6 +337,7 @@ def _land(cuts_path: str, doc: dict, lines: list[dict], result: dict) -> None:
             segments=doc.get("segments") or [],
             durations=clip_durations(clips),
             still_dir=os.path.join(out_dir, "work", "stills"),
+            hook=hook,
         )
     if covers:
         doc["covers"] = covers

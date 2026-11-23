@@ -81,8 +81,12 @@ def highlight_span(
     if not chosen:
         raise SystemExit(f"Highlight ids {lo}..{hi} match no utterances")
     spans: list[tuple[float, float]] = []
+    # The line the movie opens on plays at the very start, away from its place.
+    # A highlight that names it would otherwise run from there to its last line.
+    opening: list[tuple[float, float]] = []
     timeline = 0.0
     for seg in segments:
+        found = opening if seg.get("hook") else spans
         seg_start = float(seg["start"])
         seg_end = float(seg["end"])
         length = max(0.0, seg_end - seg_start)
@@ -105,8 +109,9 @@ def highlight_span(
             mapped_end = min(timeline + length, timeline + (float(word["end"]) - seg_start))
             if mapped_end < mapped_start:
                 mapped_end = mapped_start
-            spans.append((mapped_start, mapped_end))
+            found.append((mapped_start, mapped_end))
         timeline += length
+    spans = spans or opening
     if not spans:
         raise SystemExit(f"Highlight ids {lo}..{hi} have no words on the rough cut")
     return spans[0][0], spans[-1][1]

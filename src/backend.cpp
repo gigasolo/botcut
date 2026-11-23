@@ -112,6 +112,8 @@ qreal runProgress(const QString &job, qreal within) {
         return 0.05 + 0.40 * part;
     if (job == QLatin1String("choosing"))
         return 0.47;
+    if (job == QLatin1String("checking"))
+        return 0.51;
     if (job == QLatin1String("covering"))
         return 0.55;
     if (job == QLatin1String("rendering"))
@@ -239,6 +241,8 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     // Only an explicit false is voice only. A missing or unknown value stays mix.
     const QString storedMix = QSettings().value(QStringLiteral("brollMix"), true).toString();
     m_brollMix = storedMix != QLatin1String("false");
+    // No zoom unless one was chosen.
+    m_zoom = zoomValue(QSettings().value(QStringLiteral("zoom")).toString());
 
     pruneProjects();
 
@@ -432,6 +436,8 @@ bool Backend::describeJob(const QString &status, QString *job, qreal *progress, 
         return fill(QStringLiteral("reading"), 0, tr("Reading shots"));
     if (status == QStringLiteral("Choosing takes"))
         return fill(QStringLiteral("choosing"), 0, tr("Choosing lines"));
+    if (status == QStringLiteral("Checking the cut"))
+        return fill(QStringLiteral("checking"), 0, tr("Checking the cut"));
     if (status == QStringLiteral("Choosing covers"))
         return fill(QStringLiteral("covering"), 0, tr("Laying B-roll"));
     if (status == QStringLiteral("Revising") || status == QStringLiteral("Changing…"))
@@ -748,6 +754,18 @@ void Backend::setBrollMix(bool value) {
     m_brollMix = value;
     QSettings().setValue(QStringLiteral("brollMix"), value);
     emit brollMixChanged();
+    touchMovie();
+}
+
+void Backend::setZoom(const QString &value) {
+    if (m_busy)
+        return;
+    const QString next = zoomValue(value);
+    if (next == m_zoom)
+        return;
+    m_zoom = next;
+    QSettings().setValue(QStringLiteral("zoom"), next);
+    emit zoomChanged();
     touchMovie();
 }
 
@@ -1486,7 +1504,7 @@ void Backend::startCut() {
     const QString out = newProjectDir();
     // One press makes the movie. The lines are there to change it afterwards.
     const CutLaunch launch = cutRunLaunch(m_tray, m_cutMode, out, tool.cli, tool.uv, tool.project, intentForCut(), false,
-                                          m_sceneTransition, maxPause(), brollFiles(), m_brollMix);
+                                          m_sceneTransition, maxPause(), brollFiles(), m_brollMix, m_zoom);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -1589,6 +1607,29 @@ void Backend::toggleWordCut(int id, int index) {
     }
 }
 
+void Backend::clearHook() {
+    if (m_busy)
+        return;
+    dismissError();
+    for (int i = 0; i < m_selects.size(); ++i) {
+        QVariantMap row = m_selects.at(i).toMap();
+        if (!row.value(QStringLiteral("hook")).toBool())
+            continue;
+        const QVariantMap previousRow = row;
+        row.remove(QStringLiteral("hook"));
+        m_selects[i] = row;
+        emit selectsChanged();
+        if (!storeCovers(true)) {
+            m_selects[i] = previousRow;
+            emit selectsChanged();
+            setStatus(QStringLiteral("Could not save the line list"));
+            return;
+        }
+        touchMovie();
+        return;
+    }
+}
+
 void Backend::clearCover(int lineId) {
     if (m_busy)
         return;
@@ -1646,6 +1687,7 @@ QVariantList coversFromJson(const QJsonValue &value, const QString &cutsPath = Q
 }
 
 QJsonArray linesForSelects(const QVariantList &selects);
+void putHook(QJsonObject *root, const QVariantList &selects);
 
 void putCovers(QJsonObject *root, const QVariantList &covers) {
     if (covers.isEmpty()) {
@@ -1755,8 +1797,10 @@ bool Backend::storeCovers(bool withLines) const {
         return false;
     QJsonObject root = doc.object();
     putCovers(&root, m_covers);
-    if (withLines)
+    if (withLines) {
         root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+        putHook(&root, m_selects);
+    }
     // Replace only after the full document is on disk. A short write must leave the previous file.
     QSaveFile out(cuts);
     if (!out.open(QIODevice::WriteOnly))
@@ -1777,6 +1821,9 @@ void Backend::loadSelects(const QString &cutsPath) {
     }
     const QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
     const QJsonArray lines = doc.object().value(QStringLiteral("lines")).toArray();
+    // One line may open the movie, played ahead of its place. The list stays in file order.
+    const QJsonValue hookValue = doc.object().value(QStringLiteral("hook"));
+    const int hook = hookValue.isDouble() ? hookValue.toInt(-1) : -1;
     QVariantList rows;
     for (const QJsonValue &value : lines) {
         if (!value.isObject())
@@ -1784,6 +1831,8 @@ void Backend::loadSelects(const QString &cutsPath) {
         const QJsonObject line = value.toObject();
         QVariantMap row;
         row.insert(QStringLiteral("id"), line.value(QStringLiteral("id")).toInt());
+        if (hook >= 0 && line.value(QStringLiteral("id")).toInt() == hook)
+            row.insert(QStringLiteral("hook"), true);
         row.insert(QStringLiteral("clip"), line.value(QStringLiteral("clip")).toInt());
         row.insert(QStringLiteral("start"), line.value(QStringLiteral("start")).toDouble());
         row.insert(QStringLiteral("end"), line.value(QStringLiteral("end")).toDouble());
@@ -1839,6 +1888,19 @@ QJsonArray linesForSelects(const QVariantList &selects) {
         lines.append(line);
     }
     return lines;
+}
+
+// The line the movie opens on is named once, at the top of the file. It is the
+// opening only while that line is kept.
+void putHook(QJsonObject *root, const QVariantList &selects) {
+    root->remove(QStringLiteral("hook"));
+    for (const QVariant &item : selects) {
+        const QVariantMap row = item.toMap();
+        if (row.value(QStringLiteral("hook")).toBool() && row.value(QStringLiteral("keep")).toBool()) {
+            root->insert(QStringLiteral("hook"), row.value(QStringLiteral("id")).toInt());
+            return;
+        }
+    }
 }
 
 void shiftClipIndexes(QVariantList *rows) {
@@ -1988,6 +2050,7 @@ bool Backend::writeSelects(const QString &cutsPath) const {
         tighten.insert(QStringLiteral("snap"), true);
     tighten.insert(QStringLiteral("max_pause"), maxPause());
     root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+    putHook(&root, m_selects);
     putCovers(&root, m_covers);
     root.insert(QStringLiteral("tighten"), tighten);
     // A shots-screen Render still rebuilds segments from the lines.
@@ -2024,6 +2087,7 @@ bool Backend::writeCutsForRender(bool includeIntent) {
     QJsonObject root;
     root.insert(QStringLiteral("clips"), clips);
     root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+    putHook(&root, m_selects);
     putCovers(&root, m_covers);
     root.insert(QStringLiteral("tighten"), tighten);
     if (includeIntent)
@@ -2265,6 +2329,7 @@ bool Backend::syncLinesKeepingPause(const QString &cutsPath) const {
     QJsonObject root = doc.object();
     root.insert(QStringLiteral("intent"), intentForCut());
     root.insert(QStringLiteral("lines"), linesForSelects(m_selects));
+    putHook(&root, m_selects);
     putCovers(&root, m_covers);
     // Pace lands on the next Cut or Render. This write must leave tighten alone.
     doc.setObject(root);
@@ -2456,7 +2521,7 @@ void Backend::renderSelects() {
     }
     const CliTool tool = cliTool();
     const CutLaunch launch = cutRenderLaunch(m_cutOut, tool.cli, tool.uv, tool.project, m_sceneTransition,
-                                             m_brollMix);
+                                             m_brollMix, m_zoom);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -2482,7 +2547,7 @@ void Backend::exportPlan() {
     const QString outDir = QFileInfo(cuts).absolutePath();
     const CliTool tool = cliTool();
     const CutLaunch launch = cutRenderLaunch(outDir, tool.cli, tool.uv, tool.project, m_sceneTransition,
-                                             m_brollMix);
+                                             m_brollMix, m_zoom);
     if (!launch.error.isEmpty()) {
         setStatus(launch.error);
         return;
@@ -2843,12 +2908,16 @@ QString usageSentence(const QJsonObject &usage) {
 }
 
 void Backend::sayCovers(const QString &cutsPath) {
-    // The editor says what B-roll it laid and why. It is not a proposal: nothing waits on Apply.
+    // The editor says what the movie is, what it fixed on reading it back, and what B-roll
+    // it laid and why. It is not a proposal: nothing waits on Apply.
     QFile file(cutsPath);
     if (!file.open(QIODevice::ReadOnly))
         return;
     const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
-    const QString reply = root.value(QStringLiteral("covers_reply")).toString().simplified();
+    const QString reply = QStringList{root.value(QStringLiteral("cut_reply")).toString().simplified(),
+                                      root.value(QStringLiteral("covers_reply")).toString().simplified()}
+                              .filter(QRegularExpression(QStringLiteral(".")))
+                              .join(QLatin1Char(' '));
     // What the cut asked of the model is said once, here, and nowhere else.
     const QString used = usageSentence(root.value(QStringLiteral("usage")).toObject());
     if (reply.isEmpty() && used.isEmpty())

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from botcut import llm, net
@@ -32,10 +33,12 @@ from botcut.pick import (
     DEFAULT_INTENT,
     cut_words,
     decision_lines,
-    dropped_utterances,
-    kept_utterances,
     model_name,
+    hook_line,
+    no_outline,
+    outline,
     pick,
+    play_order,
     segments,
     snap,
     tighten,
@@ -43,15 +46,76 @@ from botcut.pick import (
     unknown_warnings,
     utterances,
 )
-from botcut.frame import find_faces, focus
+from botcut.frame import ZOOMS, close_ids, find_faces, focus
 from botcut.revise import apply_proposal, revise
+from botcut.proof import apply_changes, changed, no_changes, proof
 from botcut.short import highlight_span, kept_on_cut, pick_highlight, short_args
-from botcut.stt import transcribe_fake, transcribe_local, transcribe_xai
+from botcut.stt import key_terms, terms_mark, transcribe_fake, transcribe_local, transcribe_xai
 
+
+ZOOM_HELP = (
+    "zoom in on the speaker: at a join between lines (cuts), slowly between joins (push), "
+    "or on the lines that carry the point (lines)"
+)
 
 # Shots sent to the transcriber at once, and stills grabbed at once.
 TRANSCRIBE_WORKERS = 4
 STILL_WORKERS = 4
+
+
+class _Clock:
+    """Seconds spent in each stage of a cut, in the order the stages ran."""
+
+    def __init__(self) -> None:
+        self._last = time.perf_counter()
+        self.seconds: dict[str, float] = {}
+
+    def lap(self, stage: str) -> None:
+        """Everything since the last lap went to this stage."""
+        now = time.perf_counter()
+        self.seconds[stage] = round(self.seconds.get(stage, 0.0) + now - self._last, 2)
+        self._last = now
+
+
+def _span(seconds: float) -> str:
+    whole = int(round(seconds))
+    return f"{whole // 60}m{whole % 60:02d}s" if whole >= 60 else f"{whole}s"
+
+
+def took_line(seconds: dict) -> str:
+    """'Took 6m39s: render 4m45s, choose 1m16s, listen 9s.' Longest first, under a second left out."""
+    total = sum(seconds.values())
+    parts = [
+        f"{stage} {_span(spent)}"
+        for stage, spent in sorted(seconds.items(), key=lambda item: -item[1])
+        if spent >= 1
+    ]
+    return f"Took {_span(total)}" + (": " + ", ".join(parts) if parts else "") + "."
+
+
+def _took(out: str, clock: _Clock, fresh: bool) -> None:
+    """Say how long the stages took, and keep it in work/seconds.json.
+
+    It is kept beside the caches and not in cuts.json, so nothing is written to
+    cuts.json after a render that the window may have changed in the meantime.
+    A render of a saved cut adds its stages to what the cut itself took.
+    """
+    path = os.path.join(out, "work", "seconds.json")
+    known: dict = {}
+    if not fresh:
+        try:
+            known = json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            known = {}
+        if not isinstance(known, dict):
+            known = {}
+    known.update(clock.seconds)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        Path(path).write_text(json.dumps(known) + "\n")
+    except OSError:
+        pass
+    print(took_line(clock.seconds), flush=True)
 
 
 def check_key() -> None:
@@ -96,6 +160,7 @@ def main(argv: list[str] | None = None) -> None:
         default="mix",
         help="mix the B-roll sound under the voice, or play the voice alone",
     )
+    run_p.add_argument("--zoom", choices=ZOOMS, default="off", help=ZOOM_HELP)
     render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
     render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
     render_p.add_argument(
@@ -110,6 +175,7 @@ def main(argv: list[str] | None = None) -> None:
         default="mix",
         help="mix the B-roll sound under the voice, or play the voice alone",
     )
+    render_p.add_argument("--zoom", choices=ZOOMS, default="off", help=ZOOM_HELP)
     cap_p = sub.add_parser("captions", help="write an SRT for the rough cut")
     cap_p.add_argument("cuts", help="path to cuts.json")
     cap_p.add_argument("--burn", action="store_true", help="also write rough_cut.captioned.mp4")
@@ -171,12 +237,14 @@ def main(argv: list[str] | None = None) -> None:
                 scene_transition=args.scene_transition,
                 broll_files=args.b_roll_file,
                 broll_sound=args.b_roll_sound,
+                zoom=args.zoom,
             )
         elif args.cmd == "render":
             render_saved(
                 args.cuts,
                 scene_transition=args.scene_transition,
                 broll_sound=args.b_roll_sound,
+                zoom=args.zoom,
             )
         elif args.cmd == "captions":
             captions(args.cuts, burn=args.burn)
@@ -227,9 +295,11 @@ def run(
     scene_transition: str = "dip",
     broll_files: list[str] | None = None,
     broll_sound: str = "mix",
+    zoom: str = "off",
 ) -> None:
     if mode not in ("speech", "assemble"):
         raise SystemExit(f"Unknown mode: {mode}")
+    clock = _Clock()
     paths = resolve_inputs(files)
     # Assemble plays every file in order with its own sound, so a B-roll mark means nothing there.
     roles = _broll_roles(paths, [*(broll_files or []), *resolve_broll(files)]) if mode == "speech" else set()
@@ -257,7 +327,8 @@ def run(
             "segments": segs,
             "dropped": [],
         }
-        _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
+        clock.lap("read")
+        _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, fresh=True, zoom=zoom)
         return
 
     fake = os.environ.get("BOTCUT_FAKE") == "1"
@@ -268,7 +339,9 @@ def run(
     words_by_clip: list[list] = [[] for _ in clips]
     silences_by_clip: list[list] = [[] for _ in clips]
     beats_by_clip: dict[int, list] = {}
-    label = _stt_label(fake, stt, whisper_model)
+    # Names the transcript should lean toward: the person's kept list, and any in the movie sentence.
+    terms = [] if fake else key_terms(intent)
+    label = _stt_label(fake, stt, whisper_model, terms)
     for index, clip in enumerate(clips):
         # A card has nothing heard or measured, so nothing is kept for it.
         if not is_card(clip["path"]):
@@ -278,12 +351,15 @@ def run(
         for index, clip in enumerate(clips)
         if not is_card(clip["path"]) and not is_broll(clip)
     ]
+    clock.lap("read")
     for index, clip in enumerate(clips):
         if is_broll(clip):
             # B-roll is picture. It is not transcribed and never becomes a line.
             if not beats_by_clip:
                 print("Reading beats", flush=True)
             beats_by_clip[index] = _beats_for_clip(work, index, Path(clip["path"]).stem, clip)
+    if beats_by_clip:
+        clock.lap("beats")
 
     def listen(index: int, clip: dict) -> tuple[list, list]:
         stem = Path(clip["path"]).stem
@@ -293,7 +369,7 @@ def run(
             Path(cache).write_text(json.dumps(payload) + "\n")
             return payload["words"], []
         flac = os.path.join(work, f"{index}-{stem}.flac")
-        words = _words_for_clip(work, index, stem, backend, flac, clip, whisper_model)
+        words = _words_for_clip(work, index, stem, backend, flac, clip, whisper_model, terms)
         return words, _silences_for_clip(work, index, stem, flac, clip)
 
     def said(count: int) -> None:
@@ -327,13 +403,19 @@ def run(
                 raise
 
     utts = utterances(words_by_clip)
+    clock.lap("listen")
     movie = intent.strip() or DEFAULT_INTENT
     if speech:
         _attach_stills(utts, clips, os.path.join(work, "stills"))
         find_faces(work, clips, lambda clip: not is_card(clip["path"]) and not is_broll(clip))
+        clock.lap("stills")
         print("Choosing takes", flush=True)
-        chosen = pick(utts, movie)
+        plan = outline(utts, movie)
+        clock.lap("outline")
+        chosen = pick(utts, movie, plan)
+        clock.lap("choose")
     else:
+        plan = no_outline()
         chosen = []
     segs, unknown = segments(utts, chosen, [clip["duration"] for clip in clips])
     if snap_edges:
@@ -341,31 +423,50 @@ def run(
     segs = tighten(segs, silences_by_clip, max_pause)
     lines = decision_lines(utts, chosen)
     segs = cut_words(segs, lines)
+    changes = no_changes()
+    if speech:
+        # The cut is read back once, as a viewer gets it, and what trips is fixed.
+        print("Checking the cut", flush=True)
+        changes = proof(lines, segs, intent=movie, outline=plan)
+        if changed(changes):
+            lines = apply_changes(lines, changes)
+            segs = _segments_for_lines(
+                lines, [clip["duration"] for clip in clips], silences_by_clip, snap_edges, max_pause
+            )
+        clock.lap("proof")
+    dropped = [line for line in lines if not line["keep"]]
+    kept = [line for line in lines if line["keep"]]
     lines, segs = merge_cards(lines, segs, clips, movie)
+    # One line may open the movie. The proof names it, having read the cut without it in place.
+    opening = hook_line(lines, changes["hook"])
+    hook = int(opening["id"]) if opening else None
+    segs = play_order(segs, lines, hook)
     covers: list = []
     covers_reply = ""
     if beats_by_clip:
         print("Choosing covers", flush=True)
         covers, covers_reply = choose_covers(
-            clips, lines, os.path.join(work, "stills"), beats_by_clip, segments=segs, intent=movie
+            clips, lines, os.path.join(work, "stills"), beats_by_clip, segments=segs, intent=movie, hook=hook
         )
+        clock.lap("covers")
     for line in unknown_warnings(unknown):
         print(line)
-    dropped = dropped_utterances(utts, chosen)
     # BOTCUT_FAKE keeps every id, so this prints nothing in the offline tests.
-    for line in unique_warnings(dropped, kept_utterances(utts, chosen)):
+    for line in unique_warnings(dropped, kept):
         print(line)
 
     doc = {
         "version": 1,
         "mode": "speech",
         "intent": movie,
-        "stt": _stt_label(fake, stt, whisper_model),
+        "stt": label,
         "model": "fake" if fake else model_name(),
         "tighten": {"max_pause": max_pause, "snap": snap_edges},
         "clips": [_clip_row(i, clip) for i, clip in enumerate(clips)],
         "segments": segs,
         "lines": lines,
+        # What the whole shoot was read as, so a later pass over this cut starts from it.
+        "outline": {key: plan[key] for key in ("beats", "retakes", "target_seconds")},
         "dropped": [
             {
                 "id": utt["id"],
@@ -381,6 +482,15 @@ def run(
         doc["covers"] = covers
     if covers_reply:
         doc["covers_reply"] = covers_reply
+    if hook is not None:
+        doc["hook"] = hook
+    # The lines that carry the point, kept whatever the zoom is, so choosing Key lines later needs no new cut.
+    close = close_ids(changes.get("close"), lines)
+    if close:
+        doc["close"] = close
+    if changes["reply"]:
+        # What the editor says about the cut it read back. The window opens the chat with it.
+        doc["cut_reply"] = changes["reply"]
     # What this cut asked of the model, so the window can say so once.
     tally = llm.usage()
     if tally["requests"]:
@@ -390,8 +500,10 @@ def run(
         _write_doc(out, doc)
         kept_n = sum(1 for line in doc["lines"] if line["keep"])
         print(f"{kept_n} kept, {len(doc['lines']) - kept_n} dropped", flush=True)
+        clock.lap("write")
+        _took(out, clock, fresh=True)
         return
-    _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
+    _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, fresh=True, zoom=zoom)
 
 
 def _clip_row(index: int, clip: dict) -> dict:
@@ -459,12 +571,17 @@ def _write_cut(
     clips: list,
     scene_transition: str = "dip",
     broll_sound: str = "mix",
+    clock: _Clock | None = None,
+    fresh: bool = False,
+    zoom: str = "off",
 ) -> None:
     _write_doc(out, doc)
     if not segs:
         raise SystemExit("No segments to render")
     dst = os.path.join(out, "rough_cut.mp4")
     _level_clips(os.path.join(out, "work"), clips)
+    if clock:
+        clock.lap("level")
     render_with_progress(
         segs,
         clips,
@@ -476,14 +593,22 @@ def _write_cut(
         covers=doc.get("covers") or None,
         lines=doc.get("lines") or None,
         broll_sound=broll_sound,
+        zoom=zoom,
+        close=doc.get("close"),
     )
     kept_s = sum(seg["end"] - seg["start"] for seg in segs)
     total_s = sum(clip["duration"] for clip in clips)
     print(f"Wrote {os.path.abspath(dst)} ({kept_s:.1f}s of {total_s:.1f}s)")
+    if clock:
+        clock.lap("render")
+        _took(out, clock, fresh)
 
 
-def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "mix") -> None:
+def render_saved(
+    cuts: str, scene_transition: str = "dip", broll_sound: str = "mix", zoom: str = "off"
+) -> None:
     """Encode rough_cut.mp4 from a cuts.json the tray has already confirmed."""
+    clock = _Clock()
     path = cuts
     if os.path.isdir(path):
         path = os.path.join(path, "cuts.json")
@@ -518,6 +643,16 @@ def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "m
             bool(tighten_doc.get("snap", True)),
             float(tighten_doc.get("max_pause", 0.8)),
         )
+        # The opening line plays first for as long as it is kept. Dropped, it opens nothing.
+        if hook_line(lines, doc.get("hook")) is None:
+            doc.pop("hook", None)
+        # A line shown close is one that is still in the movie.
+        close = close_ids(doc.get("close"), lines)
+        if close:
+            doc["close"] = close
+        else:
+            doc.pop("close", None)
+        segs = play_order(segs, lines, doc.get("hook"))
         doc["segments"] = segs
         doc["dropped"] = [
             {
@@ -532,7 +667,8 @@ def render_saved(cuts: str, scene_transition: str = "dip", broll_sound: str = "m
         ]
     else:
         segs = doc.get("segments") or []
-    _write_cut(out, doc, segs, clips, scene_transition, broll_sound)
+    clock.lap("read")
+    _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, zoom=zoom)
 
 
 def _segments_for_lines(
@@ -572,7 +708,14 @@ def _load_silences(out: str, clips: list) -> list:
 
 
 def _words_for_clip(
-    work: str, index: int, stem: str, backend: str, flac: str, clip: dict, whisper_model: str
+    work: str,
+    index: int,
+    stem: str,
+    backend: str,
+    flac: str,
+    clip: dict,
+    whisper_model: str,
+    terms: list[str] | tuple[str, ...] = (),
 ) -> list:
     for cache in word_cache_candidates(work, index, stem, backend):
         if os.path.isfile(cache):
@@ -581,9 +724,9 @@ def _words_for_clip(
     if not os.path.isfile(flac):
         extract_audio(clip["path"], flac)
     if backend == "local":
-        result = transcribe_local(flac, whisper_model, stem)
+        result = transcribe_local(flac, whisper_model, stem, terms)
     else:
-        result = transcribe_xai(flac)
+        result = transcribe_xai(flac, terms)
     cache = word_cache_candidates(work, index, stem, backend)[0]
     Path(cache).write_text(json.dumps(result) + "\n")
     return result["words"]
@@ -593,7 +736,8 @@ def _drop_stale_caches(work: str, index: int, clip: dict, stt_label: str) -> Non
     """Forget what was heard in a shot if the file, or the transcriber, has changed.
 
     Caches are named by position and file name. A re-exported file with the
-    same name, or another Whisper model, must not be answered from the old one.
+    same name, another Whisper model, or another list of names to listen for,
+    must not be answered from the old one.
     """
     stem = Path(clip["path"]).stem
     stamp_path = os.path.join(work, f"{index}-{stem}.stamp.json")
@@ -666,12 +810,15 @@ def _silences_for_clip(work: str, index: int, stem: str, flac: str, clip: dict) 
     return pairs
 
 
-def _stt_label(fake: bool, stt: str, whisper_model: str) -> str:
+def _stt_label(
+    fake: bool, stt: str, whisper_model: str, terms: list[str] | tuple[str, ...] = ()
+) -> str:
+    """Which transcriber heard the shots, marked when it was given names to listen for."""
     if fake:
         return "fake"
     if stt == "local":
-        return f"local:faster-whisper:{whisper_model}"
-    return "xai:grok-voice-transcribe-2.0"
+        return f"local:faster-whisper:{whisper_model}{terms_mark(terms)}"
+    return f"xai:grok-voice-transcribe-2.0{terms_mark(terms)}"
 
 
 def captions(cuts_path: str, burn: bool = False) -> None:

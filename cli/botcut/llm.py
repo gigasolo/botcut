@@ -38,12 +38,26 @@ def reasoning_effort(model: str) -> str | None:
     return None
 
 
-def chat_fields(model: str | None = None) -> dict:
+EFFORTS = ("low", "medium", "high", "xhigh")
+
+
+def chat_fields(model: str | None = None, effort: str | None = None) -> dict:
+    """The model, and how hard it should think when it takes that setting.
+
+    A request may ask for more than the usual low effort: reading the whole
+    shoot is worth it, choosing a face box is not. BOTCUT_LLM_EFFORT sets one
+    effort for every request, so the bench can price the difference.
+    """
     chosen = model_name() if model is None else model
     fields: dict = {"model": chosen}
-    effort = reasoning_effort(chosen)
-    if effort:
-        fields["reasoning_effort"] = effort
+    usual = reasoning_effort(chosen)
+    if usual:
+        forced = (os.environ.get("BOTCUT_LLM_EFFORT") or "").strip().lower()
+        if forced in EFFORTS:
+            usual = forced
+        elif effort in EFFORTS:
+            usual = effort
+        fields["reasoning_effort"] = usual
     return fields
 
 
@@ -60,12 +74,14 @@ def ask(
     parse: Callable[[object], object] | None = None,
     read_timeout: float = 120,
     tries: int = 1,
+    effort: str | None = None,
 ):
     """Ask once and return the answer, read by `parse` when one is given.
 
     `what` names the answer for the person: "a keep list". An answer that is
     not JSON, or that `parse` cannot read, is asked for again up to `tries`
     times, and then the job stops with "LLM response was not <what>".
+    `effort` asks for more thought than usual on this one request.
     """
     tape = _tape
     if tape is not None and tape.replay:
@@ -78,7 +94,7 @@ def ask(
     key = os.environ.get("XAI_API_KEY")
     if not key:
         raise SystemExit("XAI_API_KEY is not set")
-    body = {**chat_fields(), "messages": messages, "response_format": schema}
+    body = {**chat_fields(effort=effort), "messages": messages, "response_format": schema}
     for attempt in range(max(1, tries)):
         response = post(
             llm_url(),

@@ -40,6 +40,7 @@ from botcut.pick import (
     pick,
     play_order,
     segments,
+    settle,
     snap,
     tighten,
     unique_warnings,
@@ -422,7 +423,7 @@ def run(
         segs = snap(segs, silences_by_clip)
     segs = tighten(segs, silences_by_clip, max_pause)
     lines = decision_lines(utts, chosen)
-    segs = cut_words(segs, lines)
+    segs = settle(cut_words(segs, lines), lines)
     changes = no_changes()
     if speech:
         # The cut is read back once, as a viewer gets it, and what trips is fixed.
@@ -582,7 +583,7 @@ def _write_cut(
     _level_clips(os.path.join(out, "work"), clips)
     if clock:
         clock.lap("level")
-    render_with_progress(
+    made = render_with_progress(
         segs,
         clips,
         dst,
@@ -595,10 +596,14 @@ def _write_cut(
         broll_sound=broll_sound,
         zoom=zoom,
         close=doc.get("close"),
+        angles=doc.get("angles") or None,
     )
     kept_s = sum(seg["end"] - seg["start"] for seg in segs)
     total_s = sum(clip["duration"] for clip in clips)
     print(f"Wrote {os.path.abspath(dst)} ({kept_s:.1f}s of {total_s:.1f}s)")
+    if made and not fresh and made["pieces"] > made["made"]:
+        # A change to a cut that was already rendered only makes what the change touched.
+        print(f"Made {made['made']} of {made['pieces']} pieces again.", flush=True)
     if clock:
         clock.lap("render")
         _took(out, clock, fresh)
@@ -692,7 +697,7 @@ def _segments_for_lines(
     segs, _unknown = segments(utts, keep, durations)
     if snap_edges:
         segs = snap(segs, silences)
-    return cut_words(tighten(segs, silences, max_pause), lines)
+    return settle(cut_words(tighten(segs, silences, max_pause), lines), lines)
 
 
 def _load_silences(out: str, clips: list) -> list:

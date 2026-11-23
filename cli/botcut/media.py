@@ -158,7 +158,59 @@ def parse_silences(stderr: str, duration: float) -> list[tuple[float, float]]:
     return pairs
 
 
+# The level under which a stretch counts as a pause, for a quiet room. A shot with
+# more going on behind the voice gets a higher one, worked out from its own sound.
+SILENCE_DB = -35.0
+SILENCE_OVER_FLOOR = 8.0
+SILENCE_UNDER_VOICE = 12.0
+SILENCE_DB_MAX = -18.0
+
+
+def sound_levels(flac: str) -> tuple[float, float] | None:
+    """How loud the room and the voice are in a recording, in dB below full scale.
+
+    The sound is read in 50 ms steps. The quiet end of them is the room and
+    the loud end is the voice. None when it cannot be read or is all silence.
+    """
+    import numpy as np
+
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", flac, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        return None
+    return levels_of(np.frombuffer(proc.stdout, dtype=np.int16))
+
+
+def levels_of(samples, rate: int = 16000) -> tuple[float, float] | None:
+    import numpy as np
+
+    step = rate // 20
+    count = len(samples) // step
+    if count < 20:
+        return None
+    frames = samples[: count * step].astype(np.float32).reshape(count, step) / 32768.0
+    level = 10 * np.log10(np.mean(frames * frames, axis=1) + 1e-12)
+    # Digital silence, as in a file padded by an export, is not the room.
+    heard = level[level > -80.0]
+    if len(heard) < 20:
+        return None
+    return float(np.percentile(heard, 5)), float(np.percentile(heard, 90))
+
+
+def silence_threshold(levels: tuple[float, float] | None) -> float:
+    """The level that separates a pause from the voice in this recording."""
+    if levels is None:
+        return SILENCE_DB
+    floor, voice = levels
+    wanted = max(SILENCE_DB, floor + SILENCE_OVER_FLOOR)
+    # Never so high that quiet words count as a pause.
+    return round(min(wanted, max(SILENCE_DB, voice - SILENCE_UNDER_VOICE), SILENCE_DB_MAX), 1)
+
+
 def silences(flac: str, duration: float) -> list[tuple[float, float]]:
+    threshold = silence_threshold(sound_levels(flac))
     proc = subprocess.run(
         [
             "ffmpeg",
@@ -167,7 +219,7 @@ def silences(flac: str, duration: float) -> list[tuple[float, float]]:
             "-i",
             flac,
             "-af",
-            "silencedetect=noise=-35dB:d=0.3",
+            f"silencedetect=noise={threshold:g}dB:d=0.3",
             "-f",
             "null",
             "-",
@@ -213,14 +265,40 @@ def render_with_progress(
     clean_sound: bool = True,
     zoom: str = "off",
     close=None,
-) -> None:
-    """Encode segments and print '<label> N%' as ffmpeg advances.
+    angles=None,
+) -> dict | None:
+    """Encode segments and print '<label> N%' as the render advances.
+
+    Returns what the render reused, {pieces, made}, when it was made in pieces.
+
 
     Progress stays on stdout. ffmpeg's own log stays off that stream so a UI
     can show the percentage without the filter graph.
     """
     kept_s = sum(float(seg["end"]) - float(seg["start"]) for seg in segments)
     encoder, device = resolve_encoder()
+    if os.environ.get("BOTCUT_RENDER", "").strip().lower() != "graph":
+        from botcut import render
+
+        return render.render(
+            segments,
+            clips,
+            dst,
+            label,
+            fail_prefix,
+            encoder=encoder,
+            device=device,
+            polish=polish,
+            scene_transition=scene_transition,
+            covers=covers,
+            lines=lines,
+            broll_sound=broll_sound,
+            clean_sound=clean_sound,
+            zoom=zoom,
+            close=close,
+            angles=angles,
+        )
+    # BOTCUT_RENDER=graph is the older way: the whole movie as one filter graph, encoded in one go.
     print(f"{label} 0%", flush=True)
     # The sound is listened to once before the encode, so the level is set by
     # one steady gain and not by a compressor riding the voice.
@@ -234,6 +312,7 @@ def render_with_progress(
             covers=covers,
             lines=lines,
             broll_sound=broll_sound,
+            angles=angles,
         )
     # args[0] is the leading -y. The progress flags replace it so one ffmpeg
     # process still reports Rendering N% / Opening N%.
@@ -252,6 +331,7 @@ def render_with_progress(
         measured=measured,
         zoom=zoom,
         close=close,
+        angles=angles,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -422,6 +502,7 @@ def measure_loudness(
     covers=None,
     lines=None,
     broll_sound: str = "mix",
+    angles=None,
 ) -> dict | None:
     """Play the cut's sound through once, with no picture, and measure it.
 
@@ -439,6 +520,7 @@ def measure_loudness(
         broll_sound=broll_sound,
         clean_sound=True,
         measure=True,
+        angles=angles,
     )
     proc = subprocess.run(
         ["ffmpeg", "-hide_banner", "-nostats", *args], capture_output=True, text=True
@@ -616,78 +698,45 @@ def _video_filter(
     return chain + picture + f",format=nv12,hwupload[v{out_index}]"
 
 
-def render_args(
+def cut_pieces(
     segments: list[dict],
     clips: list[dict],
-    dst: str,
-    encoder: str = "x264",
-    device: str | None = None,
+    *,
     polish: bool = False,
     scene_transition: str = "dip",
     covers=None,
     lines=None,
-    broll_sound: str = "mix",
-    clean_sound: bool = False,
-    measured: dict | None = None,
-    measure: bool = False,
     zoom: str = "off",
     close=None,
-) -> list[str]:
-    """ffmpeg arguments for the cut.
+    angles=None,
+) -> list[dict]:
+    """The cut as the pieces of picture that play, in order, each with the sound under it.
 
-    `zoom` moves in on the speaker: `cuts` goes from wide to a little tighter
-    at a join between lines, so a jump cut reads as a change of framing;
-    `push` creeps in between joins; `lines` shows the lines named in `close`
-    tighter than the rest. `off` plays every piece as shot.
-
-    `clean_sound` cleans the joined sound and, with `measured`, brings it to
-    the target level. `measure` builds the sound alone, with no picture, and
-    has loudnorm print what it hears.
+    A piece is one stretch of one file's picture: `clip`, `start`, `span`,
+    the fades on it, and the crop or move that zooms it. When the picture is
+    not the speaker's own, B-roll or another camera, `voice` and
+    `voice_start` say where the sound comes from, and `angle` marks another
+    camera on the same moment, whose own sound is never played.
     """
-    if not segments:
-        raise SystemExit("No segments to render")
-    if encoder not in ("x264", "vaapi"):
-        raise SystemExit(f"Unknown encoder {encoder}")
-    if broll_sound not in ("mix", "voice"):
-        raise SystemExit(f"Unknown b-roll sound {broll_sound}")
-    if zoom not in ("off", "cuts", "push", "lines"):
-        raise SystemExit(f"Unknown zoom {zoom}")
-    if encoder == "vaapi" and not device:
-        raise SystemExit("VA-API encode needs a device")
-    # An open card is clips[0]. Its still is not the camera's size or rate.
-    # B-roll is not the camera either.
-    ref = clips[0]
-    for clip in clips:
-        if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") == "broll":
-            continue
-        ref = clip
-        break
-    width, height, fps = int(ref["width"]), int(ref["height"]), float(ref["fps"])
-    if width <= 0 or height <= 0 or fps <= 0:
-        raise SystemExit(f"Clip has no video to render: {ref['path']}")
-    args = ["-y"]
-    if measure:
-        # Listening needs no picture, so nothing here touches the GPU or the encoder.
-        encoder = "x264"
-    if encoder == "vaapi":
-        args += ["-init_hw_device", f"vaapi=va:{device}", "-filter_hw_device", "va"]
-    fps_s = _fps(fps)
     transition = _transition(scene_transition)
+    durations = []
+    for clip in clips:
+        try:
+            durations.append(float(clip.get("duration") or 0))
+        except (TypeError, ValueError):
+            durations.append(0.0)
     by_segment: dict[int, list[dict]] = {}
     if covers:
         from botcut.broll import cover_windows
 
-        durations = []
-        for clip in clips:
-            try:
-                durations.append(float(clip.get("duration") or 0))
-            except (TypeError, ValueError):
-                durations.append(0.0)
         for window in cover_windows(covers, lines or [], segments, durations):
             by_segment.setdefault(int(window["segment"]), []).append(window)
-    if measure:
-        # Listening needs no picture, so there is nothing to zoom.
-        zoom = "off"
+    if angles:
+        from botcut.angles import angle_windows
+
+        # B-roll laid over a line wins the picture. The other camera shows around it.
+        for window in angle_windows(angles, lines or [], segments, clips):
+            by_segment.setdefault(int(window["segment"]), []).append(window)
 
     def plain(clip: dict) -> bool:
         return (
@@ -711,9 +760,7 @@ def render_args(
         from botcut.frame import close_spans
 
         close_by_clip = close_spans(lines, close)
-    filters = []
-    out_i = 0
-    in_i = 0
+    found: list[dict] = []
     # Outer fades are chosen on the spoken segments. A cover cut inside one
     # segment is not a scene change, so it does not get those fades.
     for i, seg in enumerate(segments):
@@ -728,7 +775,7 @@ def render_args(
             aud_in, aud_out = _audio_edges(i, segments, duration, transition)
         pieces: list[dict] = []
         cursor = seg_start
-        for window in sorted(by_segment.get(i, []), key=lambda item: float(item["start"])):
+        for window in _one_picture(by_segment.get(i, [])):
             win_start = float(window["start"])
             win_end = float(window["end"])
             if win_start - cursor > 1e-3:
@@ -744,6 +791,8 @@ def render_args(
                     "voice": spoken,
                     "voice_start": win_start,
                 }
+                if window.get("angle"):
+                    piece["angle"] = True
                 # A run that goes on across this segment's join is one piece of
                 # footage. A fade there would be a dip inside the B-roll.
                 if window.get("continued"):
@@ -773,7 +822,7 @@ def render_args(
                     else [piece]
                 )
             ]
-        single = len(pieces) == 1 and pieces[0]["clip"] == spoken
+        single = len(pieces) == 1 and pieces[0]["clip"] == spoken and "voice" not in pieces[0]
         last_piece = len(pieces) - 1
         for j, piece in enumerate(pieces):
             video = clips[int(piece["clip"])]
@@ -805,49 +854,157 @@ def render_args(
                     punch = punch_crop(video, CLOSE_IN)
                 elif zoom == "push":
                     punch = push_filter(video, pushed[i] + float(video_start) - seg_start)
-            # The zoom runs on software frames, so a zoomed piece is decoded there.
-            on_gpu = (
-                encoder == "vaapi" and not punch and not _rotated(video) and _vaapi_decodable(video)
-            )
-            if on_gpu:
-                args += [
-                    "-hwaccel",
-                    "vaapi",
-                    "-hwaccel_device",
-                    str(device),
-                    "-hwaccel_output_format",
-                    "vaapi",
-                ]
-            args += ["-ss", _num(video_start), "-t", _num(span), "-i", video["path"]]
-            v_in = in_i
-            in_i += 1
-            voice_in = None
+            row = {
+                "segment": i,
+                "spoken": spoken,
+                "clip": int(piece["clip"]),
+                "start": video_start,
+                "span": span,
+                "shown": shown,
+                "fade_in": fade_in,
+                "fade_out": fade_out,
+                "a_in": a_in,
+                "a_out": a_out,
+                "punch": punch,
+                "first": j == 0,
+                "last": j == last_piece,
+            }
             if "voice" in piece:
-                voice = clips[int(piece["voice"])]
-                args += ["-ss", _num(float(piece["voice_start"])), "-t", _num(span), "-i", voice["path"]]
-                voice_in = in_i
-                in_i += 1
-            picture = _picture_suffix(shown, fade_in, fade_out) if polish else ""
-            if not measure:
-                filters.append(
-                    _video_filter(
-                        v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture, punch
-                    )
-                )
-            # Each shot's voice is matched to the others before the join, so a
-            # quiet take is not left quiet beside a loud one.
-            speaker = clips[int(piece["voice"])] if "voice" in piece else video
-            gain = level_gain(speaker) if clean_sound or measure else 0.0
-            if voice_in is None:
-                filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
-            elif broll_sound == "mix" and video.get("audio", True):
-                filters.append(
-                    _audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in, gain_db=gain)
-                )
-            else:
-                # Voice only. A silent B-roll file has no [N:a] to mix, so it lands here too.
-                filters.append(_audio_filter(voice_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
-            out_i += 1
+                row["voice"] = int(piece["voice"])
+                row["voice_start"] = float(piece["voice_start"])
+            if piece.get("angle"):
+                row["angle"] = True
+            found.append(row)
+    return found
+
+
+def _one_picture(windows: list[dict]) -> list[dict]:
+    """The windows of one segment in order, with B-roll shown where it and another camera overlap."""
+    covers = sorted((w for w in windows if not w.get("angle")), key=lambda item: float(item["start"]))
+    angles = sorted((w for w in windows if w.get("angle")), key=lambda item: float(item["start"]))
+    if not covers or not angles:
+        return covers or angles
+    out = list(covers)
+    for window in angles:
+        start, end = float(window["start"]), float(window["end"])
+        src = float(window.get("src") or 0.0)
+        parts = [(start, end)]
+        for cover in covers:
+            low, high = float(cover["start"]), float(cover["end"])
+            parts = [
+                part
+                for left, right in parts
+                for part in ((left, min(right, low)), (max(left, high), right))
+                if part[1] - part[0] > 1e-3
+            ]
+        for left, right in parts:
+            out.append({**window, "start": left, "end": right, "src": src + (left - start)})
+    return sorted(out, key=lambda item: float(item["start"]))
+
+
+def render_args(
+    segments: list[dict],
+    clips: list[dict],
+    dst: str,
+    encoder: str = "x264",
+    device: str | None = None,
+    polish: bool = False,
+    scene_transition: str = "dip",
+    covers=None,
+    lines=None,
+    broll_sound: str = "mix",
+    clean_sound: bool = False,
+    measured: dict | None = None,
+    measure: bool = False,
+    zoom: str = "off",
+    close=None,
+    angles=None,
+) -> list[str]:
+    """ffmpeg arguments for the cut, as one filter graph.
+
+    `zoom` moves in on the speaker: `cuts` goes from wide to a little tighter
+    at a join between lines, so a jump cut reads as a change of framing;
+    `push` creeps in between joins; `lines` shows the lines named in `close`
+    tighter than the rest. `off` plays every piece as shot.
+
+    `clean_sound` cleans the joined sound and, with `measured`, brings it to
+    the target level. `measure` builds the sound alone, with no picture, and
+    has loudnorm print what it hears.
+    """
+    if not segments:
+        raise SystemExit("No segments to render")
+    if encoder not in ("x264", "vaapi"):
+        raise SystemExit(f"Unknown encoder {encoder}")
+    if broll_sound not in ("mix", "voice"):
+        raise SystemExit(f"Unknown b-roll sound {broll_sound}")
+    if zoom not in ZOOM_NAMES:
+        raise SystemExit(f"Unknown zoom {zoom}")
+    if encoder == "vaapi" and not device:
+        raise SystemExit("VA-API encode needs a device")
+    width, height, fps = frame_size(clips)
+    args = ["-y"]
+    if measure:
+        # Listening needs no picture, so nothing here touches the GPU or the encoder.
+        encoder = "x264"
+        zoom = "off"
+    if encoder == "vaapi":
+        args += ["-init_hw_device", f"vaapi=va:{device}", "-filter_hw_device", "va"]
+    fps_s = _fps(fps)
+    filters = []
+    out_i = 0
+    in_i = 0
+    for piece in cut_pieces(
+        segments,
+        clips,
+        polish=polish,
+        scene_transition=scene_transition,
+        covers=covers,
+        lines=lines,
+        zoom=zoom,
+        close=close,
+        angles=angles,
+    ):
+        video = clips[piece["clip"]]
+        punch = piece["punch"]
+        shown = piece["shown"]
+        a_in, a_out = piece["a_in"], piece["a_out"]
+        # The zoom runs on software frames, so a zoomed piece is decoded there.
+        on_gpu = encoder == "vaapi" and not punch and not _rotated(video) and _vaapi_decodable(video)
+        if on_gpu:
+            args += [
+                "-hwaccel",
+                "vaapi",
+                "-hwaccel_device",
+                str(device),
+                "-hwaccel_output_format",
+                "vaapi",
+            ]
+        args += ["-ss", _num(piece["start"]), "-t", _num(piece["span"]), "-i", video["path"]]
+        v_in = in_i
+        in_i += 1
+        voice_in = None
+        if "voice" in piece:
+            voice = clips[piece["voice"]]
+            args += ["-ss", _num(piece["voice_start"]), "-t", _num(piece["span"]), "-i", voice["path"]]
+            voice_in = in_i
+            in_i += 1
+        picture = _picture_suffix(shown, piece["fade_in"], piece["fade_out"]) if polish else ""
+        if not measure:
+            filters.append(
+                _video_filter(v_in, out_i, video, width, height, fps, fps_s, encoder, on_gpu, picture, punch)
+            )
+        # Each shot's voice is matched to the others before the join, so a
+        # quiet take is not left quiet beside a loud one.
+        speaker = clips[piece["voice"]] if "voice" in piece else video
+        gain = level_gain(speaker) if clean_sound or measure else 0.0
+        if voice_in is None:
+            filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
+        elif broll_sound == "mix" and video.get("audio", True) and not piece.get("angle"):
+            filters.append(_audio_filter(v_in, out_i, polish, shown, a_in, a_out, voice_in, gain_db=gain))
+        else:
+            # Voice only. A silent B-roll file has no [N:a] to mix, so it lands here too.
+            filters.append(_audio_filter(voice_in, out_i, polish, shown, a_in, a_out, gain_db=gain))
+        out_i += 1
     sound = "[a]"
     if measure:
         concat_in = "".join(f"[a{i}]" for i in range(out_i))
@@ -868,12 +1025,35 @@ def render_args(
         "-map",
         sound,
     ]
-    if encoder == "vaapi":
-        args += ["-c:v", "h264_vaapi", "-qp", "20"]
-    else:
-        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
-    args += ["-c:a", "aac", "-ar", "48000", "-movflags", "+faststart", dst]
+    args += [*encoder_args(encoder), "-c:a", "aac", "-ar", "48000", "-movflags", "+faststart", dst]
     return args
+
+
+ZOOM_NAMES = ("off", "cuts", "push", "lines")
+
+
+def encoder_args(encoder: str) -> list[str]:
+    if encoder == "vaapi":
+        return ["-c:v", "h264_vaapi", "-qp", "20"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+
+
+def frame_size(clips: list[dict]) -> tuple[int, int, float]:
+    """The size and rate the movie is made at: the first camera shot's.
+
+    An open card is clips[0]. Its still is not the camera's size or rate.
+    B-roll is not the camera either.
+    """
+    ref = clips[0]
+    for clip in clips:
+        if is_card(str(clip.get("path") or "")) or str(clip.get("role") or "") == "broll":
+            continue
+        ref = clip
+        break
+    width, height, fps = int(ref["width"]), int(ref["height"]), float(ref["fps"])
+    if width <= 0 or height <= 0 or fps <= 0:
+        raise SystemExit(f"Clip has no video to render: {ref['path']}")
+    return width, height, fps
 
 
 def _open_vaapi_device() -> str | None:

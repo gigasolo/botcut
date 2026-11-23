@@ -23,6 +23,7 @@ from botcut.pick import (
     CUTS_NOTE,
     DEFAULT_INTENT,
     OUTLINE_PROMPT,
+    TRIM_NOTE,
     decision_lines,
     outline,
     pick,
@@ -99,7 +100,7 @@ def case_names() -> list[str]:
 
 def prompt_version() -> str:
     """A short name for the wording now in use, so history rows can be told apart."""
-    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE + OUTLINE_PROMPT + PROOF_SYSTEM
+    text = system_prompt(DEFAULT_INTENT) + CUTS_NOTE + TRIM_NOTE + OUTLINE_PROMPT + PROOF_SYSTEM
     return hashlib.sha1(text.encode()).hexdigest()[:8]
 
 
@@ -163,10 +164,13 @@ def score(name: str, replay: bool = False) -> dict:
         llm.use_tape(None)
     result = compare(doc.get("lines") or [], got)
     # What a viewer would notice in the model's cut, and in the person's for scale.
-    result["flags"] = check.counts(check.flags(got, _pieces(doc, case, got)))
-    result["want_flags"] = check.counts(
-        check.flags(doc.get("lines") or [], _pieces(doc, case, doc.get("lines") or []))
-    )
+    pieces = _pieces(doc, case, got)
+    want_pieces = _pieces(doc, case, doc.get("lines") or [])
+    result["flags"] = check.counts(check.flags(got, pieces))
+    result["want_flags"] = check.counts(check.flags(doc.get("lines") or [], want_pieces))
+    # Joins that show as a jump when nothing hides them: no second camera, no zoom.
+    result["jumps"] = check.jumps(pieces, got)
+    result["want_jumps"] = check.jumps(want_pieces, doc.get("lines") or [])
     tally = llm.usage()
     result["seconds"] = round(time.monotonic() - began, 1)
     result["tokens"] = tally["input"] + tally["output"]
@@ -204,6 +208,8 @@ def _row(name: str, result: dict) -> str:
         f"flipped {result['flipped']} of {result['lines']}, cuts {cuts}, "
         f"{result['tokens']:,} tokens, {result['seconds']}s"
     )
+    if "jumps" in result:
+        row += f", jumps {result['jumps']} (yours {result.get('want_jumps', 0)})"
     if result.get("flags") or result.get("want_flags"):
         row += f", flags {_flag_words(result.get('flags') or {})}"
         row += f" (yours {_flag_words(result.get('want_flags') or {})})"

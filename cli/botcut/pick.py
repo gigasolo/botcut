@@ -56,12 +56,14 @@ KEEP_SCHEMA = {
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["id", "reason", "cuts"],
+                        "required": ["id", "reason", "cuts", "trim"],
                         "properties": {
                             "id": {"type": "integer"},
                             "reason": {"type": "string"},
                             # Numbers from the cuts offered on that line. Never times.
                             "cuts": {"type": "array", "items": {"type": "integer"}},
+                            # Words of the line to take out, copied as said. Never times.
+                            "trim": {"type": "array", "items": {"type": "string"}},
                         },
                     },
                 }
@@ -344,26 +346,81 @@ def word_cuts(utt: dict) -> list[dict]:
         index += took or 1
     found = []
     for first, last, reason in spans:
-        # A line that is nothing else is dropped as a line, not cut down to nothing.
-        if first == 0 and last == len(words) - 1:
-            continue
-        before = float(words[first - 1]["end"]) if first > 0 else float(utt["start"])
-        after = float(words[last + 1]["start"]) if last + 1 < len(words) else float(utt["end"])
-        start = min(float(words[first]["start"]), before + CUT_AIR) if first > 0 else before
-        end = max(float(words[last]["end"]), after - CUT_AIR) if last + 1 < len(words) else after
-        if end - start < CUT_MIN:
-            continue
-        found.append(
-            {
-                "from": first,
-                "through": last,
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "reason": reason,
-                "cut": False,
-            }
-        )
+        row = _cut_row(utt, first, last, reason)
+        if row is not None:
+            found.append(row)
     return found
+
+
+def _cut_row(utt: dict, first: int, last: int, reason: str) -> dict | None:
+    """The stretch that takes words first..last out of a line, or None when it is not worth a jump."""
+    words = utt.get("words") or []
+    # A line that is nothing else is dropped as a line, not cut down to nothing.
+    if first < 0 or last >= len(words) or first > last or (first == 0 and last == len(words) - 1):
+        return None
+    before = float(words[first - 1]["end"]) if first > 0 else float(utt["start"])
+    after = float(words[last + 1]["start"]) if last + 1 < len(words) else float(utt["end"])
+    start = min(float(words[first]["start"]), before + CUT_AIR) if first > 0 else before
+    end = max(float(words[last]["end"]), after - CUT_AIR) if last + 1 < len(words) else after
+    if end - start < CUT_MIN:
+        return None
+    return {
+        "from": first,
+        "through": last,
+        "start": round(start, 3),
+        "end": round(end, 3),
+        "reason": reason,
+        "cut": False,
+    }
+
+
+# A trim the model names may take at most this share of a line's words, and
+# must leave this many. More than that is a line to drop, not to cut down.
+TRIM_SHARE_MAX = 0.6
+TRIM_WORDS_LEFT = 2
+
+
+def trim_cuts(utt: dict, phrases: list, known: list[dict] | None = None) -> list[dict]:
+    """The cuts that take the named words out of a line, each already taken.
+
+    The model copies words from the line. They are found here, in order, and
+    the times come from the word times. Words that are not in the line, that
+    are most of it, or that only partly overlap a cut already on offer, are
+    left alone. `known` is the cuts on offer: one a trim swallows whole is
+    replaced by it.
+    """
+    words = utt.get("words") or []
+    if len(words) < 2 or len(str(utt.get("text") or "").split()) != len(words):
+        return []
+    bare = [_bare(str(word["text"])) for word in words]
+    offered = [(int(cut["from"]), int(cut["through"])) for cut in known or []]
+    claimed: list[tuple[int, int]] = []
+    found = []
+    for phrase in phrases or []:
+        wanted = [token for token in (_bare(part) for part in str(phrase or "").split()) if token]
+        if not wanted or len(wanted) > len(words) * TRIM_SHARE_MAX:
+            continue
+        for first in range(len(words) - len(wanted) + 1):
+            last = first + len(wanted) - 1
+            if bare[first : last + 1] != wanted:
+                continue
+            if any(first <= c_last and c_first <= last for c_first, c_last in claimed):
+                continue
+            # A cut on offer is either inside the trim or clear of it.
+            if any(
+                first <= o_last and o_first <= last and not (first <= o_first and o_last <= last)
+                for o_first, o_last in offered
+            ):
+                continue
+            gone = sum(c_last - c_first + 1 for c_first, c_last in claimed) + len(wanted)
+            if len(words) - gone < TRIM_WORDS_LEFT:
+                break
+            row = _cut_row(utt, first, last, "trimmed")
+            if row is not None:
+                claimed.append((first, last))
+                found.append({**row, "cut": True})
+            break
+    return sorted(found, key=lambda cut: cut["from"])
 
 
 def cut_words(segments: list[dict], lines: list[dict]) -> list[dict]:
@@ -393,6 +450,51 @@ def cut_words(segments: list[dict], lines: list[dict]) -> list[dict]:
             pieces = nxt
         out.extend({**seg, "start": start, "end": end} for start, end in pieces)
     return out
+
+
+# A piece shorter than this flashes by. One with nobody speaking in it is left out.
+PIECE_MIN = 0.6
+SPEECH_MIN = 0.08
+
+
+def settle(segments: list[dict], lines: list[dict]) -> list[dict]:
+    """Leave out the pieces that are only a flash of air.
+
+    Padding before a line whose first sound was cut, or after one whose last
+    was, is a quarter second of nobody speaking between two jumps. A short
+    piece with words in it stays: the sentence needs them.
+    """
+    said: dict[int, list[tuple[float, float]]] = {}
+    for line in lines or []:
+        if not isinstance(line, dict) or not line.get("keep"):
+            continue
+        try:
+            clip, spans = int(line["clip"]), [(float(line["start"]), float(line["end"]))]
+            for cut in line.get("cuts") or []:
+                if not cut.get("cut"):
+                    continue
+                low, high = float(cut["start"]), float(cut["end"])
+                spans = [
+                    part
+                    for start, end in spans
+                    for part in ((start, min(end, low)), (max(start, high), end))
+                    if part[1] > part[0]
+                ]
+        except (KeyError, TypeError, ValueError):
+            continue
+        said.setdefault(clip, []).extend(spans)
+    out = []
+    for seg in segments:
+        start, end = float(seg["start"]), float(seg["end"])
+        if str(seg.get("reason") or "") != "card" and end - start < PIECE_MIN:
+            spoken = sum(
+                max(0.0, min(end, high) - max(start, low)) for low, high in said.get(int(seg["clip"]), [])
+            )
+            if spoken < SPEECH_MIN:
+                continue
+        out.append(seg)
+    # A movie of nothing but flashes still plays what it has.
+    return out or segments
 
 
 # A long shoot goes to the model in parts, so no request carries more lines
@@ -432,12 +534,15 @@ def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> lis
     return [item for answer in answers for item in answer]
 
 
-def _kept(uid, reason, cuts) -> dict:
+def _kept(uid, reason, cuts, trim=()) -> dict:
     """One kept line. The cuts taken inside it are listed only when there are some."""
     row = {"id": int(uid), "reason": str(reason)}
     numbers = [int(number) for number in cuts]
     if numbers:
         row["cuts"] = numbers
+    phrases = [" ".join(str(phrase).split()) for phrase in trim or [] if str(phrase).strip()]
+    if phrases:
+        row["trim"] = phrases
     return row
 
 
@@ -487,7 +592,8 @@ def _ask_keep(
         KEEP_SCHEMA,
         what="a keep list",
         parse=lambda parsed: [
-            _kept(item["id"], item["reason"], item.get("cuts") or []) for item in parsed["keep"]
+            _kept(item["id"], item["reason"], item.get("cuts") or [], item.get("trim") or [])
+            for item in parsed["keep"]
         ],
         tries=2,
     )
@@ -702,6 +808,7 @@ def _retake_job(intent: str) -> bool:
 def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
     reasons = {int(item["id"]): str(item["reason"]) for item in keep}
     taken = {int(item["id"]): {int(number) for number in item.get("cuts") or []} for item in keep}
+    trims = {int(item["id"]): item.get("trim") or [] for item in keep}
     kept = kept_utterances(utts, keep)
     dropped = dropped_utterances(utts, keep)
     drop_reason = {}
@@ -727,11 +834,21 @@ def decision_lines(utts: list[dict], keep: list[dict]) -> list[dict]:
         if still and os.path.isfile(still):
             row["still"] = os.path.abspath(still)
         # Every cut on offer is listed, so one the model left in can still be taken by hand.
-        offered = utt.get("cuts") or []
-        if offered:
-            row["cuts"] = [
-                {**cut, "cut": number in taken.get(uid, set())} for number, cut in enumerate(offered)
+        offered = [
+            {**cut, "cut": number in taken.get(uid, set())}
+            for number, cut in enumerate(utt.get("cuts") or [])
+        ]
+        # Words the model named on a line it kept come out too, and can be put back by hand.
+        named = trim_cuts(utt, trims.get(uid) or [], offered) if kept_reason is not None else []
+        if named:
+            offered = [
+                cut
+                for cut in offered
+                if not any(new["from"] <= cut["from"] and cut["through"] <= new["through"] for new in named)
             ]
+            offered = sorted([*offered, *named], key=lambda cut: cut["from"])
+        if offered:
+            row["cuts"] = offered
         rows.append(row)
     return rows
 
@@ -763,12 +880,21 @@ def _offer(utt: dict) -> str:
     return " {cuts: " + ", ".join(f'{number}="{text}"' for number, text in enumerate(said)) + "}"
 
 
+TRIM_NOTE = (
+    "For a line you keep, return as trim the words inside it that should come out, copied exactly "
+    "as they are written, a few words at a time: a crutch that carries nothing (\"you know\", "
+    "\"I mean\", \"sort of\", a \"like\" or \"so\" that is only a pause), the abandoned start of a "
+    "thought that is said again in other words, a stutter. Never trim words the sentence needs, "
+    "never most of a line, and never what a cut on offer already takes. Most lines get an empty list.\n\n"
+)
+
+
 def _user_message(utts: list[dict]) -> str:
     rows = "\n".join(
         f"[{u['id']}] (clip {u['clip']}, {u['start']:.2f}-{u['end']:.2f}) {u['text']}{_offer(u)}"
         for u in utts
     )
-    return (CUTS_NOTE + rows) if any(u.get("cuts") for u in utts) else rows
+    return (CUTS_NOTE if any(u.get("cuts") for u in utts) else "") + TRIM_NOTE + rows
 
 
 def shown_stills(ready: list[dict], prefer: set[int] | None = None) -> list[dict]:

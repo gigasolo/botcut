@@ -109,3 +109,28 @@ def counts(found: list[dict]) -> dict:
         kind = str(flag.get("kind") or "")
         tally[kind] = tally.get(kind, 0) + 1
     return {kind: tally[kind] for kind in KINDS if kind in tally}
+
+
+def jumps(segments: list[dict] | None, lines: list[dict] | None = None) -> int:
+    """How many joins a viewer sees as a jump: the same shot, a different moment.
+
+    A cut inside a line, such as an "um" taken out, is counted too when it
+    leaves a piece on screen for less than PIECE_MIN, because that reads as a
+    stutter. A join between two shots is a change of picture, not a jump.
+    """
+    from botcut.frame import inside_a_line
+
+    count = 0
+    rows = [seg for seg in segments or [] if str(seg.get("reason") or "") != "card"]
+    for before, after in zip(rows, rows[1:]):
+        try:
+            same = int(before["clip"]) == int(after["clip"])
+            touching = abs(float(after["start"]) - float(before["end"])) < 0.02
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not same or touching:
+            continue
+        if inside_a_line(before, after, lines) and min(_length(before), _length(after)) >= PIECE_MIN:
+            continue
+        count += 1
+    return count

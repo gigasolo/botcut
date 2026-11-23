@@ -6,7 +6,7 @@ import pytest
 
 from botcut import cli
 from botcut.captions import remap_words
-from botcut.pick import cut_words, decision_lines, pick, user_content, utterances, word_cuts
+from botcut.pick import cut_words, decision_lines, pick, settle, trim_cuts, user_content, utterances, word_cuts
 from botcut.revise import parse_revise
 
 
@@ -78,7 +78,7 @@ def test_the_model_is_offered_cuts_by_number_and_never_times(monkeypatch):
     chosen = pick(utts)
     assert chosen == [{"id": 0, "reason": "the point", "cuts": [0, 1, 7]}]
     item = seen["schema"]["properties"]["keep"]["items"]
-    assert item["required"] == ["id", "reason", "cuts"]
+    assert item["required"] == ["id", "reason", "cuts", "trim"]
     assert item["properties"]["cuts"] == {"type": "array", "items": {"type": "integer"}}
     # A number that was never offered is ignored. Both real cuts are marked taken.
     line = decision_lines(utts, chosen)[0]
@@ -134,3 +134,81 @@ def test_the_chat_can_take_every_filler_out_or_leave_them_all_in(tmp_path):
     assert [cut["cut"] for cut in json.loads(cuts_path.read_text())["lines"][0]["cuts"]] == [True, True]
     with pytest.raises(SystemExit, match="not a revise"):
         parse_revise({**base, "fillers": "some"})
+
+
+TALK = _words(
+    ("You", 1.00, 1.15),
+    ("know,", 1.15, 1.40),
+    ("we", 1.60, 1.75),
+    ("were", 1.75, 2.00),
+    ("going,", 2.00, 2.40),
+    ("we", 2.70, 2.85),
+    ("went", 2.85, 3.10),
+    ("to", 3.10, 3.20),
+    ("the", 3.20, 3.30),
+    ("lake.", 3.30, 3.80),
+)
+
+
+def test_words_the_model_names_become_cuts_timed_from_the_words():
+    utt = utterances([TALK])[0]
+    assert utt["cuts"] == []
+    found = trim_cuts(utt, ["you know", "We were going"])
+    assert [(cut["from"], cut["through"], cut["reason"], cut["cut"]) for cut in found] == [
+        (0, 1, "trimmed", True),
+        (2, 4, "trimmed", True),
+    ]
+    # The first runs from the line's start to just before "we". The second ends just before the retake.
+    assert found[0]["start"] == 1.0 and found[0]["end"] == pytest.approx(1.56)
+    assert found[1]["start"] == pytest.approx(1.44) and found[1]["end"] == pytest.approx(2.66)
+
+
+def test_a_trim_that_is_not_in_the_line_or_is_most_of_it_is_left_alone():
+    utt = utterances([TALK])[0]
+    assert trim_cuts(utt, ["to the moon"]) == []
+    assert trim_cuts(utt, ["we were going, we went to the lake."]) == []
+    assert trim_cuts(utt, ["", "   "]) == []
+    # The same words twice take the first place they are said, then the next.
+    twice = trim_cuts(utt, ["we", "we"])
+    assert [cut["from"] for cut in twice] == [2, 5]
+
+
+def test_a_trim_swallows_a_cut_on_offer_and_never_half_of_one():
+    utt = utterances([SAID])[0]
+    offered = utt["cuts"]
+    assert [(cut["from"], cut["through"]) for cut in offered] == [(1, 1), (2, 3)]
+    # "um we" would take half of "we were": refused.
+    assert trim_cuts(utt, ["um we"], offered) == []
+    keep = [{"id": 0, "reason": "the point", "cuts": [1], "trim": ["So um"]}]
+    row = decision_lines([utt], keep)[0]
+    assert [(cut["from"], cut["through"], cut["reason"], cut["cut"]) for cut in row["cuts"]] == [
+        (0, 1, "trimmed", True),
+        (2, 3, "said twice", True),
+    ]
+
+
+def test_a_dropped_line_gets_no_trims():
+    utt = utterances([TALK])[0]
+    row = decision_lines([utt], [])[0]
+    assert "cuts" not in row
+
+
+def test_a_flash_of_air_before_a_cut_sound_is_left_out_and_a_short_word_stays():
+    lines = [
+        {
+            "id": 0, "clip": 0, "start": 10.0, "end": 14.0, "keep": True, "text": "Um and so it goes",
+            "cuts": [
+                {"from": 0, "through": 0, "start": 10.0, "end": 10.6, "cut": True},
+                {"from": 2, "through": 2, "start": 10.8, "end": 11.4, "cut": True},
+            ],
+        }
+    ]
+    pieces = [
+        {"clip": 0, "start": 9.75, "end": 10.0, "reason": "x"},   # padding in front of the "um"
+        {"clip": 0, "start": 10.6, "end": 10.8, "reason": "x"},   # "and", a fifth of a second
+        {"clip": 0, "start": 11.4, "end": 14.4, "reason": "x"},
+    ]
+    assert [(seg["start"], seg["end"]) for seg in settle(pieces, lines)] == [(10.6, 10.8), (11.4, 14.4)]
+    # A card is its own length, and a cut of nothing but a flash still plays.
+    assert settle([{"clip": 1, "start": 0.0, "end": 0.3, "reason": "card"}], []) != []
+    assert settle(pieces[:1], lines) == pieces[:1]

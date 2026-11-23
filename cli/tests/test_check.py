@@ -79,3 +79,26 @@ def test_counts_name_only_the_kinds_that_happened():
     found = [{"kind": "leans"}, {"kind": "twice"}, {"kind": "leans"}]
     assert check.counts(found) == {"twice": 1, "leans": 2}
     assert check.counts([]) == {}
+
+
+def test_a_jump_is_a_join_inside_one_shot_and_not_a_change_of_shot():
+    from botcut.check import jumps
+
+    lines = [
+        {"id": 0, "clip": 0, "start": 1.0, "end": 6.0, "keep": True, "text": "a",
+         "cuts": [{"from": 1, "through": 1, "start": 3.0, "end": 3.5, "cut": True}]},
+        {"id": 1, "clip": 0, "start": 9.0, "end": 12.0, "keep": True, "text": "b"},
+        {"id": 2, "clip": 1, "start": 0.0, "end": 3.0, "keep": True, "text": "c"},
+    ]
+    pieces = [
+        {"clip": 0, "start": 0.75, "end": 3.0, "reason": "a"},
+        {"clip": 0, "start": 3.5, "end": 6.4, "reason": "a"},
+        {"clip": 0, "start": 8.75, "end": 12.4, "reason": "b"},
+        {"clip": 1, "start": 0.0, "end": 3.4, "reason": "c"},
+    ]
+    # The "um" taken out inside a line is not counted. The join between two lines is. The new shot is not.
+    assert jumps(pieces, lines) == 1
+    # A sliver left by a cut inside a line reads as a stutter, and is counted.
+    pieces[0]["start"] = 2.8
+    assert jumps(pieces, lines) == 2
+    assert jumps([], lines) == 0

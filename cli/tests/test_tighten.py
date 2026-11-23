@@ -49,3 +49,25 @@ def test_xai_cache_still_accepts_the_b1_filename():
 def test_local_stt_import_is_optional():
     pytest.importorskip("faster_whisper")
     assert callable(transcribe_local)
+
+
+def test_a_noisy_shot_gets_a_higher_pause_level_and_a_quiet_one_keeps_the_usual():
+    import numpy as np
+
+    from botcut.media import levels_of, silence_threshold
+
+    assert silence_threshold(None) == -35.0
+    assert silence_threshold((-60.0, -20.0)) == -35.0
+    # A street at -30 under a voice at -8: a pause is what is under -22.
+    assert silence_threshold((-30.0, -8.0)) == -22.0
+    assert silence_threshold((-30.0, -12.0)) == -24.0
+    # Never within 12 dB of the voice, and never above -18.
+    assert silence_threshold((-30.0, -30.0)) == -35.0
+    assert silence_threshold((-10.0, -2.0)) == -18.0
+    rng = np.random.default_rng(1)
+    room = rng.normal(0, 0.01, 16000 * 4)
+    voice = rng.normal(0, 0.2, 16000 * 4)
+    samples = (np.concatenate([room, voice]) * 32767).clip(-32768, 32767).astype(np.int16)
+    floor, loud = levels_of(samples)
+    assert -41 < floor < -39 and -15 < loud < -13
+    assert levels_of(np.zeros(16000 * 4, dtype=np.int16)) is None

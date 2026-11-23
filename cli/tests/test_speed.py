@@ -58,7 +58,7 @@ def test_a_long_list_is_asked_in_parts_and_merged_by_owner(monkeypatch):
 
     def post(url, headers=None, json=None, timeout=None):
         text = json["messages"][1]["content"]
-        ids = [int(row.split("]")[0][1:]) for row in text.splitlines()]
+        ids = [int(row.split("]")[0][1:]) for row in text.splitlines() if row.startswith("[")]
         with lock:
             systems.append(json["messages"][0]["content"])
         # Each part keeps every line it was shown, including the shared ones.

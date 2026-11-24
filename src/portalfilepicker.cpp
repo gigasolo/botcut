@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QRandomGenerator>
+#include <QSettings>
 #include <QStandardPaths>
 
 namespace {
@@ -117,9 +118,10 @@ void registerPortalFilterTypes() {
 
 PortalFileFilter videoFilter() {
     return {
-        QStringLiteral("Video files"),
+        QStringLiteral("Video and image files"),
         {
             {1, QStringLiteral("video/*")},
+            {1, QStringLiteral("image/*")},
             {0, QStringLiteral("*.avi")},
             {0, QStringLiteral("*.m4v")},
             {0, QStringLiteral("*.mkv")},
@@ -128,6 +130,10 @@ PortalFileFilter videoFilter() {
             {0, QStringLiteral("*.mpeg")},
             {0, QStringLiteral("*.mpg")},
             {0, QStringLiteral("*.webm")},
+            {0, QStringLiteral("*.png")},
+            {0, QStringLiteral("*.jpg")},
+            {0, QStringLiteral("*.jpeg")},
+            {0, QStringLiteral("*.webp")},
         },
     };
 }
@@ -169,13 +175,38 @@ QByteArray portalPathBytes(const QString &path) {
 }
 
 QString openFolder() {
+    QSettings settings;
+    const QString saved = settings.value(QStringLiteral("lastOpenFolder")).toString();
+    if (!saved.isEmpty() && QDir(saved).exists())
+        return saved;
     const QString videos = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
     return QDir(videos).exists() ? videos : QDir::homePath();
+}
+
+void rememberOpenFolder(const QUrl &url) {
+    if (!url.isLocalFile())
+        return;
+    const QString dir = QFileInfo(url.toLocalFile()).absolutePath();
+    if (!dir.isEmpty() && QDir(dir).exists()) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("lastOpenFolder"), dir);
+    }
 }
 }
 
 PortalFilePicker::PortalFilePicker(QObject *parent) : FilePicker(parent) {
     registerPortalFilterTypes();
+    m_portalWatcher = new QDBusServiceWatcher(
+        QStringLiteral("org.freedesktop.portal.Desktop"),
+        QDBusConnection::sessionBus(),
+        QDBusServiceWatcher::WatchForUnregistration,
+        this);
+    connect(m_portalWatcher, &QDBusServiceWatcher::serviceUnregistered, this, [this] {
+        if (m_pendingAction == Action::None)
+            return;
+        clearPending();
+        emit failed(QStringLiteral("The XDG desktop portal disconnected."));
+    });
 }
 
 void PortalFilePicker::openVideos() {
@@ -354,16 +385,30 @@ void PortalFilePicker::handleResponse(uint response, const QVariantMap &results)
     const QUrl url(uris.first());
     if (action == Action::Add) {
         QList<QUrl> urls;
-        for (const QString &uri : uris)
-            urls.append(QUrl(uri));
+        for (const QString &uri : uris) {
+            const QUrl item(uri);
+            if (item.isLocalFile())
+                urls.append(item);
+        }
+        if (urls.isEmpty()) {
+            emit failed(QStringLiteral("Only local video files can be added."));
+            return;
+        }
+        rememberOpenFolder(urls.first());
         emit videosSelected(urls);
         return;
     }
+    if (!url.isLocalFile()) {
+        emit failed(QStringLiteral("Only local files are supported."));
+        return;
+    }
     if (action == Action::OpenList) {
+        rememberOpenFolder(url);
         emit cutListOpenSelected(url);
         return;
     }
     if (action == Action::SaveList) {
+        rememberOpenFolder(url);
         emit cutListSaveSelected(url);
         return;
     }

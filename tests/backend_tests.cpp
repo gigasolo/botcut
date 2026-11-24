@@ -193,6 +193,7 @@ public:
     Q_PROPERTY(QVariantList angles READ angles NOTIFY infoChanged)
     Q_PROPERTY(QVariantList review READ review NOTIFY infoChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY infoChanged)
+    Q_PROPERTY(QVariantList cutClipOffsets READ cutClipOffsets NOTIFY infoChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY infoChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY infoChanged)
     Q_PROPERTY(QVariantList chat READ chat NOTIFY chatChanged)
@@ -430,6 +431,15 @@ public:
             setCanRevert(false);
     }
     Q_INVOKABLE bool makeCard(const QString &, const QString &) { return false; }
+    Q_INVOKABLE QUrl fileUrl(const QString &path) const {
+        if (path.isEmpty())
+            return {};
+        if (path.startsWith(QLatin1String("file:")))
+            return QUrl(path);
+        return QUrl::fromLocalFile(path);
+    }
+    QVariantList cutClipOffsets() const { return m_cutClipOffsets; }
+    QVariantList m_cutClipOffsets;
     Q_INVOKABLE void addVideosDialog() {}
     Q_INVOKABLE void addDropped(const QList<QUrl> &) {}
     Q_INVOKABLE bool trayFileExists(const QString &) const { return true; }
@@ -796,6 +806,11 @@ private slots:
     void qmlUpdateMovieIsTheButtonWhenTheMovieIsBehind();
     void qmlQuitAsksWhileAJobIsRunning();
     void grabWindowScreens();
+    void fileUrlEncodesSpecialChars();
+    void moveAndRemoveTrayNeverLeaveAngleAtZero();
+    void timelineAndPlanFilmDropNoopGestureUndo();
+    void parseCutListDeduplicatesResolvedAngleAgainstBroll();
+    void writeCutsForRenderPreservesAngleRole();
 
 private:
     QUrl videoUrl() const { return QUrl::fromLocalFile(m_videoPath); }
@@ -2097,6 +2112,7 @@ void BackendTests::showFileOpensTheSavedFolder() {
             labels.append(row.text);
         QCOMPARE(labels, (QStringList{QStringLiteral("Show the file"), QStringLiteral("Captions"),
                                       QStringLiteral("Vertical short"),
+                                      QStringLiteral("Re-render…"),
                                       QStringLiteral("Save a copy…")}));
         for (const FooterButton &row : rows)
             QVERIFY(!row.filled);
@@ -8899,6 +8915,111 @@ void BackendTests::qmlLineMarksItsCutsAndAClickFlipsOne() {
     QVERIFY(QMetaObject::invokeMethod(marked, "linkActivated", Q_ARG(QString, QStringLiteral("1"))));
     QCOMPARE(backend.lastWordCutLine, 4);
     QCOMPARE(backend.lastWordCut, 1);
+}
+
+void BackendTests::fileUrlEncodesSpecialChars() {
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    const QUrl url = backend.fileUrl(QStringLiteral("/tmp/Take #1?final.mp4"));
+    QVERIFY(url.isLocalFile());
+    QCOMPARE(url.toLocalFile(), QStringLiteral("/tmp/Take #1?final.mp4"));
+    QVERIFY(url.toString().contains(QStringLiteral("%23")));
+    QVERIFY(url.toString().contains(QStringLiteral("%3F")));
+}
+
+void BackendTests::moveAndRemoveTrayNeverLeaveAngleAtZero() {
+    const QString a = makeVideo(QStringLiteral("angle-a.mp4"), 1.0, false);
+    const QString b = makeVideo(QStringLiteral("angle-b.mp4"), 1.0, false);
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.addTrayFiles({a, b});
+    backend.toggleAngle(1);
+    QCOMPARE(backend.angleFiles().size(), 1);
+    const QString marked = backend.tray().at(1);
+
+    // Swapping the marked file into index 0 clears its angle role.
+    backend.setTrayIndex(1);
+    backend.moveTray(-1);
+    QCOMPARE(backend.tray().at(0), marked);
+    QVERIFY(backend.angleFiles().isEmpty());
+
+    // Removing index 0 when index 1 is an angle clears the promoted file's angle role.
+    backend.toggleAngle(1);
+    QCOMPARE(backend.angleFiles().size(), 1);
+    backend.setTrayIndex(0);
+    backend.removeTray();
+    QCOMPARE(backend.tray().size(), 1);
+    QVERIFY(backend.angleFiles().isEmpty());
+}
+
+void BackendTests::timelineAndPlanFilmDropNoopGestureUndo() {
+    Timeline timeline;
+    timeline.reset(10.0);
+    timeline.beginGesture();
+    timeline.moveEdge(0, true, 2.0);
+    timeline.moveEdge(0, true, 0.0);
+    timeline.endGesture();
+    QVERIFY(!timeline.canUndo());
+
+    PlanFilm film;
+    PlanFilm::Segment seg;
+    seg.clip = 0;
+    seg.path = QStringLiteral("/tmp/seg.mp4");
+    seg.fileDuration = 10.0;
+    seg.start = 1.0;
+    seg.end = 5.0;
+    film.load({seg});
+    QSignalSpy committed(&film, &PlanFilm::committed);
+    film.beginGesture();
+    film.moveEdgeBy(0, true, 1.0);
+    film.moveEdgeBy(0, true, 0.0);
+    film.endGesture();
+    QVERIFY(!film.canUndo());
+    QCOMPARE(committed.count(), 0);
+}
+
+void BackendTests::parseCutListDeduplicatesResolvedAngleAgainstBroll() {
+    const QString base = m_dir.path();
+    const QString a = QDir(base).filePath(QStringLiteral("dedup-a.mp4"));
+    const QString b = QDir(base).filePath(QStringLiteral("dedup-b.mp4"));
+    QJsonObject root;
+    root.insert(QStringLiteral("version"), 1);
+    root.insert(QStringLiteral("mode"), QStringLiteral("speech"));
+    root.insert(QStringLiteral("files"), QJsonArray{a, b});
+    root.insert(QStringLiteral("broll"), QJsonArray{QStringLiteral("./dedup-b.mp4")});
+    root.insert(QStringLiteral("angles"), QJsonArray{b});
+
+    QString mode, intent, error;
+    QStringList files, broll, angles;
+    QVariantList lines;
+    QVERIFY(parseCutList(QJsonDocument(root).toJson(), base, &mode, &files, &intent, &error,
+                         &lines, &broll, &angles));
+    QCOMPARE(broll, QStringList{b});
+    QVERIFY(angles.isEmpty());
+}
+
+void BackendTests::writeCutsForRenderPreservesAngleRole() {
+    const QString a = makeVideo(QStringLiteral("render-main.mp4"), 1.0, false);
+    const QString b = makeVideo(QStringLiteral("render-cam2.mp4"), 1.0, false);
+    ThumbProvider provider;
+    Backend backend(&provider, new FakeFilePicker);
+    backend.addTrayFiles({a, b});
+    backend.toggleAngle(1);
+    QVariantMap line;
+    line.insert(QStringLiteral("id"), 1);
+    line.insert(QStringLiteral("clip"), 0);
+    line.insert(QStringLiteral("start"), 0.0);
+    line.insert(QStringLiteral("end"), 1.0);
+    line.insert(QStringLiteral("keep"), true);
+    line.insert(QStringLiteral("text"), QStringLiteral("Hello."));
+    backend.m_selects = {line};
+    QVERIFY(backend.writeCutsForRender(false));
+
+    QFile f(QDir(backend.m_cutOut).filePath(QStringLiteral("cuts.json")));
+    QVERIFY(f.open(QIODevice::ReadOnly));
+    const QJsonArray clips = QJsonDocument::fromJson(f.readAll()).object().value(QStringLiteral("clips")).toArray();
+    QCOMPARE(clips.size(), 2);
+    QCOMPARE(clips.at(1).toObject().value(QStringLiteral("role")).toString(), QStringLiteral("angle"));
 }
 
 QTEST_MAIN(BackendTests)

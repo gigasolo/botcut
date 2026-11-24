@@ -7,11 +7,16 @@
 #include <cmath>
 
 QVariantList Timeline::clipList() const {
+    if (!m_clipsDirty)
+        return m_cachedClipList;
     QVariantList result;
+    result.reserve(m_clips.size());
     for (const edit::Range &clip : m_clips)
         result.append(QVariantMap{{QStringLiteral("start"), clip.start},
                                   {QStringLiteral("end"), clip.end}});
-    return result;
+    m_cachedClipList = result;
+    m_clipsDirty = false;
+    return m_cachedClipList;
 }
 
 bool Timeline::unexported() const {
@@ -26,6 +31,8 @@ void Timeline::reset(double duration) {
     m_undo.clear();
     m_redo.clear();
     m_gesture = false;
+    m_gestureRecorded = false;
+    m_clipsDirty = true;
     emit changed();
 }
 
@@ -52,6 +59,7 @@ void Timeline::apply(edit::Clips next) {
         m_gestureRecorded = m_gesture;
     }
     m_clips = next;
+    m_clipsDirty = true;
     emit changed();
 }
 
@@ -190,13 +198,23 @@ void Timeline::beginGesture() {
 void Timeline::endGesture() {
     if (!m_gesture)
         return;
+    const bool recorded = m_gestureRecorded;
     m_gesture = false;
+    m_gestureRecorded = false;
+    bool changedState = false;
     // Normalizing can drop a clip too short to keep; never let that empty the video.
     const edit::Clips next = edit::normalized(m_clips, m_duration);
     if (!next.isEmpty() && next != m_clips) {
         m_clips = next;
-        emit changed();
+        m_clipsDirty = true;
+        changedState = true;
     }
+    if (recorded && !m_undo.isEmpty() && m_undo.last() == m_clips) {
+        m_undo.removeLast();
+        changedState = true;
+    }
+    if (changedState)
+        emit changed();
 }
 
 void Timeline::undo() {
@@ -204,6 +222,7 @@ void Timeline::undo() {
         return;
     m_redo.append(m_clips);
     m_clips = m_undo.takeLast();
+    m_clipsDirty = true;
     emit changed();
 }
 
@@ -212,6 +231,7 @@ void Timeline::redo() {
         return;
     m_undo.append(m_clips);
     m_clips = m_redo.takeLast();
+    m_clipsDirty = true;
     emit changed();
 }
 
@@ -219,6 +239,16 @@ namespace {
 
 bool sameEdge(const PlanFilm::Segment &a, const PlanFilm::Segment &b) {
     return a.origin == b.origin && a.start == b.start && a.end == b.end;
+}
+
+bool sameSegments(const QList<PlanFilm::Segment> &a, const QList<PlanFilm::Segment> &b) {
+    if (a.size() != b.size())
+        return false;
+    for (int i = 0; i < a.size(); ++i) {
+        if (!sameEdge(a.at(i), b.at(i)) || a.at(i).clip != b.at(i).clip)
+            return false;
+    }
+    return true;
 }
 
 }
@@ -243,6 +273,8 @@ bool PlanFilm::unexported() const {
 }
 
 QVariantList PlanFilm::clipList() const {
+    if (!m_clipsDirty)
+        return m_cachedClipList;
     QVariantList result;
     // relayout() keeps m_view in the same order as m_current, including mid-drag.
     QHash<int, int> at;
@@ -269,17 +301,24 @@ QVariantList PlanFilm::clipList() const {
         pending.clear();
     }
     after = pending;
+    result.reserve(m_view.size());
     for (int i = 0; i < m_view.size() && i < m_current.size(); ++i) {
+        const Segment &seg = m_current.at(i);
         QVariantMap row{{QStringLiteral("start"), m_view.at(i).start},
                         {QStringLiteral("end"), m_view.at(i).end},
-                        {QStringLiteral("text"), m_current.at(i).text}};
+                        {QStringLiteral("clip"), seg.clip},
+                        {QStringLiteral("sourceStart"), seg.start},
+                        {QStringLiteral("sourceEnd"), seg.end},
+                        {QStringLiteral("text"), seg.text}};
         if (!before.at(i).isEmpty())
             row.insert(QStringLiteral("holes"), before.at(i));
         if (i + 1 == m_view.size() && !after.isEmpty())
             row.insert(QStringLiteral("tail"), after);
         result.append(row);
     }
-    return result;
+    m_cachedClipList = result;
+    m_clipsDirty = false;
+    return m_cachedClipList;
 }
 
 QJsonArray PlanFilm::segmentsJson() const {
@@ -326,6 +365,7 @@ void PlanFilm::clear() {
     m_undo.clear();
     m_redo.clear();
     m_duration = 0;
+    m_clipsDirty = true;
     emit changed();
 }
 
@@ -363,6 +403,7 @@ void PlanFilm::relayout() {
     // Segments are kept in captured order, so the placed list matches m_current.
     m_view = placed;
     m_duration = cursor;
+    m_clipsDirty = true;
 }
 
 void PlanFilm::applyEdge(int index, const Segment &updated) {
@@ -384,6 +425,7 @@ void PlanFilm::applyEdge(int index, const Segment &updated) {
     } else if (!m_gesture) {
         relayout();
     }
+    m_clipsDirty = true;
     emit changed();
     if (!m_gesture)
         emit committed();
@@ -602,11 +644,15 @@ void PlanFilm::beginGesture() {
 void PlanFilm::endGesture() {
     if (!m_gesture)
         return;
-    const bool edited = m_gestureRecorded;
+    bool edited = m_gestureRecorded;
     m_gesture = false;
     m_gestureRecorded = false;
     m_anchor.clear();
     m_frozenView.clear();
+    if (edited && !m_undo.isEmpty() && sameSegments(m_undo.last(), m_current)) {
+        m_undo.removeLast();
+        edited = false;
+    }
     relayout();
     emit changed();
     if (edited)

@@ -77,19 +77,32 @@ def has_picture(clip: dict, start: float, end: float) -> bool:
 
 
 def read_cameras(value: object, clips: list[dict] | None = None) -> dict:
-    """How the person asked for the cameras to be cut: {pace, favor, stay, off}."""
+    """How the person asked for the cameras to be cut: {pace, favor, stay, prefer, off}."""
     raw = value if isinstance(value, dict) else {}
     pace = str(raw.get("pace") or "normal")
     favor = _whole(raw.get("favor"))
     if favor is not None and clips is not None and not 0 <= favor < len(clips):
         favor = None
     stay = sorted({uid for uid in (_whole(item) for item in raw.get("stay") or []) if uid is not None})
-    return {
+    prefer: dict[int, int] = {}
+    if isinstance(raw.get("prefer"), dict):
+        for k, v in raw["prefer"].items():
+            try:
+                uid = int(k)
+            except (TypeError, ValueError):
+                continue
+            cam = _whole(v)
+            if cam is not None and cam >= 0 and (clips is None or cam < len(clips)):
+                prefer[uid] = cam
+    out = {
         "pace": pace if pace in PACES else "normal",
         "favor": favor if favor is not None and favor >= 0 else None,
         "stay": stay,
         "off": bool(raw.get("off")),
     }
+    if prefer:
+        out["prefer"] = prefer
+    return out
 
 
 def write_cameras(cameras: dict) -> dict:
@@ -101,6 +114,8 @@ def write_cameras(cameras: dict) -> dict:
         out["favor"] = int(cameras["favor"])
     if cameras.get("stay"):
         out["stay"] = sorted(int(uid) for uid in cameras["stay"])
+    if isinstance(cameras.get("prefer"), dict) and cameras["prefer"]:
+        out["prefer"] = {str(int(k)): int(v) for k, v in sorted(cameras["prefer"].items())}
     if cameras.get("off"):
         out["off"] = True
     return out
@@ -183,6 +198,7 @@ def plan(
     hold, long = PACES[asked["pace"]]
     favor = asked["favor"]
     stay = set(asked["stay"])
+    prefer = asked.get("prefer") or {}
     opens_a_beat = {int(beat["first"]) for beat in beats or [] if _whole(beat.get("first")) is not None}
     matters = {uid for uid in close or [] if _whole(uid) is not None}
     views = {index: str(clip.get("view") or "") for index, clip in enumerate(clips)}
@@ -210,6 +226,16 @@ def plan(
             used[main] = turn
             continue
         ring = [main, *others]
+        if uid in prefer and prefer[uid] in ring and running(prefer[uid], line):
+            wanted_cam = prefer[uid]
+            reason = "chosen camera" if wanted_cam != camera else ""
+            if wanted_cam != camera:
+                camera, held = wanted_cam, 0.0
+            shown.append((line, camera, reason))
+            held += length
+            used[camera] = turn
+            before = line
+            continue
         free = [cam for cam in ring if cam != camera and running(cam, line)]
         reason = ""
         if before is None or int(before["clip"]) != main or camera not in ring:
@@ -292,13 +318,15 @@ def run_lines(run: dict, lines: list[dict], segments: list[dict]) -> list[dict]:
     return [] if through != first or not found else found[:1]
 
 
-def angle_windows(angles, lines: list[dict], segments: list[dict], clips: list[dict]) -> list[dict]:
+def angle_windows(
+    angles, lines: list[dict], segments: list[dict], clips: list[dict], *, lcut: float = 0.0
+) -> list[dict]:
     """Where each run shows, piece by piece, with the time in the other camera's file it starts from.
 
     A run owns the air out to the middle of the gap on each side of it, so
-    the change of view falls in the pause between two lines. Inside the run
-    every piece of the main shot shows the other camera instead, whatever
-    cuts were made inside its lines.
+    the change of view falls in the pause between two lines. When `lcut > 0`,
+    interior camera switches shift slightly into the new thought (classic L-cut)
+    so multi-angle edits feel smoother than hard synchronized cuts.
     """
     kept = sorted((_span(line) for line in _spoken_kept(lines)), key=lambda span: (span[0], span[1]))
     windows = []
@@ -315,6 +343,11 @@ def angle_windows(angles, lines: list[dict], segments: list[dict], clips: list[d
                 if not span or span[0] != main or str(seg.get("reason") or "") == "card":
                     continue
                 start, end = max(span[1], low), min(span[2], high)
+                if lcut > 0 and (end - start) > (2 * lcut + WINDOW_MIN):
+                    if low > span[1] + 0.05:
+                        start += lcut
+                    if high < span[2] - 0.05:
+                        end += min(lcut, span[2] - end)
                 # The other camera may have been started late or stopped early.
                 src = angle_time(clips[cam], start)
                 if src < 0:
@@ -441,7 +474,9 @@ def name_views(clips: list[dict], still_dir: str) -> None:
     One still per camera, all of the same moment, and one question. Without
     an answer the cut still switches cameras. It only does not know which is closer.
     """
-    from botcut.media import grab_still
+    from concurrent.futures import ThreadPoolExecutor
+
+    from botcut.media import cached_still
 
     if os.environ.get("BOTCUT_FAKE") == "1" or not os.environ.get("XAI_API_KEY"):
         return
@@ -460,12 +495,26 @@ def name_views(clips: list[dict], still_dir: str) -> None:
         if high - low < 1:
             continue
         at = (low + high) / 2
-        parts: list[dict] = [{"type": "text", "text": VIEW_PROMPT}]
-        ready = []
-        for cam in (main, *others):
+        cams_list = (main, *others)
+
+        def grab_one(cam: int) -> tuple[int, str | None]:
             still = os.path.join(still_dir, f"view-{cam}.jpg")
             when = at if cam == main else angle_time(clips[cam], at)
-            if not grab_still(clips[cam]["path"], when, still):
+            return cam, (still if cached_still(clips[cam]["path"], when, still) else None)
+
+        pool = ThreadPoolExecutor(max_workers=min(4, len(cams_list)))
+        try:
+            grabbed = list(pool.map(grab_one, cams_list))
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
+
+        parts: list[dict] = [{"type": "text", "text": VIEW_PROMPT}]
+        ready = []
+        for cam, still in grabbed:
+            if not still:
                 continue
             ready.append(cam)
             parts.append({"type": "text", "text": f"Camera {cam}"})

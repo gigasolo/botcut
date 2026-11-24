@@ -77,6 +77,8 @@ private:
     QList<edit::Clips> m_redo;
     bool m_gesture = false;
     bool m_gestureRecorded = false;
+    mutable QVariantList m_cachedClipList;
+    mutable bool m_clipsDirty = true;
 };
 
 // One block per segment of a plan cut, in cuts.json order. Each block is a
@@ -172,4 +174,6 @@ private:
     QList<QList<Segment>> m_redo;
     bool m_gesture = false;
     bool m_gestureRecorded = false;
+    mutable QVariantList m_cachedClipList;
+    mutable bool m_clipsDirty = true;
 };

@@ -141,12 +141,13 @@ def short_args(
         raise SystemExit("VA-API encode needs a device")
     filters = []
     if needs_crop(width, height):
+        crop_w = int(height * 9 / 16) // 2 * 2
         if center is None:
-            filters.append("crop=ih*9/16:ih")
+            filters.append(f"crop={crop_w}:{height}")
         else:
             from botcut.frame import vertical_left
 
-            filters.append(f"crop=ih*9/16:ih:{vertical_left(width, height, center)}:0")
+            filters.append(f"crop={crop_w}:{height}:{vertical_left(width, height, center)}:0")
     filters.append("scale=1080:1920")
     filters.append(subtitles_filter(srt_name))
     video_filter = ",".join(filters)

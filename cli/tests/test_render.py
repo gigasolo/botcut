@@ -196,8 +196,8 @@ def test_the_picture_and_the_sound_stay_together_across_many_joins(tmp_path, mon
     # A change to the source is a change to every piece of it.
     os.utime(src, ns=(1, 1))
     assert render.render(segs[:1], clips, str(out), "Rendering", "Render failed", encoder="x264", device=None)["made"] == 1
-    # Nothing is left behind but the pieces.
-    assert sorted(os.listdir(tmp_path / "work")) == ["pieces"]
+    # Nothing is left behind but the pieces and cached sound.
+    assert sorted(os.listdir(tmp_path / "work")) == ["pieces", "sound"]
 
 
 def test_a_piece_no_render_has_used_for_days_is_cleared_out(tmp_path):
@@ -210,3 +210,98 @@ def test_a_piece_no_render_has_used_for_days_is_cleared_out(tmp_path):
     os.utime(store / "recent.mp4", (now - 3600, now - 3600))
     render._clear_out(str(store), {str(store / "used.mp4")}, now)
     assert sorted(os.listdir(store)) == ["recent.mp4", "used.mp4"]
+
+
+def test_piece_cache_lru_cap_evicts_oldest_unused_and_keeps_used(tmp_path):
+    store = tmp_path / "pieces"
+    store.mkdir()
+    now = 1_000_000.0
+    files = [("used.mp4", 100, now - 500), ("oldest.mp4", 100, now - 400), ("middle.mp4", 100, now - 200), ("newest.mp4", 100, now - 10)]
+    for name, size, mtime in files:
+        p = store / name
+        p.write_bytes(b"x" * size)
+        os.utime(p, (mtime, mtime))
+    render._clear_out(str(store), {str(store / "used.mp4")}, now, max_bytes=250)
+    assert sorted(os.listdir(store)) == ["newest.mp4", "used.mp4"]
+
+
+def test_target_size_supports_resolutions_and_aspects():
+    from botcut.media import target_size
+
+    uhd = [_clip(width=3840, height=2160, fps=30.0)]
+    assert target_size(uhd, "source", "source") == (3840, 2160, 30.0)
+    assert target_size(uhd, "1080p", "source") == (1920, 1080, 30.0)
+    assert target_size(uhd, "720p", "landscape") == (1280, 720, 30.0)
+    assert target_size(uhd, "1080p", "portrait") == (1080, 1920, 30.0)
+    assert target_size(uhd, "720p", "portrait") == (720, 1280, 30.0)
+    assert target_size(uhd, "1440p", "landscape") == (2560, 1440, 30.0)
+    assert target_size(uhd, "source", "portrait") == (2160, 3840, 30.0)
+
+
+def test_portrait_piece_args_crops_speaker_and_splits_broll():
+    from botcut.frame import portrait_crop
+
+    speaker = _clip("/tmp/a.mp4", width=1920, height=1080, face={"x": 0.7, "y": 0.2, "w": 0.1, "h": 0.2})
+    broll = _clip("/tmp/b.mp4", width=1920, height=1080, role="broll")
+    assert portrait_crop(speaker, 1080, 1920) == "crop=606:1080:1137:0"
+
+    segs = [{"clip": 0, "start": 0.0, "end": 6.0, "reason": "a"}]
+    lines = [
+        {"id": 0, "clip": 0, "start": 0.0, "end": 2.0, "keep": True, "text": "a"},
+        {"id": 1, "clip": 0, "start": 2.0, "end": 5.0, "keep": True, "text": "b"},
+        {"id": 2, "clip": 0, "start": 5.0, "end": 6.0, "keep": True, "text": "c"},
+    ]
+    covers = [{"clip": 1, "line": 1, "through": 1, "start": 0.0, "end": 3.0, "reason": "demo"}]
+    placed = render.timeline(cut_pieces(segs, [speaker, broll], polish=True, covers=covers, lines=lines), 30.0)
+    spk_args = render.piece_args(
+        placed[0], speaker, "/tmp/p0.mp4", width=1080, height=1920, fps=30.0, encoder="x264", device=None, polish=True, clips=[speaker, broll]
+    )
+    assert "crop=606:1080:1137:0" in spk_args[spk_args.index("-filter_complex") + 1]
+    split_args = render.piece_args(
+        placed[1], broll, "/tmp/p1.mp4", width=1080, height=1920, fps=30.0, encoder="x264", device=None, polish=True, clips=[speaker, broll]
+    )
+    graph = split_args[split_args.index("-filter_complex") + 1]
+    assert "vstack=inputs=2" in graph
+    assert split_args.count("-i") == 2
+
+
+def test_portrait_render_and_out_file_re_render(tmp_path):
+    from botcut.media import probe
+
+    src_a = tmp_path / "speaker.mp4"
+    src_b = tmp_path / "screen.mp4"
+    for path, color in ((src_a, "blue"), (src_b, "green")):
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=c={color}:s=320x180:r=30:d=4",
+                "-f", "lavfi", "-i", "sine=f=440:r=48000:d=4",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                str(path),
+            ],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode == 0, proc.stderr[-400:]
+
+    clips = [
+        {"path": str(src_a), "width": 320, "height": 180, "fps": 30.0, "duration": 4.0, "audio": True},
+        {"path": str(src_b), "width": 320, "height": 180, "fps": 30.0, "duration": 4.0, "audio": True, "role": "broll"},
+    ]
+    segs = [{"clip": 0, "start": 0.0, "end": 3.0, "reason": "a"}]
+    lines = [
+        {"id": 0, "clip": 0, "start": 0.0, "end": 1.0, "keep": True, "text": "a"},
+        {"id": 1, "clip": 0, "start": 1.0, "end": 2.0, "keep": True, "text": "b"},
+        {"id": 2, "clip": 0, "start": 2.0, "end": 3.0, "keep": True, "text": "c"},
+    ]
+    covers = [{"clip": 1, "line": 1, "through": 1, "start": 0.0, "end": 1.0, "reason": "demo"}]
+    out_portrait = tmp_path / "export_portrait.mp4"
+    work = tmp_path / "proj_work"
+    render.render(
+        segs, clips, str(out_portrait), "Rendering", "Render failed",
+        encoder="x264", device=None, covers=covers, lines=lines,
+        resolution="720p", aspect="portrait", work_dir=str(work),
+    )
+    info = probe(str(out_portrait))
+    assert (info["width"], info["height"]) == (720, 1280)
+    assert not (tmp_path / "work").exists()
+    assert (work / "pieces").is_dir()

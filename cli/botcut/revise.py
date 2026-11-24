@@ -147,6 +147,11 @@ def apply_revise(lines: list[dict], keep: list[dict]) -> list[dict]:
     updated = []
     for line in lines:
         row = dict(line)
+        if str(line.get("reason") or "") == "card":
+            row["keep"] = True
+            row["reason"] = "card"
+            updated.append(row)
+            continue
         try:
             uid = int(line["id"])
         except (KeyError, TypeError, ValueError):
@@ -356,7 +361,7 @@ def _land(cuts_path: str, doc: dict, lines: list[dict], result: dict) -> None:
             claims,
             beats={int(beat["id"]): beat for beat in beats},
             lines=new_lines,
-            segments=doc.get("segments") or [],
+            segments=None,
             durations=clip_durations(clips),
             still_dir=os.path.join(out_dir, "work", "stills"),
             hook=hook,
@@ -448,6 +453,8 @@ def _fake(lines: list[dict], covers: list[dict] | None = None) -> dict:
     # Drop the last id so an offline test with two lines sees one go.
     ids = []
     for line in lines:
+        if str(line.get("reason") or "") == "card":
+            continue
         try:
             ids.append(int(line["id"]))
         except (KeyError, TypeError, ValueError):
@@ -506,6 +513,8 @@ def _user_message(
         "",
     ]
     for line in lines:
+        if str(line.get("reason") or "") == "card":
+            continue
         try:
             uid = int(line["id"])
         except (KeyError, TypeError, ValueError):

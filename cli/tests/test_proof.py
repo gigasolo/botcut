@@ -357,3 +357,18 @@ def test_a_shoot_that_fits_in_one_request_is_read_and_cut_in_it(live, monkeypatc
     assert "About 30s was asked for." in asked[1][1]["messages"][1]["content"]
     took = json.loads((tmp_path / "out" / "work" / "seconds.json").read_text())
     assert "outline" not in took and "choose" in took
+
+
+def test_proof_honors_effort_env_override(live, monkeypatch):
+    seen = {}
+
+    def post(url, headers=None, json=None, timeout=None):
+        seen["effort"] = json.get("reasoning_effort")
+        seen["timeout"] = timeout
+        return _Reply(_answer(reply="Good."))
+
+    monkeypatch.setattr("botcut.net.requests.post", post)
+    monkeypatch.setenv("BOTCUT_PROOF_EFFORT", "medium")
+    proof(LINES, PIECES)
+    assert seen["effort"] == "medium"
+    assert seen["timeout"][1] >= 240

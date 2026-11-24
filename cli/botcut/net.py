@@ -35,9 +35,12 @@ def post(
                 read_timeouts_left -= 1
                 _again(delays.pop(0), None)
                 continue
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 if not delays:
-                    raise SystemExit(f"{label} connection failed")
+                    detail = _safe_body(str(exc), key).strip()
+                    kind = type(exc).__name__
+                    suffix = f" ({kind}: {detail})" if detail else f" ({kind})"
+                    raise SystemExit(f"{label} connection failed{suffix}")
                 _again(delays.pop(0), None)
                 continue
         finally:

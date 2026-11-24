@@ -96,11 +96,23 @@ QString zoomValue(const QString &zoom) {
     return known.contains(zoom) ? zoom : QStringLiteral("off");
 }
 
+QString resolutionValue(const QString &resolution) {
+    static const QStringList known{QStringLiteral("2160p"), QStringLiteral("1440p"),
+                                   QStringLiteral("1080p"), QStringLiteral("720p")};
+    return known.contains(resolution) ? resolution : QStringLiteral("source");
+}
+
+QString aspectValue(const QString &aspect) {
+    static const QStringList known{QStringLiteral("landscape"), QStringLiteral("portrait")};
+    return known.contains(aspect) ? aspect : QStringLiteral("source");
+}
+
 CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QString &outDir,
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent, bool decide, const QString &sceneTransition,
                        double maxPause, const QStringList &brollFiles, bool brollMix, const QString &zoom,
-                       const QStringList &angleFiles) {
+                       const QStringList &angleFiles, const QString &resolution,
+                       const QString &aspect, bool pip, const QString &liveTitle) {
     if (files.isEmpty())
         return {QString(), {}, QStringLiteral("Add a video first")};
     if (mode != QLatin1String("speech") && mode != QLatin1String("assemble"))
@@ -128,6 +140,16 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
     tail << QStringLiteral("--b-roll-sound")
          << (brollMix ? QStringLiteral("mix") : QStringLiteral("voice"));
     tail << QStringLiteral("--zoom") << zoomValue(zoom);
+    const QString res = resolutionValue(resolution);
+    if (res != QLatin1String("source"))
+        tail << QStringLiteral("--resolution") << res;
+    const QString asp = aspectValue(aspect);
+    if (asp != QLatin1String("source"))
+        tail << QStringLiteral("--aspect") << asp;
+    if (pip)
+        tail << QStringLiteral("--pip");
+    if (!liveTitle.simplified().isEmpty())
+        tail << QStringLiteral("--live-title") << liveTitle.simplified();
     if (decide)
         tail << QStringLiteral("--decide");
     return launchTool(tail, botcutCli, uv, cliProject);
@@ -135,13 +157,26 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject, const QString &sceneTransition, bool brollMix,
-                          const QString &zoom) {
+                          const QString &zoom, const QString &resolution, const QString &aspect,
+                          const QString &outFile, bool pip, const QString &liveTitle) {
     if (outDir.isEmpty())
         return {QString(), {}, QStringLiteral("No output directory")};
-    const QStringList tail{QStringLiteral("render"), outDir, QStringLiteral("--scene-transition"),
-                           sceneTransitionValue(sceneTransition), QStringLiteral("--b-roll-sound"),
-                           brollMix ? QStringLiteral("mix") : QStringLiteral("voice"),
-                           QStringLiteral("--zoom"), zoomValue(zoom)};
+    QStringList tail{QStringLiteral("render"), outDir, QStringLiteral("--scene-transition"),
+                     sceneTransitionValue(sceneTransition), QStringLiteral("--b-roll-sound"),
+                     brollMix ? QStringLiteral("mix") : QStringLiteral("voice"),
+                     QStringLiteral("--zoom"), zoomValue(zoom)};
+    const QString res = resolutionValue(resolution);
+    if (res != QLatin1String("source"))
+        tail << QStringLiteral("--resolution") << res;
+    const QString asp = aspectValue(aspect);
+    if (asp != QLatin1String("source"))
+        tail << QStringLiteral("--aspect") << asp;
+    if (pip)
+        tail << QStringLiteral("--pip");
+    if (!liveTitle.simplified().isEmpty())
+        tail << QStringLiteral("--live-title") << liveTitle.simplified();
+    if (!outFile.trimmed().isEmpty())
+        tail << QStringLiteral("--out-file") << outFile.trimmed();
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -251,7 +286,8 @@ QString cardDestinationError(const QString &dest) {
 }
 
 CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QString &botcutCli,
-                        const QString &uv, const QString &cliProject) {
+                        const QString &uv, const QString &cliProject, const QString &style,
+                        const QString &fromVideo, const QString &aspect) {
     const QString trimmed = sentence.simplified();
     if (trimmed.isEmpty())
         return {QString(), {}, QStringLiteral("Say what the card says")};
@@ -259,8 +295,51 @@ CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QStr
     if (!problem.isEmpty())
         return {QString(), {}, problem};
     const QString absolute = QFileInfo(dest).absoluteFilePath();
-    const QStringList tail{QStringLiteral("card"), QStringLiteral("--out"), absolute,
-                           QStringLiteral("--"), trimmed};
+    QStringList tail{QStringLiteral("card"), QStringLiteral("--out"), absolute};
+    if (style == QLatin1String("typo") || style == QLatin1String("photo"))
+        tail << QStringLiteral("--style") << style;
+    if (style == QLatin1String("photo") && !fromVideo.trimmed().isEmpty())
+        tail << QStringLiteral("--from") << fromVideo.trimmed();
+    if (aspect == QLatin1String("portrait"))
+        tail << QStringLiteral("--aspect") << QStringLiteral("portrait");
+    tail << QStringLiteral("--") << trimmed;
+    return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+CutLaunch cutThumbLaunch(const QString &cutsPath, const QString &title, const QString &outJpg,
+                         const QString &outCardMp4, const QString &aspect, bool embed,
+                         const QString &botcutCli, const QString &uv, const QString &cliProject) {
+    if (cutsPath.isEmpty())
+        return {QString(), {}, QStringLiteral("No cuts.json")};
+    QStringList tail{QStringLiteral("thumb"), cutsPath};
+    if (!title.trimmed().isEmpty())
+        tail << QStringLiteral("--title") << title.trimmed();
+    if (!outJpg.trimmed().isEmpty())
+        tail << QStringLiteral("--out") << outJpg.trimmed();
+    if (!outCardMp4.trimmed().isEmpty())
+        tail << QStringLiteral("--card") << outCardMp4.trimmed();
+    if (aspect == QLatin1String("portrait"))
+        tail << QStringLiteral("--aspect") << QStringLiteral("portrait");
+    if (embed)
+        tail << QStringLiteral("--embed");
+    return launchTool(tail, botcutCli, uv, cliProject);
+}
+
+CutLaunch cutShipLaunch(const QString &cutsPath, const QString &outDir, const QString &title,
+                        const QString &resolution, bool includePortrait,
+                        const QString &botcutCli, const QString &uv, const QString &cliProject) {
+    if (cutsPath.isEmpty())
+        return {QString(), {}, QStringLiteral("No cuts.json")};
+    QStringList tail{QStringLiteral("ship"), cutsPath};
+    if (!outDir.trimmed().isEmpty())
+        tail << QStringLiteral("--out") << outDir.trimmed();
+    if (!title.trimmed().isEmpty())
+        tail << QStringLiteral("--title") << title.trimmed();
+    const QString res = resolutionValue(resolution);
+    if (res != QLatin1String("source"))
+        tail << QStringLiteral("--resolution") << res;
+    if (!includePortrait)
+        tail << QStringLiteral("--no-portrait");
     return launchTool(tail, botcutCli, uv, cliProject);
 }
 
@@ -348,8 +427,8 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
             if (!value.isString() || value.toString().isEmpty())
                 continue;
             const QFileInfo info(value.toString());
-            const QString path = info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
-                                                   : info.absoluteFilePath();
+            const QString path = QDir::cleanPath(info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
+                                                                   : info.absoluteFilePath());
             if (!parsed.contains(path) || brollFiles->contains(path))
                 continue;
             if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
@@ -360,14 +439,21 @@ bool parseCutList(const QByteArray &json, const QString &baseDir, QString *mode,
     if (angleFiles != nullptr) {
         angleFiles->clear();
         // A second camera is one of the files, not the first, not a card, and not B-roll.
-        const QJsonArray brollArray = root.value(QStringLiteral("broll")).toArray();
+        QSet<QString> resolvedBroll;
+        for (const QJsonValue &value : root.value(QStringLiteral("broll")).toArray()) {
+            if (!value.isString() || value.toString().isEmpty())
+                continue;
+            const QFileInfo info(value.toString());
+            resolvedBroll.insert(QDir::cleanPath(info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
+                                                                   : info.absoluteFilePath()));
+        }
         for (const QJsonValue &value : root.value(QStringLiteral("angles")).toArray()) {
             if (!value.isString() || value.toString().isEmpty())
                 continue;
             const QFileInfo info(value.toString());
-            const QString path = info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
-                                                   : info.absoluteFilePath();
-            if (parsed.indexOf(path) <= 0 || angleFiles->contains(path) || brollArray.contains(value))
+            const QString path = QDir::cleanPath(info.isRelative() ? QDir(baseDir).absoluteFilePath(value.toString())
+                                                                   : info.absoluteFilePath());
+            if (parsed.indexOf(path) <= 0 || angleFiles->contains(path) || resolvedBroll.contains(path))
                 continue;
             if (QFileInfo(path).fileName().startsWith(QStringLiteral("botcut-card-")))
                 continue;

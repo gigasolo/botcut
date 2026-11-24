@@ -14,6 +14,7 @@ Item {
     // "proposing" while the model thinks, "applying" while the change lands.
     property string chatState: ""
     property string pendingNote: ""
+    property int chatCountBeforeSend: 0
     property string sentFrom: ""
     // One transient line under the thread: a failure, or what undo did.
     property string localText: ""
@@ -83,10 +84,12 @@ Item {
         }
         var from = host ? host.viewStep : ""
         localText = ""
+        var countBefore = backend.chat ? backend.chat.length : 0
         if (!backend.sendRevise(note)) {
             localText = failedText
             return
         }
+        chatCountBeforeSend = countBefore
         sentFrom = from
         pendingNote = note
         field.text = ""
@@ -122,7 +125,8 @@ Item {
             return
         if (chatState === "proposing") {
             chatState = ""
-            if (lastRole === "bot") {
+            var countNow = backend.chat ? backend.chat.length : 0
+            if (lastRole === "bot" && countNow > chatCountBeforeSend) {
                 pendingNote = ""
                 return
             }

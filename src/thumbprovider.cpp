@@ -21,11 +21,13 @@ QImage ThumbProvider::requestImage(const QString &id, QSize *size, const QSize &
     // id looks like "<video-revision>/<index>"; only the index maps to storage.
     const int index = id.section('/', -1).toInt();
 
-    QMutexLocker lock(&m_mutex);
-    if (index < 0 || index >= m_images.size())
-        return {};
-
-    QImage img = m_images.at(index);
+    QImage img;
+    {
+        QMutexLocker lock(&m_mutex);
+        if (index < 0 || index >= m_images.size())
+            return {};
+        img = m_images.at(index);
+    }
     if (img.isNull())
         return {};
     if (size)

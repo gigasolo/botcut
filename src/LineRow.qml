@@ -212,14 +212,18 @@ Item {
             Label {
                 visible: row.coverText !== ""
                 Layout.alignment: Qt.AlignVCenter
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 text: row.coverText
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 12
                 elide: Text.ElideMiddle
-                Layout.maximumWidth: 240
             }
-            Item { Layout.fillWidth: true }
+            Item {
+                visible: row.coverText === ""
+                Layout.fillWidth: true
+            }
             RowWord {
                 visible: row.selected
                 word: qsTr("Play")

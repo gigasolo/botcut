@@ -35,7 +35,7 @@ Item {
     Rectangle {
         anchors.centerIn: parent
         width: Math.min(520, parent.width - 48)
-        height: Math.min(column.implicitHeight + 48, parent.height - 32)
+        height: Math.min(column.implicitHeight + footerRow.implicitHeight + 60, parent.height - 32)
         radius: theme.radius
         color: theme.surface
         border.color: theme.line
@@ -43,13 +43,25 @@ Item {
 
         MouseArea { anchors.fill: parent }
 
-        Column {
-            id: column
+        Flickable {
             anchors.top: parent.top
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: 24
-            spacing: 12
+            anchors.bottom: footerRow.top
+            anchors.topMargin: 24
+            anchors.leftMargin: 24
+            anchors.rightMargin: 24
+            anchors.bottomMargin: 12
+            contentWidth: width
+            contentHeight: column.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+
+            Column {
+                id: column
+                width: parent.width
+                spacing: 12
 
             Label {
                 width: parent.width
@@ -124,6 +136,7 @@ Item {
                     selectByMouse: true
                     echoMode: keyReveal.checked ? TextInput.Normal : TextInput.Password
                     enabled: !backend.busy
+                    onAccepted: root.saveTypedKey()
                 }
                 Label {
                     anchors.fill: keyField
@@ -210,15 +223,107 @@ Item {
             }
             RowLayout {
                 width: parent.width
+                spacing: 6
+                Label {
+                    text: qsTr("Video type")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
                 Item { Layout.fillWidth: true }
-                ActionButton {
-                    text: qsTr("Done")
-                    filled: true
-                    onClicked: {
-                        // A key left in the field is one the person meant to keep.
-                        root.saveTypedKey()
-                        host.closeSettings()
+                Repeater {
+                    model: [
+                        { value: "internal", word: qsTr("Internal") },
+                        { value: "marketing", word: qsTr("Marketing") },
+                        { value: "monologue", word: qsTr("Monologue") }
+                    ]
+                    ActionButton {
+                        required property var modelData
+                        text: modelData.word
+                        filled: backend.preset === modelData.value
+                        enabled: !backend.busy
+                        onClicked: backend.applyPreset(modelData.value)
                     }
+                }
+            }
+            RowLayout {
+                width: parent.width
+                spacing: 8
+                Label {
+                    text: qsTr("Format")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
+                Item { Layout.fillWidth: true }
+                Repeater {
+                    model: [
+                        { value: "source", word: qsTr("Auto") },
+                        { value: "landscape", word: qsTr("16:9") },
+                        { value: "portrait", word: qsTr("9:16") }
+                    ]
+                    ActionButton {
+                        required property var modelData
+                        text: modelData.word
+                        filled: backend.aspect === modelData.value
+                        enabled: !backend.busy
+                        onClicked: backend.aspect = modelData.value
+                    }
+                }
+            }
+            RowLayout {
+                width: parent.width
+                spacing: 6
+                Label {
+                    text: qsTr("Resolution")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
+                Item { Layout.fillWidth: true }
+                Repeater {
+                    model: [
+                        { value: "source", word: qsTr("Source") },
+                        { value: "2160p", word: qsTr("4K") },
+                        { value: "1440p", word: qsTr("1440p") },
+                        { value: "1080p", word: qsTr("1080p") },
+                        { value: "720p", word: qsTr("720p") }
+                    ]
+                    ActionButton {
+                        required property var modelData
+                        text: modelData.word
+                        filled: backend.resolution === modelData.value
+                        enabled: !backend.busy
+                        onClicked: backend.resolution = modelData.value
+                    }
+                }
+            }
+            CheckBox {
+                width: parent.width
+                text: qsTr("Show speaker picture-in-picture over landscape slides and screens")
+                font.pixelSize: 13
+                focusPolicy: Qt.NoFocus
+                enabled: !backend.busy
+                checked: Boolean(backend && backend.pip)
+                onClicked: if (backend && backend.pip !== undefined) backend.pip = checked
+            }
+        }
+        }
+
+        RowLayout {
+            id: footerRow
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.leftMargin: 24
+            anchors.rightMargin: 24
+            anchors.bottomMargin: 20
+            Item { Layout.fillWidth: true }
+            ActionButton {
+                text: qsTr("Done")
+                filled: true
+                focusPolicy: Qt.TabFocus
+                onClicked: {
+                    // A key left in the field is one the person meant to keep.
+                    root.saveTypedKey()
+                    host.closeSettings()
                 }
             }
         }

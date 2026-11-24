@@ -451,3 +451,20 @@ def test_revise_without_broll_lists_no_beats_and_keeps_the_covers_it_has(monkeyp
     saved = json.loads(path.read_text())
     assert saved["covers"] == laid
     assert saved["lines"][-1]["keep"] is False
+
+
+def test_revise_preserves_card_lines_and_hides_them_from_model():
+    from botcut.revise import _user_message
+
+    lines = [
+        _line(0, "Opening title", keep=True, reason="card"),
+        _line(1, "hello", keep=True, reason="story"),
+        _line(2, "the stumble", keep=True, reason="story"),
+    ]
+    msg = _user_message(lines, "drop stumble", "A ride", "open", True)
+    assert "Opening title" not in msg
+    assert "[1] keep" in msg
+    updated = apply_revise(lines, [{"id": 1, "reason": "clean"}])
+    assert updated[0]["keep"] is True and updated[0]["reason"] == "card"
+    assert updated[1]["keep"] is True and updated[1]["reason"] == "clean"
+    assert updated[2]["keep"] is False and updated[2]["reason"] == "dropped"

@@ -134,6 +134,7 @@ Item {
         onPlaybackStateChanged: {
             if (playbackState === MediaPlayer.PlayingState)
                 seekPlayingLine(lineToken);
+            root.syncCover();
         }
         onPositionChanged: {
             if (pauseHeldLine())
@@ -305,10 +306,14 @@ Item {
         var now = root.host.coverNow;
         if (!now || cover.wantMs < 0)
             return;
-        if (Math.abs(cover.position - Math.round(Number(now.src) * 1000)) > 500)
+        var mainStopped = player.playbackState !== MediaPlayer.PlayingState || player.priming;
+        if (Math.abs(cover.position - Math.round(Number(now.src) * 1000)) > 500) {
+            if (mainStopped)
+                cover.pause();
             return;
+        }
         root.coverShown = true;
-        if (player.playbackState !== MediaPlayer.PlayingState || player.priming)
+        if (mainStopped)
             cover.pause();
     }
 

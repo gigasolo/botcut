@@ -778,7 +778,11 @@ def play_order(segments: list[dict], lines: list[dict], hook: object) -> list[di
         opening.append({**seg, "start": max(seg_start, low), "end": min(seg_end, high), "hook": True})
         if seg_end - high >= CUT_MIN:
             body.append({**seg, "start": high})
-    return [*opening, *body]
+    # Leading title cards stay at 0:00 before any lifted hook line.
+    leading_cards = []
+    while body and body[0].get("reason") == "card":
+        leading_cards.append(body.pop(0))
+    return [*leading_cards, *opening, *body]
 
 
 def snap(segments: list[dict], silences_by_clip: list[list[tuple[float, float]]]) -> list[dict]:

@@ -35,12 +35,28 @@ def card_dir() -> str:
     return os.path.abspath(os.path.join(base, "botcut", "cards"))
 
 
-def make_card(sentence: str, dest: str) -> None:
+def make_card(
+    sentence: str,
+    dest: str,
+    *,
+    style: str = "ai",
+    aspect: str = "landscape",
+    brand: dict | None = None,
+    from_video: str | None = None,
+) -> None:
     text = _sentence(sentence)
     path = _dest(dest)
     # Fake mode never checks the key and never opens a socket.
     if os.environ.get("BOTCUT_FAKE") == "1":
         _encode(_fake_args(text), path)
+        print(f"Wrote {path}", flush=True)
+        return
+    if style == "photo" and from_video and os.path.isfile(from_video):
+        _encode_photo_card(text, path, from_video, aspect=aspect, brand=brand)
+        print(f"Wrote {path}", flush=True)
+        return
+    if style in ("typo", "photo"):
+        _encode_typo_card(text, path, aspect=aspect, brand=brand)
         print(f"Wrote {path}", flush=True)
         return
     key = os.environ.get("XAI_API_KEY")
@@ -57,7 +73,7 @@ def make_card(sentence: str, dest: str) -> None:
                 "model": IMAGE_MODEL,
                 "prompt": text,
                 "n": 1,
-                "aspect_ratio": "16:9",
+                "aspect_ratio": "9:16" if aspect == "portrait" else "16:9",
                 "response_format": "url",
             },
         },
@@ -76,6 +92,104 @@ def make_card(sentence: str, dest: str) -> None:
     finally:
         _remove(image)
     print(f"Wrote {path}", flush=True)
+
+
+def _encode_photo_card(
+    sentence: str,
+    dest: str,
+    from_video: str,
+    *,
+    aspect: str = "landscape",
+    brand: dict | None = None,
+) -> None:
+    """Pull the best key frame from `from_video` and overlay Matt-style minimal white title typography."""
+    import shutil
+
+    from botcut.media import probe
+    from botcut.thumb import _grab_full_frame, compose_photo_card, pick_best_frame
+
+    info = probe(from_video, need_audio=False)
+    tmp_work = tempfile.mkdtemp(prefix="botcut-card-work-")
+    try:
+        winner = pick_best_frame([info], None, tmp_work)
+        hi_frame = os.path.join(tmp_work, "frame.jpg")
+        frame_src = hi_frame if _grab_full_frame(winner["path"], winner["at"], hi_frame) else winner["still"]
+        partial = _partial(dest)
+        try:
+            compose_photo_card(
+                frame_src,
+                sentence,
+                out_card_mp4=partial,
+                face=winner.get("face"),
+                aspect=aspect,
+                brand=brand,
+            )
+        except BaseException:
+            _remove(partial)
+            raise
+        os.replace(partial, dest)
+    finally:
+        shutil.rmtree(tmp_work, ignore_errors=True)
+
+
+def _encode_typo_card(
+    sentence: str, dest: str, *, aspect: str = "landscape", brand: dict | None = None
+) -> None:
+    """Render a crisp, on-brand typographic 3-second title card offline using libass."""
+    from botcut.brand import hex_to_ass, load_brand
+
+    kit = load_brand() if brand is None else {**load_brand(), **brand}
+    width, height = (1080, 1920) if aspect == "portrait" else (1920, 1080)
+    bg = kit["bg_color"].lstrip("#")
+    accent_hex = kit["accent_color"].lstrip("#")
+    text_col = hex_to_ass(kit["text_color"])
+    font = kit["font"]
+    font_size = 76 if aspect == "portrait" else 88
+    margin_h = int(width * 0.10)
+    escaped = sentence.replace("\\", r"\\").replace("{", r"\{").replace("}", r"\}")
+    ass_doc = "\n".join([
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "WrapStyle: 2",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
+        "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Card,{font},{font_size},{text_col},{text_col},&H00000000&,&H00000000&,"
+        f"-1,0,0,0,100,100,0,0,1,0,0,5,{margin_h},{margin_h},80,1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+        f"Dialogue: 0,0:00:00.00,0:00:03.00,Card,,0,0,0,,{{\\fad(350,400)}}{escaped}",
+        "",
+    ])
+    handle, ass_path = tempfile.mkstemp(prefix="botcut-card-", suffix=".ass")
+    os.close(handle)
+    try:
+        with open(ass_path, "w", encoding="utf-8") as f:
+            f.write(ass_doc)
+        bar_w = int(width * 0.14)
+        bar_x = (width - bar_w) // 2
+        bar_y = int(height * 0.38)
+        escaped_ass = ass_path.replace("\\", "\\\\").replace(":", "\\:")
+        vf = (
+            f"drawbox=x={bar_x}:y={bar_y}:w={bar_w}:h=6:color=0x{accent_hex}:t=fill,"
+            f"ass='{escaped_ass}',"
+            "fade=t=in:st=0:d=0.35:color=black,fade=t=out:st=2.60:d=0.40:color=black"
+        )
+        args = [
+            "-f", "lavfi", "-i", f"color=c=0x{bg}:s={width}x{height}:r=30:d=3",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-t", "3",
+            "-vf", vf,
+            *_common_args(sentence),
+        ]
+        _encode(args, dest)
+    finally:
+        _remove(ass_path)
 
 
 def card_sentence(path: str, fallback: str) -> str:
@@ -315,6 +429,11 @@ def _encode(args: list[str], dest: str) -> None:
         raise SystemExit("ffmpeg was not found") from None
     if proc.returncode != 0 or not os.path.isfile(partial) or os.path.getsize(partial) == 0:
         _remove(partial)
+        from botcut.media import ffmpeg_error_detail
+
+        detail = ffmpeg_error_detail(proc.stderr or "")
+        if detail and detail != "ffmpeg failed":
+            raise SystemExit(f"Could not make the card: {detail}")
         raise SystemExit("Could not make the card")
     os.replace(partial, dest)
 

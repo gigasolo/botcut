@@ -110,8 +110,13 @@ def test_a_replaced_shot_or_another_transcriber_forgets_what_was_heard(tmp_path)
     assert other.exists()
 
     words.write_text("{}")
+    pauses.write_text("{}")
+    flac = work / "0-talk.flac"
+    flac.write_bytes(b"flac")
     cli._drop_stale_caches(str(work), 0, clip, "local:faster-whisper:small")
     assert not words.exists()
+    # Only .words.json is dropped when the source file itself did not change.
+    assert pauses.exists() and flac.exists()
     assert json.loads((work / "0-talk.stamp.json").read_text())["stt"] == "local:faster-whisper:small"
 
 
@@ -173,3 +178,13 @@ def test_a_recording_ffmpeg_cannot_read_is_not_taken_for_one_with_no_pauses(tmp_
     broken.write_bytes(b"not audio")
     with pytest.raises(SystemExit, match="Could not read the sound"):
         silences(str(broken), 10.0)
+
+
+def test_load_cuts_accepts_directory_and_run_validates_max_pause(tmp_path):
+    cuts = tmp_path / "cuts.json"
+    cuts.write_text(json.dumps({"version": 1, "clips": []}))
+    out_dir, doc = cli.load_cuts(str(tmp_path))
+    assert out_dir == str(tmp_path)
+    assert doc["version"] == 1
+    with pytest.raises(SystemExit, match="--max-pause must be greater than 0"):
+        cli.run([str(cuts)], str(tmp_path / "out"), max_pause=0)

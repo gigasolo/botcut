@@ -67,8 +67,8 @@ function airAfter(lines, index, paceSec) {
 // from the run's start across those lines. `src` is the time in the B-roll
 // file to show now, `until` where on this line it ends. An older cover with
 // no run stays inside its one line for up to four seconds.
-function coverAt(lines, index, covers, clipPaths, posSec, paceSec) {
-    if (!lines || index < 0 || index >= lines.length || !covers || !clipPaths)
+function coverAt(lines, index, covers, clipPaths, posSec, paceSec, positionsMap) {
+    if (!lines || index < 0 || index >= lines.length || !covers || covers.length === 0 || !clipPaths)
         return null;
     var line = lines[index];
     if (!line || line.keep === false)
@@ -78,10 +78,13 @@ function coverAt(lines, index, covers, clipPaths, posSec, paceSec) {
     var pos = Number(posSec);
     if (!isFinite(start) || !isFinite(end) || !isFinite(pos))
         return null;
-    var positions = {};
-    for (var p = 0; p < lines.length; ++p) {
-        if (lines[p] && lines[p].id !== undefined)
-            positions[Number(lines[p].id)] = p;
+    var positions = positionsMap;
+    if (!positions) {
+        positions = {};
+        for (var p = 0; p < lines.length; ++p) {
+            if (lines[p] && lines[p].id !== undefined)
+                positions[Number(lines[p].id)] = p;
+        }
     }
     for (var i = 0; i < covers.length; ++i) {
         var cover = covers[i];
@@ -124,6 +127,60 @@ function coverAt(lines, index, covers, clipPaths, posSec, paceSec) {
         if (pos < start || pos >= until)
             return null;
         return { path: String(clipPaths[clip] || ""), src: from + offset + (pos - start), until: until };
+    }
+    return null;
+}
+
+// The second-camera picture under the playhead on the line at `index`, or null.
+// Shown in the Lines preview when no B-roll cover is active, synced by offset + drift.
+function angleAt(lines, index, angles, clipPaths, clipOffsets, posSec, positionsMap) {
+    if (!lines || index < 0 || index >= lines.length || !angles || angles.length === 0 || !clipPaths)
+        return null;
+    var line = lines[index];
+    if (!line || line.keep === false)
+        return null;
+    var start = Number(line.start);
+    var end = Number(line.end);
+    var pos = Number(posSec);
+    if (!isFinite(start) || !isFinite(end) || !isFinite(pos) || pos < start || pos >= end)
+        return null;
+    var positions = positionsMap;
+    if (!positions) {
+        positions = {};
+        for (var p = 0; p < lines.length; ++p) {
+            if (lines[p] && lines[p].id !== undefined)
+                positions[Number(lines[p].id)] = p;
+        }
+    }
+    for (var i = 0; i < angles.length; ++i) {
+        var angle = angles[i];
+        if (!angle)
+            continue;
+        var first = positions[Number(angle.line)];
+        if (first === undefined)
+            continue;
+        var last = angle.through === undefined || angle.through === null ? first : positions[Number(angle.through)];
+        if (last === undefined || last < first)
+            last = first;
+        if (index < first || index > last)
+            continue;
+        var alive = true;
+        for (var k = first; k <= index; ++k) {
+            if (!lines[k] || lines[k].keep === false) {
+                alive = false;
+                break;
+            }
+        }
+        if (!alive)
+            continue;
+        var clip = Number(angle.clip);
+        if (!isFinite(clip) || clip < 0 || clip >= clipPaths.length)
+            return null;
+        var meta = clipOffsets && clip < clipOffsets.length ? clipOffsets[clip] : null;
+        var off = meta && isFinite(Number(meta.offset)) ? Number(meta.offset) : 0;
+        var drift = meta && isFinite(Number(meta.drift)) ? Number(meta.drift) : 0;
+        var src = Math.max(0, pos + off + drift * pos);
+        return { path: String(clipPaths[clip] || ""), src: src, until: end };
     }
     return null;
 }

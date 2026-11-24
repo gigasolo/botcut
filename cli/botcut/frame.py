@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 from botcut.llm import ask
@@ -83,16 +84,16 @@ def parse_face(payload) -> dict | None:
     return {"x": round(x, 4), "y": round(y, 4), "w": round(w, 4), "h": round(h, 4)}
 
 
-def ask_face(still: str) -> dict | None:
+def _ask_face(still: str) -> tuple[bool, dict | None]:
     if os.environ.get("BOTCUT_FAKE") == "1":
-        return dict(FAKE_FACE)
+        return True, dict(FAKE_FACE)
     key = os.environ.get("XAI_API_KEY")
     if not key or not os.path.isfile(still):
-        return None
+        return False, None
     from botcut.pick import _jpeg_data_url
 
     try:
-        return ask(
+        face = ask(
             [
                 {
                     "role": "user",
@@ -107,9 +108,14 @@ def ask_face(still: str) -> dict | None:
             parse=parse_face,
             read_timeout=60,
         )
+        return True, face
     except SystemExit:
         # Framing is a nicety. A cut is never lost for want of it.
-        return None
+        return False, None
+
+
+def ask_face(still: str) -> dict | None:
+    return _ask_face(still)[1]
 
 
 def find_faces(work: str, clips: list[dict], is_spoken) -> None:
@@ -126,22 +132,38 @@ def find_faces(work: str, clips: list[dict], is_spoken) -> None:
         if not is_spoken(clip):
             return
         cache = os.path.join(work, f"{index}-{Path(clip['path']).stem}.face.json")
+        face = None
+        known = False
         try:
-            face = parse_face({"found": True, **json.loads(Path(cache).read_text())["face"]})
-            known = True
+            stored = json.loads(Path(cache).read_text())
+            if isinstance(stored, dict) and "face" in stored:
+                raw = stored["face"]
+                if raw is None:
+                    known = True
+                elif isinstance(raw, dict):
+                    face = parse_face({"found": True, **raw})
+                    known = True
         except (OSError, ValueError, KeyError, TypeError):
-            face, known = None, os.path.isfile(cache)
+            known = False
         if not known:
             still = os.path.join(stills, f"face-{index}.jpg")
             # A third of the way in, past the moment of sitting down.
             at = max(0.0, float(clip.get("duration") or 0) / 3)
-            face = ask_face(still) if grab_still(clip["path"], at, still) else None
-            Path(cache).write_text(json.dumps({"face": face}) + "\n")
+            if grab_still(clip["path"], at, still):
+                ok, face = _ask_face(still)
+                if ok:
+                    Path(cache).write_text(json.dumps({"face": face}) + "\n")
         if face:
             clip["face"] = face
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    pool = ThreadPoolExecutor(max_workers=4)
+    try:
         list(pool.map(look, enumerate(clips)))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
 
 
 def focus(clip: dict, at: float | None = None) -> tuple[float, float]:
@@ -163,6 +185,7 @@ def focus(clip: dict, at: float | None = None) -> tuple[float, float]:
 
 
 _MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "face_detection_yunet_2023mar.onnx")
+_DETECTOR = threading.local()
 
 
 def find_face(still: str) -> dict | None:
@@ -179,7 +202,12 @@ def find_face(still: str) -> dict | None:
         return None
     height, width = image.shape[:2]
     try:
-        detector = cv2.FaceDetectorYN.create(_MODEL, "", (width, height), 0.7, 0.3, 20)
+        detector = getattr(_DETECTOR, "yunet", None)
+        if detector is None:
+            detector = cv2.FaceDetectorYN.create(_MODEL, "", (width, height), 0.7, 0.3, 20)
+            _DETECTOR.yunet = detector
+        else:
+            detector.setInputSize((width, height))
         _count, faces = detector.detect(image)
     except cv2.error:
         return None
@@ -191,13 +219,17 @@ def find_face(still: str) -> dict | None:
     return parse_face({"found": True, "x": x / width, "y": y / height, "w": w / width, "h": h / height})
 
 
-def faces_along(work: str, clips: list[dict], lines: list[dict] | None) -> None:
-    """Note on each spoken shot where the speaker's face is at the middle of each line.
+def faces_along(
+    work: str, clips: list[dict], lines: list[dict] | None, angles: list[dict] | None = None
+) -> None:
+    """Note on each spoken shot (and second camera) where the speaker's face is at each line.
 
     The stills the cut already took of every line are looked at here, on this
     machine, and what is found is kept in work/faces.json. A still that
     shows no face adds nothing.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     if os.environ.get("BOTCUT_FAKE") == "1":
         return
     cache = os.path.join(work, "faces.json")
@@ -208,23 +240,69 @@ def faces_along(work: str, clips: list[dict], lines: list[dict] | None) -> None:
     if not isinstance(known, dict):
         known = {}
     changed = False
-    seen: dict[int, list] = {}
+    entries: list[tuple[str, int, float, str, float]] = []
+    misses: list[tuple[str, str, float]] = []
+    by_id: dict[int, dict] = {}
     for line in lines or []:
         try:
             uid, clip = int(line["id"]), int(line["clip"])
             middle = (float(line["start"]) + float(line["end"])) / 2
         except (KeyError, TypeError, ValueError):
             continue
+        by_id[uid] = line
         still = os.path.join(work, "stills", f"{uid}.jpg")
         if not os.path.isfile(still):
             continue
         stamp = os.path.getmtime(still)
-        row = known.get(str(uid))
+        key = str(uid)
+        entries.append((key, clip, middle, still, stamp))
+        row = known.get(key)
         if not isinstance(row, dict) or row.get("stamp") != stamp:
-            row = {"stamp": stamp, "face": find_face(still)}
-            known[str(uid)] = row
-            changed = True
-        face = parse_face({"found": True, **row["face"]}) if isinstance(row.get("face"), dict) else None
+            misses.append((key, still, stamp))
+    # Also detect faces on second-camera stills so portrait crops center the speaker on Cam B.
+    for run in angles or []:
+        if not isinstance(run, dict):
+            continue
+        try:
+            cam = int(run["clip"])
+            uid = int(run["line"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (0 <= cam < len(clips)) or uid not in by_id:
+            continue
+        still = os.path.join(work, "stills", f"angle-{cam}-{uid}.jpg")
+        if not os.path.isfile(still):
+            continue
+        line = by_id[uid]
+        from botcut.angles import angle_time
+
+        at = angle_time(clips[cam], (float(line["start"]) + float(line["end"])) / 2)
+        stamp = os.path.getmtime(still)
+        key = f"angle-{cam}-{uid}"
+        entries.append((key, cam, at, still, stamp))
+        row = known.get(key)
+        if not isinstance(row, dict) or row.get("stamp") != stamp:
+            misses.append((key, still, stamp))
+    if misses:
+        if len(misses) == 1:
+            key, still, stamp = misses[0]
+            known[key] = {"stamp": stamp, "face": find_face(still)}
+        else:
+            pool = ThreadPoolExecutor(max_workers=min(4, len(misses)))
+            try:
+                found_faces = list(pool.map(lambda item: find_face(item[1]), misses))
+            except BaseException:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                pool.shutdown(wait=True)
+            for (key, _still, stamp), found in zip(misses, found_faces):
+                known[key] = {"stamp": stamp, "face": found}
+        changed = True
+    seen: dict[int, list] = {}
+    for key, clip, middle, _still, _stamp in entries:
+        row = known.get(key)
+        face = parse_face({"found": True, **row["face"]}) if isinstance(row, dict) and isinstance(row.get("face"), dict) else None
         if face:
             seen.setdefault(clip, []).append(
                 [round(middle, 2), round(face["x"] + face["w"] / 2, 4), round(face["y"] + face["h"] / 2, 4)]
@@ -483,3 +561,25 @@ def vertical_left(width: int, height: int, cx: float) -> int:
     """The left edge of a 9:16 crop of a wide frame, centered on cx and kept inside the picture."""
     crop_w = int(height * 9 / 16) // 2 * 2
     return min(max(0, round(cx * width - crop_w / 2)), max(0, width - crop_w))
+
+
+def portrait_crop(clip: dict, target_w: int, target_h: int, at: float | None = None) -> str:
+    """A face-centered vertical crop for fitting a wide clip into a taller target (e.g. 9:16 or split-screen).
+
+    Returns empty string when the clip is already as tall as (or taller than) the target aspect.
+    """
+    try:
+        src_w, src_h = int(clip.get("width") or 0), int(clip.get("height") or 0)
+        rot = abs(int(round(float(clip.get("rotate") or 0)))) % 180
+    except (TypeError, ValueError):
+        return ""
+    if rot == 90:
+        src_w, src_h = src_h, src_w
+    if src_w <= 0 or src_h <= 0 or target_w <= 0 or target_h <= 0:
+        return ""
+    if (src_w / src_h) <= (target_w / target_h) + 1e-3:
+        return ""
+    crop_w = max(2, min(src_w, (int(src_h * target_w / target_h) // 2) * 2))
+    cx, _cy = focus(clip, at)
+    left = min(max(0, round(cx * src_w - crop_w / 2)), max(0, src_w - crop_w))
+    return f"crop={crop_w}:{src_h}:{left}:0"

@@ -7,24 +7,34 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 from botcut import angles as cameras
+from botcut import brand as brand_kit
 from botcut import llm, net
 from botcut.broll import beats_from_cuts, choose_covers, fake_beats, is_broll
 from botcut.card import is_card, make_card, merge_cards
 from botcut.captions import (
     burn_args,
+    burn_ass_args,
     load_words_by_clip,
     remap_words,
     require_subtitles,
+    to_ass,
     to_srt,
     word_cache_candidates,
 )
 from botcut.media import (
+    ASPECTS,
+    RESOLUTIONS,
+    cached_still,
     extract_audio,
+    ffmpeg_error_detail,
+    is_image,
     probe,
+    render_percent,
     render_with_progress,
     resolve_encoder,
     scene_changes,
@@ -65,6 +75,88 @@ ZOOM_HELP = (
 # Shots sent to the transcriber at once, and stills grabbed at once.
 TRANSCRIBE_WORKERS = 4
 STILL_WORKERS = 4
+
+_FLAC_LOCKS_GUARD = threading.Lock()
+_FLAC_LOCKS: dict[str, threading.Lock] = {}
+
+
+def _ensure_flac(clip_path: str, flac: str) -> None:
+    if os.path.isfile(flac):
+        return
+    with _FLAC_LOCKS_GUARD:
+        lock = _FLAC_LOCKS.setdefault(flac, threading.Lock())
+    with lock:
+        if not os.path.isfile(flac):
+            extract_audio(clip_path, flac)
+
+
+def _pool_map(fn, items, max_workers: int = STILL_WORKERS) -> list:
+    seq = list(items)
+    if not seq:
+        return []
+    workers = min(max_workers, len(seq))
+    if workers <= 1:
+        return [fn(item) for item in seq]
+    from concurrent.futures import ThreadPoolExecutor
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        return list(pool.map(fn, seq))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
+
+def _run_ffmpeg_progress(
+    args: list[str],
+    duration: float,
+    label: str,
+    fail_prefix: str,
+    *,
+    cwd: str | None = None,
+) -> None:
+    """Run ffmpeg with -progress pipe:1, printing '<label> N%' and cleanly terminating on cancel."""
+    lead = args[1:] if args and args[0] == "-y" else args
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *lead]
+    print(f"{label} 0%", flush=True)
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    err_parts: list[str] = []
+
+    def drain() -> None:
+        if proc.stderr is not None:
+            err_parts.append(proc.stderr.read())
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    last = 0
+    try:
+        if proc.stdout is None:
+            raise SystemExit(f"{fail_prefix}: ffmpeg failed")
+        for raw in proc.stdout:
+            line = raw.strip()
+            if not line.startswith("out_time_us="):
+                continue
+            value = line.split("=", 1)[1]
+            if not value.lstrip("-").isdigit():
+                continue
+            percent = render_percent(int(value), duration)
+            if percent == last:
+                continue
+            last = percent
+            print(f"{label} {percent}%", flush=True)
+    except BaseException:
+        if proc.poll() is None:
+            proc.terminate()
+        raise
+    finally:
+        code = proc.wait()
+        thread.join()
+    if code != 0:
+        raise SystemExit(f"{fail_prefix}: {ffmpeg_error_detail(err_parts[0] if err_parts else '')}")
+    if last < 100:
+        print(f"{label} 100%", flush=True)
 
 
 class _Clock:
@@ -172,6 +264,41 @@ def main(argv: list[str] | None = None) -> None:
         help="this file is another camera on a take one of the other files filmed",
     )
     run_p.add_argument("--zoom", choices=ZOOMS, default="off", help=ZOOM_HELP)
+    run_p.add_argument(
+        "--resolution",
+        choices=RESOLUTIONS,
+        default="source",
+        help="output resolution: source, 2160p, 1440p, 1080p, or 720p",
+    )
+    run_p.add_argument(
+        "--aspect",
+        choices=ASPECTS,
+        default="source",
+        help="output aspect ratio: source, landscape (16:9), or portrait (9:16)",
+    )
+    run_p.add_argument(
+        "--pip",
+        action="store_true",
+        help="show the speaker picture-in-picture over landscape B-roll/screens/slides",
+    )
+    run_p.add_argument(
+        "--preset",
+        choices=brand_kit.PRESET_NAMES,
+        default="custom",
+        help="video type preset: custom, internal, marketing, or monologue",
+    )
+    run_p.add_argument(
+        "--music",
+        default=None,
+        metavar="PATH",
+        help="background music track (auto-ducked under voice)",
+    )
+    run_p.add_argument(
+        "--live-title",
+        default=None,
+        metavar="TEXT",
+        help="fade a minimal title overlay over the first 3 seconds of live video",
+    )
     render_p = sub.add_parser("render", help="encode a rough cut from a decided cuts.json")
     render_p.add_argument("cuts", help="cuts.json or the directory that holds it")
     render_p.add_argument(
@@ -187,9 +314,56 @@ def main(argv: list[str] | None = None) -> None:
         help="mix the B-roll sound under the voice, or play the voice alone",
     )
     render_p.add_argument("--zoom", choices=ZOOMS, default="off", help=ZOOM_HELP)
-    cap_p = sub.add_parser("captions", help="write an SRT for the rough cut")
+    render_p.add_argument(
+        "--resolution",
+        choices=RESOLUTIONS,
+        default=None,
+        help="output resolution: source, 2160p, 1440p, 1080p, or 720p",
+    )
+    render_p.add_argument(
+        "--aspect",
+        choices=ASPECTS,
+        default=None,
+        help="output aspect ratio: source, landscape (16:9), or portrait (9:16)",
+    )
+    render_p.add_argument(
+        "--out-file",
+        default=None,
+        metavar="PATH",
+        help="render directly to this mp4 path without replacing rough_cut.mp4",
+    )
+    render_p.add_argument(
+        "--pip",
+        action="store_true",
+        default=None,
+        help="show the speaker picture-in-picture over landscape B-roll/screens/slides",
+    )
+    render_p.add_argument(
+        "--music",
+        default=None,
+        metavar="PATH",
+        help="background music track (auto-ducked under voice)",
+    )
+    render_p.add_argument(
+        "--live-title",
+        default=None,
+        metavar="TEXT",
+        help="fade a minimal title overlay over the first 3 seconds of live video",
+    )
+    cap_p = sub.add_parser("captions", help="write an SRT or styled ASS for the rough cut")
     cap_p.add_argument("cuts", help="path to cuts.json")
     cap_p.add_argument("--burn", action="store_true", help="also write rough_cut.captioned.mp4")
+    cap_p.add_argument(
+        "--style",
+        choices=("srt", "social"),
+        default="srt",
+        help="caption format: srt (plain subtitles) or social (word-highlighted ASS)",
+    )
+    cap_p.add_argument(
+        "--lower-third",
+        action="store_true",
+        help="include speaker lower-third from brand.json (with --style social)",
+    )
     short_p = sub.add_parser("short", help="cut one 1080x1920 highlight")
     short_p.add_argument("cuts", help="path to cuts.json")
     revise_p = sub.add_parser("revise", help="revise a decided cut from a note")
@@ -219,7 +393,32 @@ def main(argv: list[str] | None = None) -> None:
     )
     card_p = sub.add_parser("card", help="make a 3 second card from a sentence")
     card_p.add_argument("--out", required=True, help="mp4 to write, named botcut-card-…")
+    card_p.add_argument(
+        "--style",
+        choices=("photo", "typo", "ai"),
+        default="ai",
+        help="photo overlay on a key frame (photo), solid typographic card (typo), or AI image (ai)",
+    )
+    card_p.add_argument("--from", dest="from_video", default=None, help="source video to pull key frame from (for --style photo)")
+    card_p.add_argument("--aspect", choices=("landscape", "portrait"), default="landscape", help="card orientation")
     card_p.add_argument("sentence", help="the sentence on the card")
+    brand_p = sub.add_parser("brand", help="view or initialize ~/.config/botcut/brand.json")
+    brand_p.add_argument("brand_cmd", choices=("show", "init"), default="show", nargs="?")
+    thumb_p = sub.add_parser("thumb", help="make a Matt-style minimal photo thumbnail or opening title card")
+    thumb_p.add_argument("cuts", help="path to cuts.json or project folder")
+    thumb_p.add_argument("--title", default="", help="headline on the card")
+    thumb_p.add_argument("--subtitle", default=None, help="bottom line (defaults to today's date)")
+    thumb_p.add_argument("--brand", default=None, help="top brand/product label")
+    thumb_p.add_argument("--out", default=None, help="output JPEG thumbnail path")
+    thumb_p.add_argument("--card", default=None, help="also write a 3-second opening MP4 card here")
+    thumb_p.add_argument("--aspect", choices=("landscape", "portrait"), default="landscape")
+    thumb_p.add_argument("--embed", action="store_true", help="embed thumbnail into rough_cut.mp4 cover art")
+    ship_p = sub.add_parser("ship", help="generate a Ship Pack: chapters, post drafts, thumbnail, captions, and renders")
+    ship_p.add_argument("cuts", help="path to cuts.json or project folder")
+    ship_p.add_argument("--out", default=None, help="output folder for the ship pack")
+    ship_p.add_argument("--title", default="", help="title for the pack, thumbnail, and posts")
+    ship_p.add_argument("--resolution", choices=RESOLUTIONS, default="1080p")
+    ship_p.add_argument("--no-portrait", action="store_true", help="skip the 9:16 portrait render")
     sub.add_parser("key", help="check that xAI accepts XAI_API_KEY")
     bench_p = sub.add_parser("bench", help="score the prompts against cuts finished by hand")
     bench_sub = bench_p.add_subparsers(dest="bench_cmd", required=True)
@@ -235,6 +434,19 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         if args.cmd == "run":
+            run_extra: dict = {}
+            if args.resolution != "source":
+                run_extra["resolution"] = args.resolution
+            if args.aspect != "source":
+                run_extra["aspect"] = args.aspect
+            if args.pip:
+                run_extra["pip"] = True
+            if args.preset != "custom":
+                run_extra["preset"] = args.preset
+            if args.music:
+                run_extra["music"] = args.music
+            if args.live_title:
+                run_extra["live_title"] = args.live_title
             run(
                 args.files,
                 args.out,
@@ -250,16 +462,36 @@ def main(argv: list[str] | None = None) -> None:
                 broll_sound=args.b_roll_sound,
                 zoom=args.zoom,
                 angle_files=args.angle_file,
+                **run_extra,
             )
         elif args.cmd == "render":
+            render_extra: dict = {}
+            if args.resolution is not None:
+                render_extra["resolution"] = args.resolution
+            if args.aspect is not None:
+                render_extra["aspect"] = args.aspect
+            if args.out_file is not None:
+                render_extra["out_file"] = args.out_file
+            if args.pip is not None:
+                render_extra["pip"] = args.pip
+            if args.music is not None:
+                render_extra["music"] = args.music
+            if args.live_title is not None:
+                render_extra["live_title"] = args.live_title
             render_saved(
                 args.cuts,
                 scene_transition=args.scene_transition,
                 broll_sound=args.b_roll_sound,
                 zoom=args.zoom,
+                **render_extra,
             )
         elif args.cmd == "captions":
-            captions(args.cuts, burn=args.burn)
+            cap_extra: dict = {}
+            if args.style != "srt":
+                cap_extra["style"] = args.style
+            if args.lower_third:
+                cap_extra["lower_third"] = True
+            captions(args.cuts, burn=args.burn, **cap_extra)
         elif args.cmd == "short":
             make_short(args.cuts)
         elif args.cmd == "revise":
@@ -277,7 +509,48 @@ def main(argv: list[str] | None = None) -> None:
                     history=args.history,
                 )
         elif args.cmd == "card":
-            make_card(args.sentence, args.out)
+            card_extra: dict = {}
+            if args.style != "ai":
+                card_extra["style"] = args.style
+            if args.aspect != "landscape":
+                card_extra["aspect"] = args.aspect
+            if args.from_video:
+                card_extra["from_video"] = args.from_video
+            make_card(args.sentence, args.out, **card_extra)
+        elif args.cmd == "brand":
+            if args.brand_cmd == "init":
+                path = brand_kit.init_brand()
+                print(f"Brand kit ready at {path}")
+            else:
+                print(json.dumps(brand_kit.load_brand(), indent=2))
+        elif args.cmd == "thumb":
+            from botcut.thumb import make_photo_thumb
+
+            res = make_photo_thumb(
+                args.cuts,
+                title=args.title,
+                subtitle=args.subtitle,
+                brand_name=args.brand,
+                out_jpg=args.out,
+                out_card_mp4=args.card,
+                aspect=args.aspect,
+                embed=args.embed,
+            )
+            if res.get("jpg"):
+                print(f"Wrote {os.path.abspath(res['jpg'])}", flush=True)
+            if res.get("card"):
+                print(f"Wrote {os.path.abspath(res['card'])}", flush=True)
+        elif args.cmd == "ship":
+            from botcut.ship import make_ship_pack
+
+            pack = make_ship_pack(
+                args.cuts,
+                args.out,
+                title=args.title,
+                resolution=args.resolution,
+                include_portrait=not args.no_portrait,
+            )
+            print(f"Ship Pack ready at {pack['dir']}", flush=True)
         elif args.cmd == "key":
             check_key()
         elif args.cmd == "bench":
@@ -290,6 +563,9 @@ def main(argv: list[str] | None = None) -> None:
             else:
                 for name in bench.case_names():
                     print(name)
+    except KeyboardInterrupt:
+        print("Cancelled", file=sys.stderr, flush=True)
+        sys.exit(130)
     except BrokenPipeError:
         sys.exit(0)
 
@@ -309,13 +585,42 @@ def run(
     broll_sound: str = "mix",
     zoom: str = "off",
     angle_files: list[str] | None = None,
+    resolution: str = "source",
+    aspect: str = "source",
+    pip: bool = False,
+    preset: str = "custom",
+    music: str | None = None,
+    live_title: str | None = None,
 ) -> None:
     if mode not in ("speech", "assemble"):
         raise SystemExit(f"Unknown mode: {mode}")
+    if preset != "custom":
+        cfg = brand_kit.preset_config(preset)
+        if resolution == "source":
+            resolution = cfg["resolution"]
+        if aspect == "source":
+            aspect = cfg["aspect"]
+        if max_pause == 0.8:
+            max_pause = float(cfg["max_pause"])
+        if zoom == "off":
+            zoom = str(cfg["zoom"])
+        if not pip:
+            pip = bool(cfg["pip"])
+        if not intent.strip() and cfg.get("intent"):
+            intent = str(cfg["intent"])
+        if music is None and cfg.get("music"):
+            music = brand_kit.resolve_music(None, brand_kit.load_brand())
+    if max_pause <= 0:
+        raise SystemExit("--max-pause must be greater than 0")
     clock = _Clock()
     paths = resolve_inputs(files)
     # Assemble plays every file in order with its own sound, so a B-roll mark means nothing there.
-    roles = _broll_roles(paths, [*(broll_files or []), *resolve_broll(files)]) if mode == "speech" else set()
+    image_roles = {i for i, p in enumerate(paths) if is_image(p)} if mode == "speech" else set()
+    roles = (
+        (_broll_roles(paths, [*(broll_files or []), *resolve_broll(files)]) | image_roles)
+        if mode == "speech"
+        else set()
+    )
     other_cameras = (
         _broll_roles(paths, [*(angle_files or []), *resolve_angles(files)], what="A second camera")
         if mode == "speech"
@@ -324,14 +629,18 @@ def run(
     if roles & other_cameras:
         raise SystemExit("A file is B-roll or a second camera, not both")
     print("Reading files", flush=True)
-    clips = []
-    for index, path in enumerate(paths):
+    for path in paths:
         if not os.path.isfile(path):
             raise SystemExit(f"No such file: {path}")
+
+    def _probe_one(item: tuple[int, str]) -> dict:
+        index, path = item
         clip = probe(path, need_audio=index not in roles)
         if index in roles:
             clip["role"] = "broll"
-        clips.append(clip)
+        return clip
+
+    clips = _pool_map(_probe_one, enumerate(paths))
     if mode == "assemble":
         segs = [
             {"clip": i, "start": 0.0, "end": float(clip["duration"]), "reason": "assemble"}
@@ -348,7 +657,22 @@ def run(
             "dropped": [],
         }
         clock.lap("read")
-        _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, fresh=True, zoom=zoom)
+        _write_cut(
+            out,
+            doc,
+            segs,
+            clips,
+            scene_transition,
+            broll_sound,
+            clock=clock,
+            fresh=True,
+            zoom=zoom,
+            resolution=resolution,
+            aspect=aspect,
+            pip=pip,
+            music=music,
+            live_title=live_title,
+        )
         return
 
     fake = os.environ.get("BOTCUT_FAKE") == "1"
@@ -374,13 +698,18 @@ def run(
         if not is_card(clip["path"]) and not is_broll(clip) and not cameras.is_angle(clip)
     ]
     clock.lap("read")
-    for index, clip in enumerate(clips):
-        if is_broll(clip):
-            # B-roll is picture. It is not transcribed and never becomes a line.
-            if not beats_by_clip:
-                print("Reading beats", flush=True)
-            beats_by_clip[index] = _beats_for_clip(work, index, Path(clip["path"]).stem, clip)
-    if beats_by_clip:
+    broll_list = [(index, clip) for index, clip in enumerate(clips) if is_broll(clip)]
+    if broll_list:
+        print("Reading beats", flush=True)
+        # B-roll is picture. It is not transcribed and never becomes a line.
+        for (index, _clip), beats in zip(
+            broll_list,
+            _pool_map(
+                lambda item: _beats_for_clip(work, item[0], Path(item[1]["path"]).stem, item[1]),
+                broll_list,
+            ),
+        ):
+            beats_by_clip[index] = beats
         clock.lap("beats")
 
     def listen(index: int, clip: dict) -> tuple[list, list]:
@@ -391,6 +720,20 @@ def run(
             Path(cache).write_text(json.dumps(payload) + "\n")
             return payload["words"], []
         flac = os.path.join(work, f"{index}-{stem}.flac")
+        if backend == "xai":
+            from concurrent.futures import ThreadPoolExecutor
+
+            sp = ThreadPoolExecutor(max_workers=1)
+            sil_future = sp.submit(_silences_for_clip, work, index, stem, flac, clip)
+            try:
+                words = _words_for_clip(work, index, stem, backend, flac, clip, whisper_model, terms)
+                pauses = sil_future.result()
+            except BaseException:
+                sp.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                sp.shutdown(wait=True)
+            return words, pauses
         words = _words_for_clip(work, index, stem, backend, flac, clip, whisper_model, terms)
         return words, _silences_for_clip(work, index, stem, flac, clip)
 
@@ -411,18 +754,20 @@ def run(
     else:
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            waiting = {pool.submit(listen, index, clip): index for index, clip in speech}
-            try:
-                for done, future in enumerate(as_completed(waiting), start=1):
-                    index = waiting[future]
-                    words_by_clip[index], silences_by_clip[index] = future.result()
-                    if done < len(speech):
-                        said(done + 1)
-            except BaseException:
-                # One shot failing stops the cut. The shots not yet started are not sent.
-                pool.shutdown(wait=False, cancel_futures=True)
-                raise
+        pool = ThreadPoolExecutor(max_workers=workers)
+        waiting = {pool.submit(listen, index, clip): index for index, clip in speech}
+        try:
+            for done, future in enumerate(as_completed(waiting), start=1):
+                index = waiting[future]
+                words_by_clip[index], silences_by_clip[index] = future.result()
+                if done < len(speech):
+                    said(done + 1)
+        except BaseException:
+            # One shot failing stops the cut. The shots not yet started are not sent.
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            pool.shutdown(wait=True)
 
     utts = utterances(words_by_clip)
     clock.lap("listen")
@@ -472,7 +817,10 @@ def run(
     kept = [line for line in lines if line["keep"]]
     lines, segs = merge_cards(lines, segs, clips, movie)
     # One line may open the movie. The proof names it, having read the cut without it in place.
-    opening = hook_line(lines, changes["hook"])
+    # When a live title overlay is set, open on the actual start of the video instead of lifting
+    # a hook from later in the shoot (which creates a jarring jump when the title fades out).
+    has_live_title = bool(live_title and str(live_title).strip())
+    opening = None if has_live_title else hook_line(lines, changes["hook"])
     hook = int(opening["id"]) if opening else None
     segs = play_order(segs, lines, hook)
     covers: list = []
@@ -543,7 +891,22 @@ def run(
         clock.lap("write")
         _took(out, clock, fresh=True)
         return
-    _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, fresh=True, zoom=zoom)
+    _write_cut(
+        out,
+        doc,
+        segs,
+        clips,
+        scene_transition,
+        broll_sound,
+        clock=clock,
+        fresh=True,
+        zoom=zoom,
+        resolution=resolution,
+        aspect=aspect,
+        pip=pip,
+        music=music,
+        live_title=live_title,
+    )
 
 
 def _clip_row(index: int, clip: dict) -> dict:
@@ -623,13 +986,12 @@ def find_cameras(work: str, clips: list[dict], marked: set[int]) -> None:
     except (OSError, ValueError, KeyError, AttributeError):
         found = None
     if found is None:
-        from concurrent.futures import ThreadPoolExecutor
-
         print("Listening for a second camera", flush=True)
-        with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
-            sounds = dict(zip(spoken, pool.map(lambda index: sync.load(clips[index]["path"]), spoken)))
+        sounds = dict(zip(spoken, _pool_map(lambda index: sync.load(clips[index]["path"]), spoken)))
         found = {}
-        for index in spoken:
+        # Process unmarked clips first so marked second cameras cannot chain onto another angle.
+        order = [index for index in spoken if index not in marked] + [index for index in spoken if index in marked]
+        for index in order:
             if sounds[index] is None:
                 continue
             best = None
@@ -700,16 +1062,19 @@ def plan_cameras(doc: dict, clips: list[dict], segs: list[dict], out: str) -> No
     )
     by_id = {int(line["id"]): line for line in lines if isinstance(line, dict) and "id" in line}
     stills = os.path.join(out, "work", "stills")
-    for run in runs:
-        # A frame of the other camera at the moment the run starts, for the row that shows it.
-        first = by_id.get(run["line"])
-        clip = clips[run["clip"]]
-        if first is None or os.environ.get("BOTCUT_FAKE") == "1":
-            continue
-        at = cameras.angle_time(clip, (float(first["start"]) + float(first["end"])) / 2)
-        still = os.path.join(stills, f"angle-{run['clip']}-{run['line']}.jpg")
-        if os.path.isfile(still) or grab_still(clip["path"], at, still):
-            run["still"] = os.path.abspath(still)
+    if os.environ.get("BOTCUT_FAKE") != "1" and runs:
+        def _grab_run(run: dict) -> None:
+            # A frame of the other camera at the moment the run starts, for the row that shows it.
+            first = by_id.get(run["line"])
+            if first is None:
+                return
+            clip = clips[run["clip"]]
+            at = cameras.angle_time(clip, (float(first["start"]) + float(first["end"])) / 2)
+            still = os.path.join(stills, f"angle-{run['clip']}-{run['line']}.jpg")
+            if cached_still(clip["path"], at, still):
+                run["still"] = os.path.abspath(still)
+
+        _pool_map(_grab_run, runs)
     if runs:
         doc["angles"] = runs
     if not asked["off"]:
@@ -718,10 +1083,6 @@ def plan_cameras(doc: dict, clips: list[dict], segs: list[dict], out: str) -> No
 
 def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
     """One JPEG at the middle of each line. A missed frame does not stop the cut."""
-    from botcut.media import grab_still
-
-    from concurrent.futures import ThreadPoolExecutor
-
     print("Reading pictures", flush=True)
     os.makedirs(directory, exist_ok=True)
 
@@ -732,14 +1093,11 @@ def _attach_stills(utts: list[dict], clips: list[dict], directory: str) -> None:
         if dur > 0:
             mid = min(max(0.0, mid), max(0.0, dur - 0.05))
         dest = os.path.join(directory, f"{int(utt['id'])}.jpg")
-        # A still from an earlier run of this cut is the same frame. One older than the shot is not.
-        fresh = os.path.isfile(dest) and os.path.getmtime(dest) >= os.path.getmtime(clip["path"])
-        if fresh or grab_still(clip["path"], mid, dest):
+        if cached_still(clip["path"], mid, dest):
             utt["still"] = os.path.abspath(dest)
 
     # Each still is one short ffmpeg seek, so several at once is the quick way through a long list.
-    with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
-        list(pool.map(grab, utts))
+    _pool_map(grab, utts)
 
 
 def _review(doc: dict, segs: list, zoom: str = "off") -> None:
@@ -773,16 +1131,49 @@ def _write_cut(
     clock: _Clock | None = None,
     fresh: bool = False,
     zoom: str = "off",
+    resolution: str = "source",
+    aspect: str = "source",
+    out_file: str | None = None,
+    pip: bool = False,
+    music: str | None = None,
+    live_title: str | None = None,
 ) -> None:
-    _review(doc, segs, zoom)
-    _write_doc(out, doc)
+    if resolution != "source":
+        doc["resolution"] = resolution
+    else:
+        doc.pop("resolution", None)
+    if aspect != "source":
+        doc["aspect"] = aspect
+    else:
+        doc.pop("aspect", None)
+    if pip:
+        doc["pip"] = True
+    else:
+        doc.pop("pip", None)
+    if music:
+        doc["music"] = os.path.abspath(music)
+    else:
+        doc.pop("music", None)
+    if live_title and str(live_title).strip():
+        doc["live_title"] = str(live_title).strip()
+    else:
+        doc.pop("live_title", None)
+    if out_file is None:
+        _review(doc, segs, zoom)
+        _write_doc(out, doc)
     if not segs:
         raise SystemExit("No segments to render")
-    dst = os.path.join(out, "rough_cut.mp4")
-    _level_clips(os.path.join(out, "work"), clips)
-    if zoom != "off":
-        # Where the speaker is at each line, so a zoom follows someone who moves.
-        faces_along(os.path.join(out, "work"), clips, doc.get("lines"))
+    dst = os.path.abspath(out_file) if out_file else os.path.join(out, "rough_cut.mp4")
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    work = os.path.join(out, "work")
+    _level_clips(work, clips)
+    if doc.get("angles"):
+        from botcut.color import match_cameras
+
+        match_cameras(work, clips)
+    if zoom != "off" or aspect == "portrait" or pip:
+        # Where the speaker is at each line (and on second cameras), for zoom, PiP, and portrait framing.
+        faces_along(work, clips, doc.get("lines"), angles=doc.get("angles"))
     if clock:
         clock.lap("level")
     made = render_with_progress(
@@ -799,6 +1190,12 @@ def _write_cut(
         zoom=zoom,
         close=doc.get("close"),
         angles=doc.get("angles") or None,
+        resolution=resolution,
+        aspect=aspect,
+        work_dir=work,
+        pip=pip,
+        music=music,
+        live_title=live_title,
     )
     kept_s = sum(seg["end"] - seg["start"] for seg in segs)
     total_s = sum(clip["duration"] for clip in clips)
@@ -806,13 +1203,22 @@ def _write_cut(
     if made and not fresh and made["pieces"] > made["made"]:
         # A change to a cut that was already rendered only makes what the change touched.
         print(f"Made {made['made']} of {made['pieces']} pieces again.", flush=True)
-    if clock:
+    if clock and out_file is None:
         clock.lap("render")
         _took(out, clock, fresh)
 
 
 def render_saved(
-    cuts: str, scene_transition: str = "dip", broll_sound: str = "mix", zoom: str = "off"
+    cuts: str,
+    scene_transition: str = "dip",
+    broll_sound: str = "mix",
+    zoom: str = "off",
+    resolution: str | None = None,
+    aspect: str | None = None,
+    out_file: str | None = None,
+    pip: bool | None = None,
+    music: str | None = None,
+    live_title: str | None = None,
 ) -> None:
     """Encode rough_cut.mp4 from a cuts.json the tray has already confirmed."""
     clock = _Clock()
@@ -830,8 +1236,7 @@ def render_saved(
     rows = sorted(doc.get("clips") or [], key=lambda clip: int(clip["index"]))
     if not rows:
         raise SystemExit("cuts.json has no clips")
-    clips = []
-    for row in rows:
+    def _probe_row(row: dict) -> dict:
         broll = str(row.get("role") or "") == "broll"
         clip = probe(row["path"], need_audio=not broll)
         if broll:
@@ -845,8 +1250,12 @@ def render_saved(
             clip["view"] = row["view"]
         if row.get("face"):
             clip["face"] = row["face"]
-        clips.append(clip)
+        return clip
+
+    clips = _pool_map(_probe_row, rows)
     lines = doc.get("lines") or []
+    eff_live_title = live_title if live_title is not None else (doc.get("live_title") or None)
+    newly_added_live_title = bool(eff_live_title and str(eff_live_title).strip()) and not bool(doc.get("live_title"))
     # A hand trim on Watch owns the segments. Rebuilding from lines would undo it.
     if lines and not doc.get("trimmed"):
         tighten_doc = doc.get("tighten") or {}
@@ -858,7 +1267,8 @@ def render_saved(
             float(tighten_doc.get("max_pause", 0.8)),
         )
         # The opening line plays first for as long as it is kept. Dropped, it opens nothing.
-        if hook_line(lines, doc.get("hook")) is None:
+        # Adding a live title clears any lifted hook so the title fades over the actual opening footage.
+        if newly_added_live_title or hook_line(lines, doc.get("hook")) is None:
             doc.pop("hook", None)
         # A line shown close is one that is still in the movie.
         close = close_ids(doc.get("close"), lines)
@@ -883,7 +1293,31 @@ def render_saved(
         segs = doc.get("segments") or []
     plan_cameras(doc, clips, segs, out)
     clock.lap("read")
-    _write_cut(out, doc, segs, clips, scene_transition, broll_sound, clock=clock, zoom=zoom)
+    eff_res = resolution if resolution is not None else str(doc.get("resolution") or "source")
+    eff_aspect = aspect if aspect is not None else str(doc.get("aspect") or "source")
+    eff_pip = bool(doc.get("pip")) if pip is None else bool(pip)
+    eff_music = music if music is not None else (doc.get("music") or None)
+    eff_live_title = live_title if live_title is not None else (doc.get("live_title") or None)
+    if eff_res not in RESOLUTIONS:
+        eff_res = "source"
+    if eff_aspect not in ASPECTS:
+        eff_aspect = "source"
+    _write_cut(
+        out,
+        doc,
+        segs,
+        clips,
+        scene_transition,
+        broll_sound,
+        clock=clock,
+        zoom=zoom,
+        resolution=eff_res,
+        aspect=eff_aspect,
+        out_file=out_file,
+        pip=eff_pip,
+        music=eff_music,
+        live_title=eff_live_title,
+    )
 
 
 def _segments_for_lines(
@@ -936,8 +1370,7 @@ def _words_for_clip(
         if os.path.isfile(cache):
             print(f"cache hit {cache}")
             return json.loads(Path(cache).read_text())["words"]
-    if not os.path.isfile(flac):
-        extract_audio(clip["path"], flac)
+    _ensure_flac(clip["path"], flac)
     if backend == "local":
         result = transcribe_local(flac, whisper_model, stem, terms)
     else:
@@ -969,16 +1402,22 @@ def _drop_stale_caches(work: str, index: int, clip: dict, stt_label: str) -> Non
         return
     if known is not None:
         prefix = f"{index}-{stem}."
+        same_file = (
+            isinstance(known, dict)
+            and known.get("size") == stamp["size"]
+            and known.get("mtime_ns") == stamp["mtime_ns"]
+        )
         for name in os.listdir(work):
-            if name.startswith(prefix) and name != os.path.basename(stamp_path):
-                os.remove(os.path.join(work, name))
+            if not name.startswith(prefix) or name == os.path.basename(stamp_path):
+                continue
+            if same_file and not name.endswith(".words.json"):
+                continue
+            os.remove(os.path.join(work, name))
     Path(stamp_path).write_text(json.dumps(stamp) + "\n")
 
 
 def _level_clips(work: str, clips: list[dict]) -> None:
     """Note how loud each spoken shot is, once, so the render can match them to each other."""
-    from concurrent.futures import ThreadPoolExecutor
-
     from botcut.media import loudness
 
     os.makedirs(work, exist_ok=True)
@@ -996,12 +1435,13 @@ def _level_clips(work: str, clips: list[dict]) -> None:
         if value is not None:
             clip["loudness"] = value
 
-    with ThreadPoolExecutor(max_workers=STILL_WORKERS) as pool:
-        list(pool.map(heard, enumerate(clips)))
+    _pool_map(heard, enumerate(clips))
 
 
 def _beats_for_clip(work: str, index: int, stem: str, clip: dict) -> list:
-    """Scene changes once per B-roll file. BOTCUT_FAKE uses fixed windows and no ffmpeg."""
+    """Scene changes once per B-roll file. Still images are one beat. BOTCUT_FAKE uses fixed windows."""
+    if clip.get("is_image"):
+        return [(0.0, float(clip.get("duration") or 12.0))]
     cache = os.path.join(work, f"{index}-{stem}.beats.json")
     if os.path.isfile(cache):
         return [tuple(pair) for pair in json.loads(Path(cache).read_text())]
@@ -1018,8 +1458,7 @@ def _silences_for_clip(work: str, index: int, stem: str, flac: str, clip: dict) 
     cache = os.path.join(work, f"{index}-{stem}.silences.json")
     if os.path.isfile(cache):
         return [tuple(pair) for pair in json.loads(Path(cache).read_text())]
-    if not os.path.isfile(flac):
-        extract_audio(clip["path"], flac)
+    _ensure_flac(clip["path"], flac)
     pairs = silences(flac, clip["duration"])
     Path(cache).write_text(json.dumps(pairs) + "\n")
     return pairs
@@ -1036,11 +1475,50 @@ def _stt_label(
     return f"xai:grok-voice-transcribe-2.0{terms_mark(terms)}"
 
 
-def captions(cuts_path: str, burn: bool = False) -> None:
+def captions(
+    cuts_path: str,
+    burn: bool = False,
+    style: str = "srt",
+    lower_third: bool = False,
+) -> None:
     out_dir, doc = load_cuts(cuts_path)
     mapped = remap_words(doc.get("segments") or [], load_words_by_clip(doc, out_dir))
+    if not mapped:
+        raise SystemExit("No words to caption")
+    if style == "social":
+        src = os.path.join(out_dir, "rough_cut.mp4")
+        width, height = 1920, 1080
+        if os.path.isfile(src):
+            info = probe(src, need_audio=False)
+            if int(info.get("width") or 0) > 0 and int(info.get("height") or 0) > 0:
+                width, height = int(info["width"]), int(info["height"])
+        kit = brand_kit.load_brand()
+        lt = (kit["speaker_name"], kit["speaker_title"]) if lower_third and kit.get("speaker_name") else None
+        ass_text = to_ass(mapped, width=width, height=height, brand=kit, lower_third=lt)
+        ass_path = os.path.join(out_dir, "rough_cut.ass")
+        Path(ass_path).write_text(ass_text, encoding="utf-8")
+        print(f"Wrote {os.path.abspath(ass_path)}")
+        if not burn:
+            return
+        require_subtitles()
+        if not os.path.isfile(src):
+            raise SystemExit(f"No such file: {src}")
+        duration = float(probe(src, need_audio=False).get("duration") or 0)
+        encoder, device = resolve_encoder()
+        _run_ffmpeg_progress(
+            burn_ass_args("rough_cut.ass", encoder=encoder, device=device),
+            duration,
+            "Burning captions",
+            "Caption burn failed",
+            cwd=out_dir,
+        )
+        print(f"Wrote {os.path.abspath(os.path.join(out_dir, 'rough_cut.captioned.mp4'))}")
+        return
+    srt = to_srt(mapped)
+    if not srt.strip():
+        raise SystemExit("No words to caption")
     srt_path = os.path.join(out_dir, "rough_cut.srt")
-    Path(srt_path).write_text(to_srt(mapped))
+    Path(srt_path).write_text(srt)
     print(f"Wrote {os.path.abspath(srt_path)}")
     if not burn:
         return
@@ -1048,16 +1526,15 @@ def captions(cuts_path: str, burn: bool = False) -> None:
     src = os.path.join(out_dir, "rough_cut.mp4")
     if not os.path.isfile(src):
         raise SystemExit(f"No such file: {src}")
+    duration = float(probe(src, need_audio=False).get("duration") or 0)
     encoder, device = resolve_encoder()
-    proc = subprocess.run(
-        ["ffmpeg", *burn_args(encoder=encoder, device=device)],
+    _run_ffmpeg_progress(
+        burn_args(encoder=encoder, device=device),
+        duration,
+        "Burning captions",
+        "Caption burn failed",
         cwd=out_dir,
-        capture_output=True,
-        text=True,
     )
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[-500:] or "ffmpeg failed"
-        raise SystemExit(f"Caption burn failed: {detail}")
     print(f"Wrote {os.path.abspath(os.path.join(out_dir, 'rough_cut.captioned.mp4'))}")
 
 
@@ -1095,39 +1572,40 @@ def make_short(cuts_path: str) -> None:
                 "end": min(word["end"], end) - start,
             }
         )
-    Path(os.path.join(out_dir, "short.srt")).write_text(to_srt(window))
+    srt = to_srt(window)
+    if not window or not srt.strip():
+        raise SystemExit("No words to caption")
+    Path(os.path.join(out_dir, "short.srt")).write_text(srt)
     src = os.path.join(out_dir, "rough_cut.mp4")
     if not os.path.isfile(src):
         raise SystemExit(f"No such file: {src}")
     require_subtitles()
     info = probe(src)
     encoder, device = resolve_encoder()
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            *short_args(
-                start,
-                length,
-                int(info["width"]),
-                int(info["height"]),
-                encoder=encoder,
-                device=device,
-                center=_short_center(doc, int(choice["start_id"])),
-            ),
-        ],
+    _run_ffmpeg_progress(
+        short_args(
+            start,
+            length,
+            int(info["width"]),
+            int(info["height"]),
+            encoder=encoder,
+            device=device,
+            center=_short_center(doc, int(choice["start_id"])),
+        ),
+        length,
+        "Rendering short",
+        "Short render failed",
         cwd=out_dir,
-        capture_output=True,
-        text=True,
     )
-    if proc.returncode != 0:
-        detail = (proc.stderr or "").strip()[-500:] or "ffmpeg failed"
-        raise SystemExit(f"Short render failed: {detail}")
     dst = os.path.abspath(os.path.join(out_dir, "short.mp4"))
     print(f'Wrote {dst} "{choice["title"]}" ({length:.1f}s)')
 
 
 def load_cuts(cuts_path: str) -> tuple[str, dict]:
-    path = os.path.abspath(cuts_path)
+    path = cuts_path
+    if os.path.isdir(path):
+        path = os.path.join(path, "cuts.json")
+    path = os.path.abspath(path)
     if not os.path.isfile(path):
         raise SystemExit(f"No such file: {path}")
     try:

@@ -50,6 +50,8 @@ QStringList trimArgs(const QString &src, const QString &dst,
 // BOTCUT_ENCODER=x264 skips the GPU. BOTCUT_ENCODER=vaapi sets *error when no
 // device opens. Unset uses the first node that opens.
 QString vaapiDevice(QString *error = nullptr);
+// Warm up VA-API device discovery on a background thread so the first export does not block.
+void warmupVaapi();
 
 // Locate a tool on PATH; returns empty string if missing.
 QString toolPath(const QString &tool);

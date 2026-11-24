@@ -12,6 +12,7 @@
         <file alias="ActionBar.qml">ActionBar.qml</file>
         <file alias="PlayButton.qml">PlayButton.qml</file>
         <file alias="SettingsDialog.qml">SettingsDialog.qml</file>
+        <file alias="ExportDialog.qml">ExportDialog.qml</file>
         <file alias="HelpDialog.qml">HelpDialog.qml</file>
         <file alias="QuitDialog.qml">QuitDialog.qml</file>
         <file alias="TitleCardDialog.qml">TitleCardDialog.qml</file>

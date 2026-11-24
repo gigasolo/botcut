@@ -10,6 +10,7 @@ public:
     virtual QString load() = 0;
     virtual bool save(const QString &secret) = 0;
     virtual bool forget() = 0;
+    virtual QString lastError() const { return {}; }
 };
 
 class MemoryKeyStore : public KeyStore {
@@ -33,4 +34,8 @@ public:
     QString load() override;
     bool save(const QString &secret) override;
     bool forget() override;
+    QString lastError() const override { return m_lastError; }
+
+private:
+    QString m_lastError;
 };

@@ -124,15 +124,18 @@ def compare(want: list[dict], got: list[dict]) -> dict:
             continue
         cuts_offered += len(mine)
         cuts_same += sum(1 for a, b in zip(mine, theirs) if bool(a.get("cut")) == bool(b.get("cut")))
+    got_s = seconds(got_keep)
+    want_s = seconds(want_keep)
+    both_s = seconds(both)
     return {
         "lines": len(chosen),
         "flipped": len(want_keep ^ got_keep),
         # Of what the model kept, how much the person kept too.
-        "precision": round(seconds(both) / seconds(got_keep), 3) if got_keep else 1.0,
+        "precision": round(both_s / got_s, 3) if got_s > 0 else 1.0,
         # Of what the person kept, how much the model kept.
-        "recall": round(seconds(both) / seconds(want_keep), 3) if want_keep else 1.0,
-        "kept_seconds": round(seconds(got_keep), 1),
-        "want_seconds": round(seconds(want_keep), 1),
+        "recall": round(both_s / want_s, 3) if want_s > 0 else 1.0,
+        "kept_seconds": round(got_s, 1),
+        "want_seconds": round(want_s, 1),
         "cuts_same": cuts_same,
         "cuts_offered": cuts_offered,
     }

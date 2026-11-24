@@ -22,6 +22,7 @@ Rectangle {
     }
 
     function pickShots() {
+        host.endCutChain()
         host.shotsPinned = true
         if (host.hasVideo)
             backend.showShots()
@@ -29,6 +30,7 @@ Rectangle {
     function pickLines() {
         if (backend.selects.length === 0)
             return
+        host.endCutChain()
         host.shotsPinned = false
         if (host.hasVideo)
             backend.showShots()
@@ -36,6 +38,7 @@ Rectangle {
     function pickMovie() {
         if (!host.hasVideo)
             return
+        host.endCutChain()
         backend.showMovie()
     }
 

@@ -243,9 +243,9 @@ def test_the_short_is_cropped_around_the_speaker():
     assert vertical_left(1920, 1080, 0.02) == 0
     assert vertical_left(1920, 1080, 0.99) == 1314
     follows = short_args(1.0, 30.0, 1920, 1080, center=0.7)
-    assert "crop=ih*9/16:ih:1041:0" in follows[follows.index("-vf") + 1]
+    assert "crop=606:1080:1041:0" in follows[follows.index("-vf") + 1]
     middle = short_args(1.0, 30.0, 1920, 1080)
-    assert "crop=ih*9/16:ih," in middle[middle.index("-vf") + 1]
+    assert "crop=606:1080," in middle[middle.index("-vf") + 1]
 
     doc = {
         "lines": [{"id": 0, "clip": 0}, {"id": 1, "clip": 1}],
@@ -408,3 +408,48 @@ def test_faces_are_found_once_per_still_and_a_still_without_one_adds_nothing(tmp
     again = [_clip("/tmp/talk.mp4")]
     frame.faces_along(str(tmp_path), again, lines)
     assert again[0]["faces"] == [[4.0, 0.2, 0.3]] and len(looked) == 2
+
+
+def test_find_faces_does_not_cache_transient_errors_and_recovers_from_corrupt_cache(monkeypatch, tmp_path):
+    monkeypatch.delenv("BOTCUT_FAKE", raising=False)
+    monkeypatch.setenv("XAI_API_KEY", "secret")
+    monkeypatch.setattr("botcut.media.grab_still", lambda video, at, dest: open(dest, "wb").write(b"jpeg") > 0)
+    monkeypatch.setattr("botcut.net.time.sleep", lambda _s: None)
+
+    def down(*_a, **_k):
+        raise __import__("requests").ConnectionError("down")
+
+    monkeypatch.setattr("botcut.net.requests.post", down)
+    work = tmp_path / "work"
+    clip_path = tmp_path / "talk.mp4"
+    clips = [_clip(str(clip_path))]
+    find_faces(str(work), clips, lambda _c: True)
+    cache = work / "0-talk.face.json"
+    assert not cache.exists()
+    assert "face" not in clips[0]
+
+    # Corrupt cache file is treated as a miss and overwritten on valid response.
+    cache.write_text("{corrupt")
+
+    class NoFaceReply:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": json.dumps(
+                {"found": False, "x": 0, "y": 0, "w": 0, "h": 0}
+            )}}]}
+
+    calls = {"n": 0}
+
+    def ok_no_face(*_a, **_k):
+        calls["n"] += 1
+        return NoFaceReply()
+
+    monkeypatch.setattr("botcut.net.requests.post", ok_no_face)
+    find_faces(str(work), clips, lambda _c: True)
+    assert calls["n"] == 1
+    assert json.loads(cache.read_text()) == {"face": None}
+    # Genuine found: false IS cached so a second run makes no API call.
+    find_faces(str(work), clips, lambda _c: True)
+    assert calls["n"] == 1

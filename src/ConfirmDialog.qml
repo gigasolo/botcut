@@ -9,6 +9,11 @@ Item {
     visible: host && host.confirmCutOpen
     z: 46
 
+    onVisibleChanged: {
+        if (visible)
+            confirmButton.forceActiveFocus()
+    }
+
     Rectangle {
         anchors.fill: parent
         color: theme.scrim
@@ -53,12 +58,17 @@ Item {
                 Item { Layout.fillWidth: true }
                 ActionButton {
                     text: qsTr("Keep this list")
+                    focusPolicy: Qt.TabFocus
                     onClicked: host.confirmCutOpen = false
                 }
                 ActionButton {
+                    id: confirmButton
                     text: qsTr("Cut again")
                     filled: true
+                    focusPolicy: Qt.TabFocus
                     enabled: !backend.busy
+                    Keys.onReturnPressed: clicked()
+                    Keys.onEnterPressed: clicked()
                     onClicked: {
                         host.confirmCutOpen = false
                         backend.startCut()

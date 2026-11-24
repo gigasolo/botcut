@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QDBusServiceWatcher>
 #include <QVariantMap>
 
 #include "filepicker.h"
@@ -39,4 +40,5 @@ private:
 
     QString m_pendingPath;
     Action m_pendingAction = Action::None;
+    QDBusServiceWatcher *m_portalWatcher = nullptr;
 };

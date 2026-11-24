@@ -417,3 +417,36 @@ def test_two_takes_that_do_not_match_stop_a_marked_camera_and_are_left_alone_unm
     assert "role" not in clips[0] and "role" not in clips[1]
     with pytest.raises(SystemExit, match="Could not line up b.mp4"):
         cli.find_cameras(str(work), clips, {1})
+
+
+def test_find_cameras_prevents_marked_angle_chaining_onto_unmarked_angle(tmp_path, monkeypatch):
+    from botcut import cli, sync
+
+    monkeypatch.delenv("BOTCUT_FAKE", raising=False)
+    clips = []
+    for name in ("cam0.mp4", "cam1_marked.mp4", "cam2_unmarked.mp4"):
+        p = tmp_path / name
+        p.write_bytes(b"x")
+        clips.append({"path": str(p), "duration": 20.0, "audio": True})
+
+    monkeypatch.setattr(sync, "load", lambda path: path)
+
+    # cam2_unmarked matches cam0 (so cam2 becomes an angle of cam0).
+    # cam1_marked matches cam2 slightly higher than cam0; without processing unmarked first,
+    # cam1_marked would chain onto cam2 and get dropped by angles.groups().
+    def fake_line_up(main, other, sure=0):
+        if main.endswith("cam0.mp4") and other.endswith("cam2_unmarked.mp4"):
+            return {"start": 0.0, "end": 18.0, "offset": 0.0, "drift": 0.0, "score": 0.9}
+        if main.endswith("cam2_unmarked.mp4") and other.endswith("cam1_marked.mp4"):
+            return {"start": 0.0, "end": 18.0, "offset": 0.0, "drift": 0.0, "score": 0.99}
+        if main.endswith("cam0.mp4") and other.endswith("cam1_marked.mp4"):
+            return {"start": 0.0, "end": 18.0, "offset": 0.0, "drift": 0.0, "score": 0.85}
+        return None
+
+    monkeypatch.setattr(sync, "line_up", fake_line_up)
+    work = tmp_path / "work"
+    work.mkdir()
+    cli.find_cameras(str(work), clips, {1})
+    assert clips[2]["role"] == "angle" and clips[2]["of"] == 0
+    assert clips[1]["role"] == "angle" and clips[1]["of"] == 0
+    assert angles.groups(clips) == {0: [1, 2]}

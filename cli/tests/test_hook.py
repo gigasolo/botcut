@@ -61,6 +61,13 @@ def test_a_hook_at_the_edge_of_a_piece_leaves_no_sliver():
     ]
 
 
+def test_opening_title_card_stays_before_a_lifted_hook():
+    card_seg = {"clip": 1, "start": 0.0, "end": 3.0, "reason": "card"}
+    ordered = play_order([card_seg, *PIECES], LINES, 2)
+    assert ordered[0]["reason"] == "card"
+    assert ordered[1].get("hook") is True
+
+
 def test_no_hook_a_dropped_hook_and_a_card_leave_the_order_alone():
     cards = [*LINES, _line(9, 0.0, 3.0, reason="card", clip=1)]
     for hook in (None, -1, 4, 9, 77, True, "2"):

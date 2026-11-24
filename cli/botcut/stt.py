@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -126,15 +127,20 @@ def transcribe_xai(flac: str, terms: list[str] | tuple[str, ...] = ()) -> dict:
         raise SystemExit("STT response was not a transcript")
 
 
-def transcribe_local(
-    flac: str, model: str, stem: str, terms: list[str] | tuple[str, ...] = ()
-) -> dict:
+@functools.lru_cache(maxsize=1)
+def _whisper_model(model: str, device: str = "cpu", compute_type: str = "int8"):
     try:
         from faster_whisper import WhisperModel
     except ImportError as exc:
         raise SystemExit("Install local STT: uv sync --extra local") from exc
+    return WhisperModel(model, device=device, compute_type=compute_type)
+
+
+def transcribe_local(
+    flac: str, model: str, stem: str, terms: list[str] | tuple[str, ...] = ()
+) -> dict:
     started = time.perf_counter()
-    whisper = WhisperModel(model, device="cpu", compute_type="int8")
+    whisper = _whisper_model(model, "cpu", "int8")
     segments, info = whisper.transcribe(
         flac,
         language="en",

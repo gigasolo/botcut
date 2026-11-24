@@ -180,3 +180,20 @@ def test_key_command_is_offline_under_fake(monkeypatch, capsys):
     _patch_get(monkeypatch, lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("no network")))
     main(["key"])
     assert capsys.readouterr().out.strip() == "Key works"
+
+
+def test_connection_failure_surfaces_sanitized_reason(monkeypatch):
+    def boom(url, timeout=None, **_kwargs):
+        raise requests.ConnectionError("dns failed for supersecret")
+
+    _patch_post(monkeypatch, boom)
+    try:
+        post("https://example.test", key="supersecret", label="LLM", read_timeout=60, send=lambda: {})
+    except SystemExit as exc:
+        msg = str(exc)
+        assert "LLM connection failed" in msg
+        assert "ConnectionError" in msg
+        assert "supersecret" not in msg
+        assert "[redacted]" in msg
+    else:
+        raise AssertionError("connection failure must stop")

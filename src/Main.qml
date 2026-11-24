@@ -40,6 +40,7 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool quitConfirmVisible: false
     property bool settingsOpen: false
+    property bool exportOpen: false
     property bool settingsFromMovie: false
     property bool shotsPinned: false
     property bool titleCardOpen: false
@@ -224,7 +225,7 @@ ApplicationWindow {
     readonly property bool actionNeedsYou: displayStep === "needsKey" || displayStep === "missingShot"
                                            || (!running && backend.lastError !== "")
                                            || displayStep === "allDropped"
-    readonly property bool dialogUp: settingsOpen || helpVisible || titleCardOpen
+    readonly property bool dialogUp: settingsOpen || exportOpen || helpVisible || titleCardOpen
                                      || confirmCutOpen || quitConfirmVisible
     readonly property bool lineKeys: viewStep === "lines" && !controlFocused && !dialogUp
                                      && !backend.busy && !editing && !planPane.paceKeys
@@ -255,12 +256,13 @@ ApplicationWindow {
     readonly property bool unexported: hasVideo && timeline.unexported
     // A rendered movie with no handle edits lives only in /tmp until it is saved.
     readonly property bool looseCut: backend.renderedUnsaved && !unexported
-    // Editing shortcuts go quiet while a dialog is up, a handle is dragged, or a job is running.
-    readonly property bool editing: hasVideo && !gathering && !settingsOpen
-                                   && (backend.planCut ? backend.plan.duration : backend.duration) > 0
+    readonly property real mediaDuration: backend.planCut ? backend.plan.duration : backend.duration
+    // Editing shortcuts go quiet while a dialog is up, a handle is dragged, a job is running, or a text field has focus.
+    readonly property bool editing: hasVideo && !gathering && !settingsOpen && !exportOpen
+                                   && mediaDuration > 0
                                    && !quitConfirmVisible && !helpVisible && !titleCardOpen
                                    && !confirmCutOpen && !editBar.interacting
-                                   && !backend.busy
+                                   && !backend.busy && !controlFocused
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -279,9 +281,12 @@ ApplicationWindow {
     function fileUrl(path) {
         if (!path)
             return "";
-        if (String(path).indexOf("file:") === 0)
+        if (typeof backend.fileUrl === "function")
+            return backend.fileUrl(path);
+        var s = String(path);
+        if (s.indexOf("file:") === 0)
             return path;
-        return "file://" + encodeURI(path);
+        return "file://" + encodeURI(s).replace(/#/g, "%23").replace(/\?/g, "%3F");
     }
     function lineClock(seconds) {
         var whole = Math.max(0, Math.floor(seconds));
@@ -377,9 +382,25 @@ ApplicationWindow {
         }
         return last;
     }
+    onCutPreviewChanged: endCutChain()
+
+    readonly property var selectPositions: {
+        var lines = backend.selects;
+        var map = {};
+        if (!lines)
+            return map;
+        for (var p = 0; p < lines.length; ++p) {
+            if (lines[p] && lines[p].id !== undefined)
+                map[Number(lines[p].id)] = p;
+        }
+        return map;
+    }
+    readonly property real activeCutOffset: cutOffset(cutChain ? cutLine : currentLine)
     // Where playback is on the timeline under the picture. Cut time while the
     // cut is the preview; the source clip's own time while Original is.
     readonly property real cutTimeNow: {
+        if (!gathering)
+            return 0;
         var pos = movie.player.position / 1000;
         if (!cutPreview)
             return pos;
@@ -389,22 +410,34 @@ ApplicationWindow {
             return 0;
         var line = lines[i];
         if (!keptLine(line))
-            return cutOffset(i);
+            return activeCutOffset;
         var len = Math.max(0, Number(line.end) - Number(line.start));
-        return cutOffset(i) + Math.max(0, Math.min(len, pos - Number(line.start)));
+        return activeCutOffset + Math.max(0, Math.min(len, pos - Number(line.start)));
     }
     readonly property real cutTotal: cutPreview ? keptSpan() : movie.player.duration / 1000
-    // The B-roll picture over the line that is playing, or null. The voice is
-    // the main player's; this only chooses what the picture shows.
+    // The B-roll or second-camera picture over the line that is playing, or null.
+    // The voice is the main player's; this only chooses what the picture shows.
     readonly property var coverNow: {
         if (!gathering || linePlayStart < 0)
+            return null;
+        var hasCovers = backend.covers && backend.covers.length > 0;
+        var hasAngles = backend.angles && backend.angles.length > 0;
+        if (!hasCovers && !hasAngles)
             return null;
         var i = cutChain ? cutLine : currentLine;
         var lines = backend.selects;
         if (i < 0 || i >= lines.length)
             return null;
         var paths = backend.cutClips && backend.cutClips.length > 0 ? backend.cutClips : backend.tray;
-        return Format.coverAt(lines, i, backend.covers, paths, movie.player.position / 1000, backend.maxPause);
+        var posSec = movie.player.position / 1000;
+        if (hasCovers) {
+            var broll = Format.coverAt(lines, i, backend.covers, paths, posSec, backend.maxPause, selectPositions);
+            if (broll)
+                return broll;
+        }
+        if (hasAngles)
+            return Format.angleAt(lines, i, backend.angles, paths, backend.cutClipOffsets, posSec, selectPositions);
+        return null;
     }
     // A click on the timeline. Playing keeps playing from there; paused shows that frame.
     function seekCut(seconds) {
@@ -549,9 +582,12 @@ ApplicationWindow {
             movie.player.position = linePlayStart;
         }
     }
-    function showNotice(text) {
+    function showNotice(text, persist) {
         noticeText = text;
-        noticeTimer.restart();
+        if (persist)
+            noticeTimer.stop();
+        else
+            noticeTimer.restart();
     }
     function openSettings() {
         settingsFromMovie = hasVideo && !gathering;
@@ -580,7 +616,7 @@ ApplicationWindow {
     function closeProject() {
         if (backend.busy)
             return;
-        if (unexported) {
+        if (unexported || looseCut) {
             leaveTarget = "lists";
             if (movie.player.playbackState === MediaPlayer.PlayingState)
                 movie.player.pause();
@@ -1172,20 +1208,26 @@ ApplicationWindow {
         sequence: "Ctrl+Z"
         context: Qt.ApplicationShortcut
         enabled: win.editing && timeline.canUndo
-        onActivated: timeline.undo()
+        onActivated: {
+            timeline.undo();
+            win.showNotice(qsTr("Undone."));
+        }
     }
 
     Shortcut {
         sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]
         context: Qt.ApplicationShortcut
         enabled: win.editing && timeline.canRedo
-        onActivated: timeline.redo()
+        onActivated: {
+            timeline.redo();
+            win.showNotice(qsTr("Redone."));
+        }
     }
 
     Shortcut {
         sequence: "Ctrl+S"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && backend.duration > 0 && !backend.busy
+        enabled: win.hasVideo && win.mediaDuration > 0 && !backend.busy
         onActivated: {
             win.quitConfirmVisible = false;
             exportVideo();
@@ -1196,6 +1238,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Q"
         context: Qt.ApplicationShortcut
+        enabled: !win.controlFocused && !win.dialogUp
         onActivated: {
             if (!win.quitConfirmVisible)
                 requestQuit();
@@ -1205,6 +1248,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "?"
         context: Qt.ApplicationShortcut
+        enabled: !win.controlFocused && (!win.dialogUp || win.helpVisible)
         onActivated: {
             if (!win.quitConfirmVisible)
                 win.helpVisible = !win.helpVisible;
@@ -1221,6 +1265,8 @@ ApplicationWindow {
             }
             if (win.settingsOpen)
                 closeSettings();
+            else if (win.exportOpen)
+                win.exportOpen = false;
             else if (win.titleCardOpen)
                 win.titleCardOpen = false;
             else if (win.confirmCutOpen)
@@ -1229,20 +1275,32 @@ ApplicationWindow {
                 win.quitConfirmVisible = false;
             else if (win.helpVisible)
                 win.helpVisible = false;
+            else if (win.controlFocused && win.activeFocusItem)
+                win.activeFocusItem.focus = false;
         }
     }
 
     Shortcut {
         sequence: "Up"
         context: Qt.ApplicationShortcut
-        enabled: win.lineKeys
-        onActivated: moveLine(-1)
+        enabled: win.lineKeys || (win.shotKeys && !planPane.paceOpen)
+        onActivated: {
+            if (win.lineKeys)
+                moveLine(-1);
+            else if (backend.trayIndex > 0)
+                backend.trayIndex = backend.trayIndex - 1;
+        }
     }
     Shortcut {
         sequence: "Down"
         context: Qt.ApplicationShortcut
-        enabled: win.lineKeys
-        onActivated: moveLine(1)
+        enabled: win.lineKeys || (win.shotKeys && !planPane.paceOpen)
+        onActivated: {
+            if (win.lineKeys)
+                moveLine(1);
+            else if (backend.trayIndex + 1 < backend.tray.length)
+                backend.trayIndex = backend.trayIndex + 1;
+        }
     }
     Shortcut {
         sequences: ["Return", "Enter"]
@@ -1565,7 +1623,7 @@ ApplicationWindow {
                             id: playButton
                             // The shot preview while gathering, or the open movie.
                             visible: transport.playShown
-                            enabled: win.gathering || backend.duration > 0
+                            enabled: win.gathering || win.mediaDuration > 0
                             Layout.alignment: Qt.AlignVCenter
                             playing: movie.player.playbackState === MediaPlayer.PlayingState
                                      && !movie.player.priming
@@ -1727,6 +1785,7 @@ ApplicationWindow {
                     Label {
                         id: actionSentence
                         objectName: "actionSentence"
+                        visible: !win.running
                         Layout.fillWidth: true
                         Layout.minimumWidth: 200
                         Layout.alignment: Qt.AlignVCenter
@@ -1806,6 +1865,17 @@ ApplicationWindow {
                         }
                         ActionButton {
                             raised: true
+                            objectName: "rerenderButton"
+                            text: qsTr("Re-render\u2026")
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
+                                     && !win.looseCut && !win.unexported
+                            enabled: !backend.busy
+                            Layout.minimumWidth: implicitWidth
+                            Layout.maximumWidth: implicitWidth
+                            onClicked: win.exportOpen = true
+                        }
+                        ActionButton {
+                            raised: true
                             objectName: "saveCopyButton"
                             text: qsTr("Save a copy\u2026")
                             visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
@@ -1839,15 +1909,126 @@ ApplicationWindow {
                         Layout.alignment: Qt.AlignVCenter
                         onClicked: backend.cancelJob()
                     }
-                    ActionButton {
-                        id: jobButton
-                        visible: win.running
-                        text: backend.jobText
-                        progress: backend.progress
-                        enabled: false
-                        Layout.minimumWidth: implicitWidth
-                        Layout.maximumWidth: implicitWidth
-                        Layout.alignment: Qt.AlignVCenter
+                }
+
+                // Centered animated segmented progress indicator while any job is running.
+                Item {
+                    id: jobProgressPill
+                    objectName: "jobProgressPill"
+                    visible: win.running
+                    anchors.centerIn: parent
+                    width: Math.min(340, Math.max(220, actionBar.width * 0.34))
+                    height: 40
+
+                    readonly property int activeStage: {
+                        var j = String(backend.job || "")
+                        var p = Number(backend.progress)
+                        if (j === "rendering" || p >= 0.60)
+                            return 3
+                        if (j === "choosing" || p >= 0.38)
+                            return 2
+                        if (j === "transcribing" || p >= 0.12)
+                            return 1
+                        return 0
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 5
+
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            spacing: 8
+
+                            // Pulsing live-activity indicator so the user always sees active work.
+                            Rectangle {
+                                id: liveDot
+                                width: 8
+                                height: 8
+                                radius: 4
+                                color: theme.accent
+                                SequentialAnimation on opacity {
+                                    running: win.running
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.35; to: 1.0; duration: 650; easing.type: Easing.InOutSine }
+                                    NumberAnimation { from: 1.0; to: 0.35; duration: 650; easing.type: Easing.InOutSine }
+                                }
+                            }
+
+                            Label {
+                                id: jobButton
+                                text: backend.jobText
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: jobProgressPill.width - 24
+                            }
+                        }
+
+                        // 4-segment step bar with smooth fill and continuous animated shimmer.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Repeater {
+                                model: 4
+                                Rectangle {
+                                    id: segTrack
+                                    required property int index
+                                    Layout.fillWidth: true
+                                    height: 5
+                                    radius: 2.5
+                                    clip: true
+                                    color: theme.raised
+
+                                    readonly property bool done: index < jobProgressPill.activeStage
+                                    readonly property bool current: index === jobProgressPill.activeStage
+                                    readonly property real segFill: {
+                                        if (done)
+                                            return 1.0
+                                        if (!current)
+                                            return 0.0
+                                        var p = Number(backend.progress)
+                                        if (p < 0)
+                                            return 0.35
+                                        var starts = [0.0, 0.12, 0.38, 0.60]
+                                        var ends = [0.12, 0.38, 0.60, 1.0]
+                                        return Math.max(0.18, Math.min(1.0, (p - starts[index]) / (ends[index] - starts[index])))
+                                    }
+
+                                    Rectangle {
+                                        height: parent.height
+                                        width: parent.width * segTrack.segFill
+                                        radius: parent.radius
+                                        color: theme.accent
+                                        opacity: segTrack.done ? 0.95 : 0.78
+                                        Behavior on width {
+                                            NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+                                        }
+                                    }
+
+                                    // Continuous gliding shimmer across the active segment.
+                                    Rectangle {
+                                        id: shimmer
+                                        visible: segTrack.current && win.running
+                                        width: Math.max(18, parent.width * 0.45)
+                                        height: parent.height
+                                        radius: parent.radius
+                                        color: theme.foreground
+                                        opacity: 0.42
+                                        NumberAnimation on x {
+                                            running: shimmer.visible
+                                            loops: Animation.Infinite
+                                            from: -shimmer.width
+                                            to: segTrack.width + shimmer.width
+                                            duration: 1100
+                                            easing.type: Easing.InOutSine
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1855,6 +2036,10 @@ ApplicationWindow {
 
         SettingsDialog {
             id: settingsDialog
+            host: win
+        }
+        ExportDialog {
+            id: exportDialog
             host: win
         }
         HelpDialog { host: win }
@@ -1900,10 +2085,10 @@ ApplicationWindow {
             win.showNotice(message);
         }
         function onExportFailed(message) {
-            win.showNotice("Export failed: " + message);
+            win.showNotice("Export failed: " + message, true);
         }
         function onLoadError(message) {
-            win.showNotice("Cannot open video: " + message);
+            win.showNotice("Cannot open video: " + message, true);
         }
     }
 

@@ -461,20 +461,31 @@ def cover_user_content(
 
 def beat_stills(clips: list[dict], beats: list[dict], still_dir: str) -> dict[int, str]:
     """One still per beat, grabbed once and kept in still_dir. A missed frame still sends the beat."""
-    from botcut.media import grab_still
+    from concurrent.futures import ThreadPoolExecutor
+
+    from botcut.media import cached_still
 
     os.makedirs(still_dir, exist_ok=True)
-    stills: dict[int, str] = {}
-    for beat in beats:
+    if not beats:
+        return {}
+
+    def grab(beat: dict) -> tuple[int, str | None]:
         clip = clips[int(beat["clip"])]
         dest = os.path.join(still_dir, f"broll-{int(beat['clip'])}-{int(beat['id'])}.jpg")
-        if os.path.isfile(dest):
-            stills[int(beat["id"])] = dest
-            continue
         at = beat_still_at(float(beat["start"]), float(beat["end"]))
-        if grab_still(str(clip.get("path") or ""), at, dest):
-            stills[int(beat["id"])] = dest
-    return stills
+        if cached_still(str(clip.get("path") or ""), at, dest):
+            return int(beat["id"]), dest
+        return int(beat["id"]), None
+
+    pool = ThreadPoolExecutor(max_workers=min(4, len(beats)))
+    try:
+        results = list(pool.map(grab, beats))
+    except BaseException:
+        pool.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+    return {beat_id: path for beat_id, path in results if path is not None}
 
 
 def _ask(

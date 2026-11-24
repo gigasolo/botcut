@@ -36,6 +36,17 @@ Item {
             return qsTr("dropped")
         return reason ? String(reason) : ""
     }
+    readonly property var linePositions: {
+        var lines = backend.selects
+        var map = {}
+        if (!lines)
+            return map
+        for (var p = 0; p < lines.length; p++) {
+            if (lines[p] && lines[p].id !== undefined)
+                map[Number(lines[p].id)] = p
+        }
+        return map
+    }
     // The run this line is in, and whether the line is its first. Null when none.
     function coverOf(line) {
         return runOf(line, backend.covers)
@@ -46,13 +57,9 @@ Item {
     }
     function runOf(line, rows) {
         var lines = backend.selects
-        if (!line || !rows || !lines)
+        if (!line || !rows || rows.length === 0 || !lines)
             return null
-        var positions = {}
-        for (var p = 0; p < lines.length; p++) {
-            if (lines[p] && lines[p].id !== undefined)
-                positions[Number(lines[p].id)] = p
-        }
+        var positions = linePositions
         var at = positions[Number(line.id)]
         if (at === undefined)
             return null
@@ -82,17 +89,25 @@ Item {
         }
         return null
     }
-    function coverText(line) {
-        var hit = coverOf(line)
-        var other = hit ? null : angleOf(line)
-        if (other) {
-            if (!other.first)
-                return qsTr("Second camera goes on")
-            return other.cover.reason ? qsTr("Second camera · %1").arg(String(other.cover.reason))
-                                      : qsTr("Second camera")
-        }
-        if (!hit)
+    function rowOverlay(line) {
+        var cover = runOf(line, backend.covers)
+        if (cover)
+            return { kind: "broll", hit: cover }
+        var angle = runOf(line, backend.angles)
+        if (angle)
+            return { kind: "angle", hit: angle }
+        return null
+    }
+    function coverTextFor(overlay) {
+        if (!overlay)
             return ""
+        if (overlay.kind === "angle") {
+            if (!overlay.hit.first)
+                return qsTr("Second camera goes on")
+            return overlay.hit.cover.reason ? qsTr("Second camera · %1").arg(String(overlay.hit.cover.reason))
+                                            : qsTr("Second camera")
+        }
+        var hit = overlay.hit
         if (!hit.first)
             return qsTr("B-roll goes on")
         var files = backend.cutClips
@@ -109,11 +124,16 @@ Item {
             words += " · " + String(hit.cover.reason)
         return words
     }
-    function coverStill(line) {
-        var hit = coverOf(line) || angleOf(line)
-        if (!hit || !hit.first || !hit.cover.still)
+    function coverStillFor(overlay) {
+        if (!overlay || !overlay.hit.first || !overlay.hit.cover.still)
             return ""
-        return host.fileUrl(String(hit.cover.still))
+        return host.fileUrl(String(overlay.hit.cover.still))
+    }
+    function coverText(line) {
+        return coverTextFor(rowOverlay(line))
+    }
+    function coverStill(line) {
+        return coverStillFor(rowOverlay(line))
     }
     function clockOf(line) {
         var start = line ? Number(line.start) : 0
@@ -134,12 +154,33 @@ Item {
         if (!rows || index === undefined || index < 0 || index >= rows.length)
             return -1
         var row = rows[index]
-        if (!row || row.text === undefined || row.text === null)
+        if (!row)
+            return -1
+        var selects = backend.selects
+        var segClip = row.clip
+        var segStart = Number(row.sourceStart)
+        var segEnd = Number(row.sourceEnd)
+        if (segClip !== undefined && isFinite(segStart) && isFinite(segEnd)) {
+            var bestIdx = -1
+            var bestOverlap = 0
+            for (var j = 0; j < selects.length; j++) {
+                var sel = selects[j]
+                if (!sel || sel.clip !== segClip)
+                    continue
+                var overlap = Math.min(segEnd, Number(sel.end)) - Math.max(segStart, Number(sel.start))
+                if (overlap > bestOverlap) {
+                    bestOverlap = overlap
+                    bestIdx = j
+                }
+            }
+            if (bestIdx >= 0)
+                return bestIdx
+        }
+        if (row.text === undefined || row.text === null)
             return -1
         var words = String(row.text).trim()
         if (words === "")
             return -1
-        var selects = backend.selects
         for (var i = 0; i < selects.length; i++) {
             var text = selects[i].text
             if (text !== undefined && text !== null && String(text).trim() === words)
@@ -300,11 +341,97 @@ Item {
 
             Label {
                 Layout.fillWidth: true
-                Layout.bottomMargin: 4
                 text: qsTr("Shots")
                 color: theme.foreground
                 font.pixelSize: 15
                 font.weight: Font.DemiBold
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: 32
+                radius: theme.radius
+                color: theme.background
+                border.width: movieTitleField.activeFocus ? 1 : 0
+                border.color: theme.accent
+                TextInput {
+                    id: movieTitleField
+                    objectName: "movieTitleField"
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    verticalAlignment: Text.AlignVCenter
+                    color: theme.foreground
+                    font.pixelSize: 13
+                    clip: true
+                    selectByMouse: true
+                    enabled: !backend.busy
+                    text: (backend && backend.movieTitle !== undefined) ? backend.movieTitle : ""
+                    onTextEdited: if (backend && backend.movieTitle !== undefined) backend.movieTitle = text
+                    onAccepted: {
+                        if (backend && backend.movieTitle !== undefined)
+                            backend.movieTitle = text
+                        focus = false
+                    }
+                }
+                Label {
+                    anchors.fill: movieTitleField
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    visible: movieTitleField.text === ""
+                    text: qsTr("Movie title (output file name)")
+                    color: theme.foreground
+                    opacity: 0.38
+                    font.pixelSize: 12
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+            }
+
+            // Live-video title overlay card pinned at the top of the Shots list when set.
+            Rectangle {
+                id: liveTitleCard
+                objectName: "liveTitleCard"
+                readonly property string textValue: (backend && backend.liveTitle !== undefined) ? backend.liveTitle : ""
+                visible: textValue !== ""
+                Layout.fillWidth: true
+                height: visible ? (liveTitleRow.implicitHeight + 16) : 0
+                radius: theme.radius
+                color: theme.selected
+                border.width: 1
+                border.color: theme.line
+
+                RowLayout {
+                    id: liveTitleRow
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    spacing: 8
+
+                    Column {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Label {
+                            width: parent.width
+                            text: liveTitleCard.textValue
+                            color: theme.foreground
+                            font.pixelSize: 13
+                            font.weight: Font.DemiBold
+                            elide: Text.ElideRight
+                        }
+                        Label {
+                            text: qsTr("Live title · fades over opening 3s")
+                            color: theme.accent
+                            font.pixelSize: 11
+                        }
+                    }
+
+                    ActionButton {
+                        raised: true
+                        text: qsTr("Remove")
+                        enabled: !backend.busy
+                        onClicked: if (backend && backend.liveTitle !== undefined) backend.liveTitle = ""
+                    }
+                }
             }
 
             ListView {
@@ -401,11 +528,12 @@ Item {
                     model: backend.selects
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
                     delegate: LineRow {
+                        readonly property var overlayInfo: root.rowOverlay(modelData)
                         timeText: root.clockOf(modelData)
                         reasonText: root.reasonText(modelData.reason)
-                        coverText: root.coverText(modelData)
-                        coverStill: root.coverStill(modelData)
-                        secondCamera: root.angleOf(modelData) !== null
+                        coverText: root.coverTextFor(overlayInfo)
+                        coverStill: root.coverStillFor(overlayInfo)
+                        secondCamera: overlayInfo !== null && overlayInfo.kind === "angle"
                         selected: host.viewStep === "lines" && index === host.currentLine
                         marked: host.viewStep === "movie" && index === root.playheadIndex
                         onPicked: {

@@ -24,15 +24,28 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &sceneTransition = QStringLiteral("dip"),
                        double maxPause = 0.8, const QStringList &brollFiles = {},
                        bool brollMix = true, const QString &zoom = QStringLiteral("off"),
-                       const QStringList &angleFiles = {});
+                       const QStringList &angleFiles = {},
+                       const QString &resolution = QStringLiteral("source"),
+                       const QString &aspect = QStringLiteral("source"),
+                       bool pip = false,
+                       const QString &liveTitle = QString());
 
 CutLaunch cutRenderLaunch(const QString &outDir, const QString &botcutCli, const QString &uv,
                           const QString &cliProject,
                           const QString &sceneTransition = QStringLiteral("dip"),
-                          bool brollMix = true, const QString &zoom = QStringLiteral("off"));
+                          bool brollMix = true, const QString &zoom = QStringLiteral("off"),
+                          const QString &resolution = QStringLiteral("source"),
+                          const QString &aspect = QStringLiteral("source"),
+                          const QString &outFile = QString(),
+                          bool pip = false,
+                          const QString &liveTitle = QString());
 
 // The zoom on the speaker: off, or auto. The command line's cuts, push, and lines still pass. Anything else is off.
 QString zoomValue(const QString &zoom);
+// Output resolution: source, 2160p, 1440p, 1080p, or 720p. Anything else is source.
+QString resolutionValue(const QString &resolution);
+// Output aspect ratio: source, landscape, or portrait. Anything else is source.
+QString aspectValue(const QString &aspect);
 
 
 // captions and short take the cuts.json file. A directory is not a valid path.
@@ -64,7 +77,18 @@ CutLaunch cutApplyLaunch(const QString &cutsPath, const QString &botcutCli, cons
 // The sentence is positional. `--` keeps it from being read as an option.
 // The output name starts with botcut-card- so a later spoken cut can see it.
 CutLaunch cutCardLaunch(const QString &dest, const QString &sentence, const QString &botcutCli,
-                        const QString &uv, const QString &cliProject);
+                        const QString &uv, const QString &cliProject,
+                        const QString &style = QStringLiteral("ai"),
+                        const QString &fromVideo = QString(),
+                        const QString &aspect = QStringLiteral("landscape"));
+
+CutLaunch cutThumbLaunch(const QString &cutsPath, const QString &title, const QString &outJpg,
+                         const QString &outCardMp4, const QString &aspect, bool embed,
+                         const QString &botcutCli, const QString &uv, const QString &cliProject);
+
+CutLaunch cutShipLaunch(const QString &cutsPath, const QString &outDir, const QString &title,
+                        const QString &resolution, bool includePortrait,
+                        const QString &botcutCli, const QString &uv, const QString &cliProject);
 
 // Cards live under XDG data, not the temp dir, so a saved list can open them after a restart.
 // Empty means the directory is real, owned by this user, and not writable by anyone else.

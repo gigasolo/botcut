@@ -54,6 +54,11 @@ class Backend : public QObject {
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY brollMixChanged)
     // The zoom on the speaker: off, cuts, push, or lines.
     Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
+    // Output resolution (source, 2160p, 1440p, 1080p, 720p) and aspect (source, landscape, portrait).
+    Q_PROPERTY(QString resolution READ resolution WRITE setResolution NOTIFY resolutionChanged)
+    Q_PROPERTY(QString aspect READ aspect WRITE setAspect NOTIFY aspectChanged)
+    Q_PROPERTY(bool pip READ pip WRITE setPip NOTIFY pipChanged)
+    Q_PROPERTY(QString preset READ preset NOTIFY presetChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
     // The tray files that are a second camera on a take another file filmed.
     Q_PROPERTY(QStringList angleFiles READ angleFiles NOTIFY trayChanged)
@@ -62,9 +67,13 @@ class Backend : public QObject {
     // The few spots in the cut worth a look: {kind, ids, text}.
     Q_PROPERTY(QVariantList review READ review NOTIFY reviewChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
+    Q_PROPERTY(QVariantList cutClipOffsets READ cutClipOffsets NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
+    Q_PROPERTY(QString movieTitle READ movieTitle WRITE setMovieTitle NOTIFY movieTitleChanged)
+    // Opening live-video title overlay shown as a removable card in the Shots list.
+    Q_PROPERTY(QString liveTitle READ liveTitle WRITE setLiveTitle NOTIFY liveTitleChanged)
     // The chat about this line list: {role: "you" | "bot", text, change}. A bot
     // turn carries the model's reply and the change it would make, or made.
     Q_PROPERTY(QVariantList chat READ chat NOTIFY chatChanged)
@@ -120,13 +129,20 @@ public:
     QStringList brollFiles() const;
     bool brollMix() const { return m_brollMix; }
     QString zoom() const { return m_zoom; }
+    QString resolution() const { return m_resolution; }
+    QString aspect() const { return m_aspect; }
+    bool pip() const { return m_pip; }
+    QString preset() const { return m_preset; }
     QVariantList covers() const { return m_covers; }
     QStringList angleFiles() const;
     QVariantList angles() const { return m_angles; }
     QVariantList review() const { return m_review; }
     QStringList cutClips() const { return m_cutClips; }
+    QVariantList cutClipOffsets() const { return m_cutClipOffsets; }
     QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
+    QString movieTitle() const { return m_movieTitle; }
+    QString liveTitle() const { return m_liveTitle; }
     QVariantList chat() const { return m_chat; }
     bool proposalPending() const { return m_proposalPending; }
     bool canRevert() const { return m_canRevert; }
@@ -147,12 +163,20 @@ public:
     void setSceneTransition(const QString &value);
     void setBrollMix(bool value);
     void setZoom(const QString &value);
+    void setResolution(const QString &value);
+    void setAspect(const QString &value);
+    void setPip(bool value);
+    Q_INVOKABLE void applyPreset(const QString &preset);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
+    void setMovieTitle(const QString &title);
+    void setLiveTitle(const QString &title);
     Timeline *timeline() { return &m_timeline; }
 
     // Load a video (probes it, then kicks off thumbnail generation).
     Q_INVOKABLE bool load(const QUrl &url);
+    // Safe local file URL conversion (handles '#' and '?' in paths).
+    Q_INVOKABLE QUrl fileUrl(const QString &path) const;
 
     // Open native desktop file dialogs.
     Q_INVOKABLE void addVideosDialog();
@@ -165,6 +189,17 @@ public:
     int trayThumbRevision() const { return m_trayThumbRevision; }
     Q_INVOKABLE void moveTray(int delta);
     Q_INVOKABLE void removeTray();
+    // Rename a source file on disk (preserving its folder and extension) and update all references.
+    Q_INVOKABLE bool renameTrayFile(int index, const QString &newBaseName);
+    // Rename the output movie (and matching sidecars) to match a new title.
+    Q_INVOKABLE bool renameMovie(const QString &newTitle);
+    // Generate a Matt-style minimal photo thumbnail beside the movie and embed it as cover art.
+    Q_INVOKABLE void makePhotoThumb(const QString &title = QString(),
+                                    const QString &aspect = QStringLiteral("landscape"));
+    // Build a full Ship Pack folder (chapters, post drafts, thumbnail, landscape + portrait, captions).
+    Q_INVOKABLE void makeShipPack(const QString &title = QString(),
+                                  const QString &resolution = QStringLiteral("1080p"),
+                                  bool includePortrait = true);
     Q_INVOKABLE bool isBroll(const QString &path) const;
     // Flip the shot at that tray index between a shot and B-roll. A card stays a card.
     Q_INVOKABLE void toggleBroll(int index);
@@ -199,13 +234,16 @@ public:
     Q_INVOKABLE void exportPlan();
     Q_INVOKABLE void writeCaptions();
     Q_INVOKABLE void makeShort();
+    // Re-render the current cut directly from source clips at the chosen resolution and aspect ratio.
+    Q_INVOKABLE void rerenderExport(const QString &resolution, const QString &aspect);
     // Asks the model for a proposal and shows its reply. Nothing changes until applyProposal.
     Q_INVOKABLE bool sendRevise(const QString &note);
     Q_INVOKABLE bool applyProposal();
     Q_INVOKABLE void dismissProposal();
     Q_INVOKABLE void revertRevise();
-    // `place` is "open" (front of the tray) or "close" (end). The sentence is the prompt.
-    Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence);
+    // `place` is "open" (front of the tray) or "close" (end). `style` is "ai" or "typo".
+    Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence,
+                              const QString &style = QStringLiteral("ai"));
     // Exports the clips as they are when the dialog opens.
     Q_INVOKABLE void exportDialog();
     // Opens the folder that contains the saved movie, not a player on the file.
@@ -249,11 +287,17 @@ signals:
     void sceneTransitionChanged();
     void brollMixChanged();
     void zoomChanged();
+    void resolutionChanged();
+    void aspectChanged();
+    void pipChanged();
+    void presetChanged();
     void coversChanged();
     void reviewChanged();
     void cutClipsChanged();
     void paceChanged();
     void intentChanged();
+    void movieTitleChanged();
+    void liveTitleChanged();
     void chatChanged();
     void canRevertChanged();
     void selectsChanged();
@@ -396,10 +440,16 @@ private:
     QSet<QString> m_brollFiles;
     bool m_brollMix = true;
     QString m_zoom = QStringLiteral("off");
+    QString m_resolution = QStringLiteral("source");
+    QString m_aspect = QStringLiteral("source");
+    bool m_pip = false;
+    QString m_preset = QStringLiteral("custom");
     QString m_pace = QStringLiteral("open");
     QString m_planCuts;
     QString m_planMovie;
     QString m_intent;
+    QString m_movieTitle;
+    QString m_liveTitle;
     QVariantList m_chat;
     bool m_proposalPending = false;
     // The change line of the pending proposal, in the past tense, for the Done turn.
@@ -419,6 +469,7 @@ private:
     QSet<QString> m_angleFiles;
     // Paths from cuts.json, in clip-index order. The live tray can move without rewriting that file.
     QStringList m_cutClips;
+    QVariantList m_cutClipOffsets;
     bool m_gathering = true;
     QString m_apiKey;
     KeyStore *m_keys = nullptr;
@@ -430,8 +481,11 @@ private:
     bool m_renderedHere = false;
     bool m_cutSaved = false;
     bool m_movieStale = false;
-    enum class CutStage { Idle, Run, Render, Captions, Short, Propose, Revise, Card, Key };
+    enum class CutStage { Idle, Run, Render, ExportRender, Captions, Short, Thumb, Ship, Propose, Revise, Card, Key };
     CutStage m_cutStage = CutStage::Idle;
+    QString m_exportRenderTarget;
+    QString m_thumbTarget;
+    QString m_shipTarget;
     QString m_cardPath;
     QString m_cardPlace;
     void startBesideCut(CutStage stage, const QString &running,
@@ -439,6 +493,13 @@ private:
                                           const QString &));
     QProcess *m_cutProcess = nullptr;
     QString m_cutLog;
-    QString m_cutLine;
+    QByteArray m_cutLine;
     QTimer m_thumbRevealTimer;
+    struct TrayMeta {
+        bool exists = false;
+        qint64 size = -1;
+    };
+    mutable QHash<QString, TrayMeta> m_trayMeta;
+    const TrayMeta &trayMetaFor(const QString &path) const;
+    void invalidateTrayMeta(const QString &path = QString());
 };

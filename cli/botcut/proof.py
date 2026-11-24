@@ -293,6 +293,11 @@ def changed(changes: dict) -> bool:
     return bool(changes.get("drop") or changes.get("restore") or changes.get("cuts"))
 
 
+def _proof_effort() -> str:
+    raw = os.environ.get("BOTCUT_PROOF_EFFORT", "").strip().lower()
+    return raw if raw in ("low", "medium", "high") else PROOF_EFFORT
+
+
 def proof(
     lines: list[dict],
     segments: list[dict],
@@ -322,7 +327,7 @@ def proof(
             parse=lambda parsed: read_proof(parsed, lines, target),
             read_timeout=300,
             tries=2,
-            effort=PROOF_EFFORT,
+            effort=_proof_effort(),
         )
     except SystemExit as stop:
         if "XAI_API_KEY" in str(stop):

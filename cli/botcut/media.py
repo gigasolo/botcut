@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import re
@@ -10,6 +11,44 @@ import subprocess
 import threading
 
 from botcut.card import is_card
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
+DEFAULT_IMAGE_DURATION = 12.0
+
+
+def is_image(path: str) -> bool:
+    """True when `path` is a still image (PNG, JPG, WebP) that can be used as a slide/visual cover."""
+    return os.path.splitext(str(path or ""))[1].lower() in IMAGE_EXTS
+
+
+def _still_key(video: str, at: float) -> str:
+    try:
+        info = os.stat(video)
+        stamp = [info.st_size, info.st_mtime_ns]
+    except OSError:
+        stamp = [0, 0]
+    raw = json.dumps([os.path.abspath(video), stamp[0], stamp[1], round(max(0.0, float(at)), 3)])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def cached_still(video: str, at: float, dest: str) -> bool:
+    """Return True if a fresh cached still exists or is newly grabbed for (video, stat, at)."""
+    key = _still_key(video, at)
+    key_path = os.path.join(os.path.dirname(dest) or ".", "." + os.path.basename(dest) + ".key")
+    if os.path.isfile(dest) and os.path.getsize(dest) > 0:
+        try:
+            if open(key_path, encoding="utf-8").read().strip() == key:
+                return True
+        except OSError:
+            pass
+    if not grab_still(video, at, dest):
+        return False
+    try:
+        with open(key_path, "w", encoding="utf-8") as handle:
+            handle.write(key)
+    except OSError:
+        pass
+    return True
 
 
 def grab_still(video: str, at: float, dest: str) -> bool:
@@ -45,9 +84,10 @@ def grab_still(video: str, at: float, dest: str) -> bool:
 
 
 def probe(path: str, need_audio: bool = True) -> dict:
-    """Read one file. A spoken shot needs a sound track. B-roll may be silent."""
+    """Read one file. A spoken shot needs a sound track. B-roll and still images may be silent."""
     if not os.path.isfile(path):
         raise SystemExit(f"No such file: {path}")
+    image = is_image(path)
     proc = subprocess.run(
         [
             "ffprobe",
@@ -68,22 +108,22 @@ def probe(path: str, need_audio: bool = True) -> dict:
     data = json.loads(proc.stdout or "{}")
     streams = data.get("streams") or []
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
-    if audio is None and need_audio:
+    if audio is None and need_audio and not image:
         raise SystemExit(f"No audio stream: {path}")
     video = next((s for s in streams if s.get("codec_type") == "video"), None)
     fallback = (audio or video or {}).get("duration") or 0
-    duration = float((data.get("format") or {}).get("duration") or fallback)
+    duration = DEFAULT_IMAGE_DURATION if image else _safe_float((data.get("format") or {}).get("duration"), _safe_float(fallback))
     if video is None:
         width, height, fps = 0, 0, 0.0
         codec = None
         pix_fmt = None
     else:
-        width = int(video.get("width") or 0)
-        height = int(video.get("height") or 0)
-        fps = _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
+        width = _safe_int(video.get("width"))
+        height = _safe_int(video.get("height"))
+        fps = 30.0 if image else _parse_rate(video.get("avg_frame_rate") or video.get("r_frame_rate") or "0/1")
         codec = video.get("codec_name")
         pix_fmt = video.get("pix_fmt")
-    return {
+    out = {
         "path": os.path.abspath(path),
         "duration": duration,
         "width": width,
@@ -94,10 +134,13 @@ def probe(path: str, need_audio: bool = True) -> dict:
         "pix_fmt": pix_fmt,
         # "pc" is full range, as a Hover or a phone JPEG-style stream writes it.
         "color_range": (video.get("color_range") if video is not None else None) or None,
-        "audio": audio is not None,
-        "audio_codec": audio.get("codec_name") if audio is not None else None,
-        "sample_rate": int(audio.get("sample_rate") or 0) if audio is not None else 0,
+        "audio": audio is not None and not image,
+        "audio_codec": audio.get("codec_name") if (audio is not None and not image) else None,
+        "sample_rate": _safe_int(audio.get("sample_rate")) if (audio is not None and not image) else 0,
     }
+    if image:
+        out["is_image"] = True
+    return out
 
 
 def parse_scene_changes(stderr: str) -> list[float]:
@@ -166,6 +209,29 @@ SILENCE_UNDER_VOICE = 12.0
 SILENCE_DB_MAX = -18.0
 
 
+def _frame_levels(samples, rate: int = 16000):
+    import numpy as np
+
+    step = rate // 20
+    count = len(samples) // step
+    if count == 0:
+        return np.empty(0, dtype=np.float32)
+    frames = samples[: count * step].astype(np.float32).reshape(count, step) / 32768.0
+    return 10 * np.log10(np.mean(frames * frames, axis=1) + 1e-12)
+
+
+def _levels_from_db(level) -> tuple[float, float] | None:
+    import numpy as np
+
+    if len(level) < 20:
+        return None
+    # Digital silence, as in a file padded by an export, is not the room.
+    heard = level[level > -80.0]
+    if len(heard) < 20:
+        return None
+    return float(np.percentile(heard, 5)), float(np.percentile(heard, 90))
+
+
 def sound_levels(flac: str) -> tuple[float, float] | None:
     """How loud the room and the voice are in a recording, in dB below full scale.
 
@@ -184,19 +250,7 @@ def sound_levels(flac: str) -> tuple[float, float] | None:
 
 
 def levels_of(samples, rate: int = 16000) -> tuple[float, float] | None:
-    import numpy as np
-
-    step = rate // 20
-    count = len(samples) // step
-    if count < 20:
-        return None
-    frames = samples[: count * step].astype(np.float32).reshape(count, step) / 32768.0
-    level = 10 * np.log10(np.mean(frames * frames, axis=1) + 1e-12)
-    # Digital silence, as in a file padded by an export, is not the room.
-    heard = level[level > -80.0]
-    if len(heard) < 20:
-        return None
-    return float(np.percentile(heard, 5)), float(np.percentile(heard, 90))
+    return _levels_from_db(_frame_levels(samples, rate=rate))
 
 
 def silence_threshold(levels: tuple[float, float] | None) -> float:
@@ -209,28 +263,47 @@ def silence_threshold(levels: tuple[float, float] | None) -> float:
     return round(min(wanted, max(SILENCE_DB, voice - SILENCE_UNDER_VOICE), SILENCE_DB_MAX), 1)
 
 
+def silences_from_levels(
+    level, threshold: float, duration: float, step_s: float = 0.05, min_dur: float = 0.3
+) -> list[tuple[float, float]]:
+    """Contiguous runs below `threshold` dB lasting at least `min_dur` seconds."""
+    if len(level) == 0:
+        return []
+    quiet = level < threshold
+    pairs: list[tuple[float, float]] = []
+    start_idx: int | None = None
+    total = len(quiet)
+    for idx, is_quiet in enumerate(quiet):
+        if is_quiet and start_idx is None:
+            start_idx = idx
+        elif not is_quiet and start_idx is not None:
+            start = round(start_idx * step_s, 3)
+            end = round(min(duration, idx * step_s) if duration > 0 else idx * step_s, 3)
+            if end - start >= min_dur - 1e-6:
+                pairs.append((start, end))
+            start_idx = None
+    if start_idx is not None:
+        start = round(start_idx * step_s, 3)
+        end = round(duration if duration > start_idx * step_s else total * step_s, 3)
+        if end - start >= min_dur - 1e-6:
+            pairs.append((start, end))
+    return pairs
+
+
 def silences(flac: str, duration: float) -> list[tuple[float, float]]:
-    threshold = silence_threshold(sound_levels(flac))
+    import numpy as np
+
     proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-i",
-            flac,
-            "-af",
-            f"silencedetect=noise={threshold:g}dB:d=0.3",
-            "-f",
-            "null",
-            "-",
-        ],
+        ["ffmpeg", "-v", "error", "-i", flac, "-vn", "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
         capture_output=True,
-        text=True,
     )
     # A failed read must not pass for a recording with no pauses in it.
     if proc.returncode != 0:
-        raise SystemExit(f"Could not read the sound: {ffmpeg_error_detail(proc.stderr or '')}")
-    return parse_silences(proc.stderr or "", duration)
+        err = (proc.stderr or b"").decode("utf-8", "replace")
+        raise SystemExit(f"Could not read the sound: {ffmpeg_error_detail(err)}")
+    level = _frame_levels(np.frombuffer(proc.stdout, dtype=np.int16))
+    threshold = silence_threshold(_levels_from_db(level))
+    return silences_from_levels(level, threshold, duration)
 
 
 def extract_audio(path: str, dst: str) -> None:
@@ -266,6 +339,12 @@ def render_with_progress(
     zoom: str = "off",
     close=None,
     angles=None,
+    resolution: str = "source",
+    aspect: str = "source",
+    work_dir: str | None = None,
+    pip: bool = False,
+    music: str | None = None,
+    live_title: str | None = None,
 ) -> dict | None:
     """Encode segments and print '<label> N%' as the render advances.
 
@@ -297,6 +376,12 @@ def render_with_progress(
             zoom=zoom,
             close=close,
             angles=angles,
+            resolution=resolution,
+            aspect=aspect,
+            work_dir=work_dir,
+            pip=pip,
+            music=music,
+            live_title=live_title,
         )
     # BOTCUT_RENDER=graph is the older way: the whole movie as one filter graph, encoded in one go.
     print(f"{label} 0%", flush=True)
@@ -332,6 +417,8 @@ def render_with_progress(
         zoom=zoom,
         close=close,
         angles=angles,
+        resolution=resolution,
+        aspect=aspect,
     )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", *args[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -359,6 +446,10 @@ def render_with_progress(
                 continue
             last = percent
             print(f"{label} {percent}%", flush=True)
+    except BaseException:
+        if proc.poll() is None:
+            proc.terminate()
+        raise
     finally:
         code = proc.wait()
         thread.join()
@@ -681,7 +772,7 @@ def _video_filter(
             f"[{in_index}:v]{tight}scale={width}:{height}:force_original_aspect_ratio=decrease{range_opts},"
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={fps_s}"
             + picture
-            + (",format=nv12,hwupload" if encoder == "vaapi" else "")
+            + (",format=nv12,hwupload" if encoder == "vaapi" else ",format=yuv420p")
             + f"[v{out_index}]"
         )
     # scale_vaapi keeps the 4K resize on the Arc. This GPU drops the
@@ -731,9 +822,11 @@ def cut_pieces(
 
         for window in cover_windows(covers, lines or [], segments, durations):
             by_segment.setdefault(int(window["segment"]), []).append(window)
+    multicam_clips: set[int] = set()
     if angles:
-        from botcut.angles import angle_windows
+        from botcut.angles import angle_windows, groups as angle_groups
 
+        multicam_clips = set(angle_groups(clips).keys())
         # B-roll laid over a line wins the picture. The other camera shows around it.
         for window in angle_windows(angles, lines or [], segments, clips):
             by_segment.setdefault(int(window["segment"]), []).append(window)
@@ -743,6 +836,8 @@ def cut_pieces(
             not is_card(str(clip.get("path") or ""))
             and str(clip.get("role") or "") != "broll"
             and not _rotated(clip)
+            and not clip.get("is_image")
+            and not (multicam_clips and any(clips[idx] is clip for idx in multicam_clips))
         )
 
     tight = [False] * len(segments)
@@ -905,6 +1000,10 @@ def cut_pieces(
                 row["voice_start"] = float(piece["voice_start"])
             if piece.get("angle"):
                 row["angle"] = True
+            if piece.get("continued"):
+                row["continued"] = True
+            if piece.get("continues"):
+                row["continues"] = True
             found.append(row)
     return found
 
@@ -950,6 +1049,8 @@ def render_args(
     zoom: str = "off",
     close=None,
     angles=None,
+    resolution: str = "source",
+    aspect: str = "source",
 ) -> list[str]:
     """ffmpeg arguments for the cut, as one filter graph.
 
@@ -972,7 +1073,7 @@ def render_args(
         raise SystemExit(f"Unknown zoom {zoom}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
-    width, height, fps = frame_size(clips)
+    width, height, fps = target_size(clips, resolution=resolution, aspect=aspect)
     args = ["-y"]
     if measure:
         # Listening needs no picture, so nothing here touches the GPU or the encoder.
@@ -1061,12 +1162,49 @@ def render_args(
 
 
 ZOOM_NAMES = ("off", "auto", "cuts", "push", "lines")
+RESOLUTIONS = ("source", "2160p", "1440p", "1080p", "720p")
+ASPECTS = ("source", "landscape", "portrait")
 
 
 def encoder_args(encoder: str) -> list[str]:
     if encoder == "vaapi":
         return ["-c:v", "h264_vaapi", "-qp", "20"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18"]
+    return ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "18"]
+
+
+def target_size(
+    clips: list[dict], resolution: str = "source", aspect: str = "source"
+) -> tuple[int, int, float]:
+    """The output (width, height, fps) for a chosen resolution and aspect ratio.
+
+    `source` keeps the first camera shot's dimensions. An explicit resolution
+    sets the shorter side (2160, 1440, 1080, 720), and `landscape`/`portrait`
+    sets 16:9 or 9:16. Dimensions are always even.
+    """
+    if resolution not in RESOLUTIONS:
+        raise SystemExit(f"Unknown resolution {resolution}")
+    if aspect not in ASPECTS:
+        raise SystemExit(f"Unknown aspect {aspect}")
+    src_w, src_h, fps = frame_size(clips)
+    if resolution == "source" and aspect == "source":
+        return src_w, src_h, fps
+    short_side = min(src_w, src_h) if resolution == "source" else int(resolution[:-1])
+    if aspect == "landscape":
+        height = short_side
+        width = int(round(short_side * 16 / 9))
+    elif aspect == "portrait":
+        width = short_side
+        height = int(round(short_side * 16 / 9))
+    else:
+        if src_w >= src_h:
+            height = short_side
+            width = int(round(src_w * short_side / src_h))
+        else:
+            width = short_side
+            height = int(round(src_h * short_side / src_w))
+    width = max(2, (width // 2) * 2)
+    height = max(2, (height // 2) * 2)
+    return width, height, fps
 
 
 def frame_size(clips: list[dict]) -> tuple[int, int, float]:
@@ -1082,6 +1220,8 @@ def frame_size(clips: list[dict]) -> tuple[int, int, float]:
         ref = clip
         break
     width, height, fps = int(ref["width"]), int(ref["height"]), float(ref["fps"])
+    if abs(_degrees(ref.get("rotate"))) % 180 == 90:
+        width, height = height, width
     if width <= 0 or height <= 0 or fps <= 0:
         raise SystemExit(f"Clip has no video to render: {ref['path']}")
     return width, height, fps
@@ -1158,12 +1298,32 @@ def _same_rate(clip: dict, ref: float) -> bool:
     return abs(rate - ref) < 0.01
 
 
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if value in (None, "", "N/A"):
+        return default
+    try:
+        found = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+    return found if found == found else default
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    if value in (None, "", "N/A"):
+        return default
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 def _parse_rate(rate: str) -> float:
-    if "/" in str(rate):
-        num, den = str(rate).split("/", 1)
-        den_f = float(den)
-        return float(num) / den_f if den_f else 0.0
-    return float(rate)
+    text = str(rate or "")
+    if "/" in text:
+        num, den = text.split("/", 1)
+        den_f = _safe_float(den)
+        return _safe_float(num) / den_f if den_f else 0.0
+    return _safe_float(text)
 
 
 def _num(value: float) -> str:

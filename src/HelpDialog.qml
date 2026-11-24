@@ -29,13 +29,19 @@ Item {
 
         MouseArea { anchors.fill: parent }
 
-        Column {
-            id: column
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
+        Flickable {
+            anchors.fill: parent
             anchors.margins: 24
-            spacing: 12
+            contentWidth: width
+            contentHeight: column.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+
+            Column {
+                id: column
+                width: parent.width
+                spacing: 12
 
             Label {
                 text: qsTr("How BotCut works")
@@ -114,6 +120,7 @@ Item {
                             { keys: "X", action: qsTr("Remove or restore") },
                             { keys: "Ctrl / Alt Space", action: qsTr("Set the edges") },
                             { keys: "Ctrl+Z", action: qsTr("Undo") },
+                            { keys: "Ctrl+Shift+Z", action: qsTr("Redo") },
                             { keys: "Z", action: qsTr("Zoom") }
                         ]
                         delegate: KeyLine {}
@@ -146,9 +153,11 @@ Item {
                 ActionButton {
                     text: qsTr("Close")
                     filled: true
+                    focusPolicy: Qt.TabFocus
                     onClicked: host.helpVisible = false
                 }
             }
+        }
         }
     }
 

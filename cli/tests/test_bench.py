@@ -181,3 +181,11 @@ def test_usage_is_one_sentence_and_dollars_only_when_prices_are_given(monkeypatc
     assert llm.usage_line(llm.usage()) == "Used 12,340 tokens in 2 requests, about $0.04."
     llm.reset_usage()
     assert llm.usage_line(llm.usage()) == ""
+
+
+def test_compare_guards_zero_duration_lines():
+    want = [{"id": 0, "start": 1.0, "end": 1.0, "keep": True}]
+    got = [{"id": 0, "start": 1.0, "end": 1.0, "keep": True}]
+    result = bench.compare(want, got)
+    assert result["precision"] == 1.0
+    assert result["recall"] == 1.0

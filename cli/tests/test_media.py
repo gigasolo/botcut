@@ -595,3 +595,79 @@ def test_a_quiet_shot_and_a_loud_one_sound_alike_in_the_movie(tmp_path):
     first, second = part(0.5), part(5.5)
     assert abs(first - second) <= 2.0, (first, second)
     assert abs(_loudness_of(out) - (-16.0)) <= 1.5
+
+
+def test_x264_forces_yuv420p_and_rotated_frame_size_swaps_dimensions():
+    from botcut.media import encoder_args, frame_size
+
+    assert "-pix_fmt" in encoder_args("x264")
+    assert encoder_args("x264")[encoder_args("x264").index("-pix_fmt") + 1] == "yuv420p"
+    clips = [{"path": "/tmp/a.mp4", "width": 1920, "height": 1080, "fps": 30.0}]
+    args = render_args([{"clip": 0, "start": 0.0, "end": 1.0, "reason": "a"}], clips, "/tmp/out.mp4")
+    assert ",format=yuv420p[v0]" in _graph(args)
+
+    assert frame_size([{"path": "/tmp/p.mp4", "width": 1920, "height": 1080, "fps": 30.0, "rotate": 90}]) == (1080, 1920, 30.0)
+    assert frame_size([{"path": "/tmp/p.mp4", "width": 1920, "height": 1080, "fps": 30.0, "rotate": -90}]) == (1080, 1920, 30.0)
+    assert frame_size([{"path": "/tmp/p.mp4", "width": 1920, "height": 1080, "fps": 30.0, "rotate": 180}]) == (1920, 1080, 30.0)
+
+
+def test_cut_pieces_preserves_continued_and_continues_flags():
+    from botcut.media import cut_pieces
+
+    clips = [
+        {"path": "/tmp/talk.mp4", "width": 1920, "height": 1080, "fps": 30.0, "duration": 20.0},
+        {"path": "/tmp/broll.mp4", "width": 1920, "height": 1080, "fps": 30.0, "duration": 20.0, "role": "broll"},
+    ]
+    segs = [
+        {"clip": 0, "start": 0.0, "end": 4.0, "reason": "a"},
+        {"clip": 0, "start": 5.0, "end": 9.0, "reason": "b"},
+    ]
+    lines = [
+        {"id": 0, "clip": 0, "start": 0.0, "end": 2.0, "keep": True, "text": "a"},
+        {"id": 1, "clip": 0, "start": 2.0, "end": 4.0, "keep": True, "text": "b"},
+        {"id": 2, "clip": 0, "start": 5.0, "end": 7.0, "keep": True, "text": "c"},
+        {"id": 3, "clip": 0, "start": 7.0, "end": 9.0, "keep": True, "text": "d"},
+    ]
+    covers = [{"clip": 1, "line": 1, "through": 2, "start": 0.0, "end": 6.0, "reason": "bridge"}]
+    pieces = cut_pieces(segs, clips, polish=True, covers=covers, lines=lines)
+    broll_pieces = [p for p in pieces if p["clip"] == 1]
+    assert len(broll_pieces) == 2
+    assert broll_pieces[0].get("continues") is True and not broll_pieces[0].get("continued")
+    assert broll_pieces[1].get("continued") is True and not broll_pieces[1].get("continues")
+
+
+def test_cached_still_invalidates_when_time_or_clip_changes(monkeypatch, tmp_path):
+    from botcut import media
+
+    video = tmp_path / "shot.mp4"
+    video.write_bytes(b"v1")
+    dest = tmp_path / "stills" / "0.jpg"
+    calls = []
+
+    def fake_grab(v, at, d):
+        calls.append(at)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(f"frame-{at}".encode())
+        return True
+
+    monkeypatch.setattr(media, "grab_still", fake_grab)
+    assert media.cached_still(str(video), 1.0, str(dest))
+    assert media.cached_still(str(video), 1.0, str(dest))
+    assert calls == [1.0]
+    # Timestamp changed -> re-grab.
+    assert media.cached_still(str(video), 2.5, str(dest))
+    assert calls == [1.0, 2.5]
+    # File content/size changed -> re-grab.
+    video.write_bytes(b"v2-longer")
+    assert media.cached_still(str(video), 2.5, str(dest))
+    assert calls == [1.0, 2.5, 2.5]
+
+
+def test_silences_from_levels_matches_expected_pauses():
+    import numpy as np
+
+    from botcut.media import silences_from_levels
+
+    # 20 frames (1.0s) loud, 10 frames (0.5s) quiet, 10 frames (0.5s) loud, 4 frames (0.2s) quiet (too short).
+    levels = np.array([-15.0] * 20 + [-50.0] * 10 + [-15.0] * 10 + [-50.0] * 4, dtype=np.float32)
+    assert silences_from_levels(levels, -35.0, 2.2) == [(1.0, 1.5)]

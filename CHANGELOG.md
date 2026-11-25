@@ -2,6 +2,13 @@
 
 User-facing changes in this fork. Dates are the days the work landed on `master`.
 
+## 2026-11-24
+
+- **Live title overlay:** **Add a title card…** now defaults to **Live overlay**, fading clean white Swiss typography over the opening 3 seconds of live video (with no silent freeze or bolted-on intro). When a live title is set, auto-hook lifting is suppressed so the movie opens smoothly on the actual opening footage, and the overlay fade stays mathematically continuous across cuts in the first 3.2 seconds. **Solid** (offline typographic card) and **AI art** cards remain available for standalone 3-second shots.
+- **Prosody-aware pause editing:** Recalibrated the four pace profiles (**Open** `1.40s`, **Measured** `0.85s`, **Tight** `0.55s`, **Frenzied** `0.35s`) with asymmetric breath padding, a minimum-savings gate (no jump cuts to save 150ms), and cut cooldowns. Pause budgets now adapt to transcript context—giving topic/beat transitions extra breathing room while tightening mid-sentence hesitations—coalesce filler word trims with adjacent silences into a single cut, scale LLM crutch-word trimming by pace, and use a gentler 25ms equal-power crossfade on pause joins.
+- **Subtle, Medium, and Bold eye-locked zoom:** **Settings → Zoom** now offers **Off**, **Subtle** (6% punch-in / 8s hold / 3% drift), **Medium** (10% / 6s hold / 5% drift; legacy `auto` maps here), and **Bold** (15% / 4.5s hold / 7% drift). Punch-ins anchor proportionally on the speaker's face so the eye-line stays locked across cuts, and tiny micro-trims (`< 0.45s`) no longer trigger zoom hopping.
+- **Video presets, formats, PiP, and finishing:** Added **Video type** presets (**Internal**, **Marketing**, **Monologue**) in Settings, landscape/portrait aspect ratios (`16:9`, `9:16`, `Auto`) and resolution controls (`2160p`, `1440p`, `1080p`, `720p`), Picture-in-Picture and portrait split-screen for slides/screen recordings with studio framing, multi-clip color matching, auto-ducked background music, an enhanced **Export** dialog, brand kit configuration (`cli/botcut/brand.py`), editorial photo thumbnails (`cli/botcut/thumb.py`), and `botcut-cli ship` Ship Pack generation (chapters, social/Slack drafts, thumbnail, captions, and dual-format renders).
+
 ## 2026-11-22
 
 - Two cameras on one take are cut between. Drop both files and press **Cut**: the second is found by its sound, lined up with the first to the frame, and never transcribed or heard. The picture goes to it at a jump cut, which hides the jump, at the start of a new beat, on a line that carries the point, or when one view has been on a long time. A view is held at least 4 seconds and never changes inside a line.

@@ -429,7 +429,7 @@ def test_decide_keeps_a_card_without_a_transcript(monkeypatch, tmp_path):
     make_card("See you", str(close_card))
     _clip(talk, 3)
 
-    from botcut.pick import pick as real_pick
+    from botcut.pick import read_shoot as real_read_shoot
     from botcut.stt import transcribe_fake
 
     calls = {"n": 0}
@@ -440,13 +440,13 @@ def test_decide_keeps_a_card_without_a_transcript(monkeypatch, tmp_path):
 
     seen = {}
 
-    def spy(utts, intent=""):
+    def spy(utts, intent="", plan=None):
         seen["utts"] = list(utts)
         seen["intent"] = intent
-        return real_pick(utts, intent)
+        return real_read_shoot(utts, intent, plan)
 
     monkeypatch.setattr("botcut.cli.transcribe_fake", counting)
-    monkeypatch.setattr("botcut.cli.pick", spy)
+    monkeypatch.setattr("botcut.cli.read_shoot", spy)
 
     out = tmp_path / "out"
     run(
@@ -490,7 +490,7 @@ def test_decide_keeps_a_card_without_a_transcript(monkeypatch, tmp_path):
     def no_stt():
         raise AssertionError("stt")
 
-    monkeypatch.setattr("botcut.cli.pick", no_pick)
+    monkeypatch.setattr("botcut.cli.read_shoot", no_pick)
     monkeypatch.setattr("botcut.cli.transcribe_fake", no_stt)
     alone = tmp_path / "alone"
     run([str(open_card)], str(alone), decide=True, intent="A quiet ride")

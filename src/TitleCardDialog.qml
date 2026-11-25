@@ -5,13 +5,11 @@ import QtQuick.Layouts
 Item {
     id: root
     property var host
+    property string cardStyle: "live"
     anchors.fill: parent
     visible: host && host.titleCardOpen
     z: 45
 
-    function clearField() {
-        field.text = ""
-    }
     function sentence() {
         return field.text.replace(/\s+/g, " ").trim()
     }
@@ -19,13 +17,22 @@ Item {
         var words = sentence()
         if (words === "" || backend.busy)
             return
-        backend.makeCard(where, words)
+        if (root.cardStyle === "live") {
+            if (backend && backend.liveTitle !== undefined)
+                backend.liveTitle = words
+            host.titleCardOpen = false
+            return
+        }
+        backend.makeCard(where, words, root.cardStyle)
         host.titleCardOpen = false
     }
 
     onVisibleChanged: {
-        if (visible)
-            field.text = ""
+        if (visible) {
+            field.text = (backend && backend.movieTitle !== undefined) ? backend.movieTitle : ""
+            field.forceActiveFocus()
+            field.selectAll()
+        }
     }
 
     Rectangle {
@@ -77,6 +84,7 @@ Item {
                     clip: true
                     selectByMouse: true
                     enabled: !backend.busy
+                    onAccepted: root.place("open")
                 }
                 Label {
                     anchors.fill: field
@@ -91,9 +99,39 @@ Item {
                     elide: Text.ElideRight
                 }
             }
+            RowLayout {
+                width: parent.width
+                spacing: 8
+                Label {
+                    text: qsTr("Style")
+                    color: theme.foreground
+                    font.pixelSize: 13
+                }
+                Item { Layout.fillWidth: true }
+                ActionButton {
+                    text: qsTr("Live overlay")
+                    filled: root.cardStyle === "live"
+                    enabled: !backend.busy
+                    onClicked: root.cardStyle = "live"
+                }
+                ActionButton {
+                    text: qsTr("Solid")
+                    filled: root.cardStyle === "typo"
+                    enabled: !backend.busy
+                    onClicked: root.cardStyle = "typo"
+                }
+                ActionButton {
+                    text: qsTr("AI art")
+                    filled: root.cardStyle === "ai"
+                    enabled: !backend.busy
+                    onClicked: root.cardStyle = "ai"
+                }
+            }
             Label {
                 width: parent.width
-                text: qsTr("A still with this sentence, added as a shot you can move or remove.")
+                text: root.cardStyle === "live"
+                      ? qsTr("Fades minimal white typography over the first 3 seconds of live video — no silent freeze.")
+                      : qsTr("A 3-second static still added as a shot you can move or remove.")
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 13
@@ -105,17 +143,20 @@ Item {
                 Item { Layout.fillWidth: true }
                 ActionButton {
                     text: qsTr("Cancel")
+                    focusPolicy: Qt.TabFocus
                     onClicked: host.titleCardOpen = false
                 }
                 ActionButton {
                     text: qsTr("Put it last")
-                    enabled: !backend.busy
+                    focusPolicy: Qt.TabFocus
+                    enabled: !backend.busy && root.sentence() !== "" && root.cardStyle !== "live"
                     onClicked: root.place("close")
                 }
                 ActionButton {
                     text: qsTr("Put it first")
                     filled: true
-                    enabled: !backend.busy
+                    focusPolicy: Qt.TabFocus
+                    enabled: !backend.busy && root.sentence() !== ""
                     onClicked: root.place("open")
                 }
             }

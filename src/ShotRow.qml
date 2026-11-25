@@ -9,15 +9,28 @@ Rectangle {
     width: ListView.view ? ListView.view.width : implicitWidth
     height: body.implicitHeight + 16
     radius: theme.radius
-    color: selected ? theme.selected : "transparent"
+    color: selected ? theme.selected : (rowHover.hovered ? theme.hover : "transparent")
+
+    HoverHandler { id: rowHover }
 
     readonly property bool selected: index === backend.trayIndex
     readonly property bool exists: backend.trayFileExists(modelData)
-    readonly property string title: {
-        var name = baseName(modelData)
-        return name.indexOf("botcut-card-") === 0 ? qsTr("Title card") : name
+    readonly property bool card: baseName(modelData).indexOf("botcut-card-") === 0
+    // Read through the list so the row follows a toggle. A card is never B-roll.
+    readonly property bool broll: !card && backend.brollFiles.indexOf(modelData) >= 0
+    // Another camera on a take a file above it filmed. Found by its sound, or marked by hand.
+    readonly property bool angle: !card && !broll && backend.angleFiles.indexOf(modelData) >= 0
+    readonly property string title: card ? qsTr("Title card") : baseName(modelData)
+    property bool renaming: false
+    onSelectedChanged: if (!selected) renaming = false
+    function stemOf(path) {
+        var name = baseName(path)
+        var dot = name.lastIndexOf(".")
+        return dot > 0 ? name.substring(0, dot) : name
     }
-    readonly property string fact: exists ? backend.trayFileSize(modelData) : qsTr("File missing")
+    readonly property string fact: !exists ? qsTr("File missing")
+                                           : broll ? qsTr("B-roll")
+                                           : angle ? qsTr("Second camera") : backend.trayFileSize(modelData)
 
     function baseName(path) {
         var s = String(path)
@@ -27,10 +40,39 @@ Rectangle {
     function fileUrl(path) {
         if (!path)
             return ""
+        if (typeof backend.fileUrl === "function")
+            return backend.fileUrl(path)
         var s = String(path)
         if (s.indexOf("file:") === 0)
             return path
-        return "file://" + encodeURI(path)
+        return "file://" + encodeURI(s).replace(/#/g, "%23").replace(/\?/g, "%3F")
+    }
+
+    component ShotWord: Rectangle {
+        id: wordBox
+        property string word
+        property string wordObjectName: ""
+        signal chosen()
+        implicitWidth: wordLabel.implicitWidth + 10
+        implicitHeight: 24
+        radius: Math.max(0, theme.radius - 2)
+        color: wordHover.hovered && enabled ? theme.hover : "transparent"
+        HoverHandler { id: wordHover }
+        Label {
+            id: wordLabel
+            objectName: wordBox.wordObjectName
+            anchors.centerIn: parent
+            text: wordBox.word
+            color: theme.foreground
+            opacity: wordBox.enabled ? (wordHover.hovered ? 0.95 : 0.62) : 0.38
+            font.pixelSize: 13
+        }
+        MouseArea {
+            anchors.fill: parent
+            enabled: wordBox.enabled
+            cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onClicked: wordBox.chosen()
+        }
     }
 
     MouseArea {
@@ -64,6 +106,7 @@ Rectangle {
                     anchors.fill: parent
                     fillMode: Image.PreserveAspectCrop
                     asynchronous: true
+                    sourceSize: Qt.size(128, 72)
                     source: backend.trayThumbRevision >= 0 ? row.fileUrl(backend.trayThumb(row.modelData)) : ""
                 }
                 Rectangle {
@@ -82,13 +125,53 @@ Rectangle {
             }
 
             Label {
+                visible: !row.renaming
                 Layout.fillWidth: true
                 text: row.title
                 color: row.exists ? theme.foreground : theme.accent
                 elide: Text.ElideMiddle
                 font.pixelSize: 13
+                MouseArea {
+                    anchors.fill: parent
+                    enabled: !row.card && row.exists && !backend.busy
+                    onClicked: backend.trayIndex = row.index
+                    onDoubleClicked: {
+                        backend.trayIndex = row.index
+                        renameInput.text = row.stemOf(row.modelData)
+                        row.renaming = true
+                        renameInput.forceActiveFocus()
+                        renameInput.selectAll()
+                    }
+                }
+            }
+            Rectangle {
+                visible: row.renaming
+                Layout.fillWidth: true
+                height: 26
+                radius: Math.max(0, theme.radius - 2)
+                color: theme.background
+                border.width: 1
+                border.color: theme.accent
+                TextInput {
+                    id: renameInput
+                    objectName: "shotRenameInput"
+                    anchors.fill: parent
+                    anchors.leftMargin: 8
+                    anchors.rightMargin: 8
+                    verticalAlignment: Text.AlignVCenter
+                    color: theme.foreground
+                    font.pixelSize: 13
+                    selectByMouse: true
+                    clip: true
+                    onAccepted: {
+                        if (text.trim() !== "" && backend.renameTrayFile(row.index, text))
+                            row.renaming = false
+                    }
+                    Keys.onEscapePressed: row.renaming = false
+                }
             }
             Label {
+                visible: !row.renaming
                 text: row.fact
                 color: row.exists ? theme.foreground : theme.accent
                 opacity: row.exists ? 0.62 : 1
@@ -98,59 +181,82 @@ Rectangle {
             }
         }
 
-        Row {
+        // The words wrap onto a second line when the column is narrow.
+        Flow {
             id: actions
             visible: row.selected
-            spacing: 12
-            Label {
-                text: qsTr("Move up")
-                color: theme.foreground
-                opacity: upArea.enabled ? 0.62 : 0.38
-                font.pixelSize: 13
+            width: parent.width
+            spacing: 6
+            ShotWord {
+                word: qsTr("Move up")
                 enabled: row.index > 0 && !backend.busy
-                MouseArea {
-                    id: upArea
-                    anchors.fill: parent
-                    enabled: parent.enabled
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: {
-                        backend.trayIndex = row.index
-                        backend.moveTray(-1)
-                    }
+                onChosen: {
+                    backend.trayIndex = row.index
+                    backend.moveTray(-1)
                 }
             }
-            Label {
-                text: qsTr("Move down")
-                color: theme.foreground
-                opacity: downArea.enabled ? 0.62 : 0.38
-                font.pixelSize: 13
+            ShotWord {
+                word: qsTr("Move down")
                 enabled: row.index < backend.tray.length - 1 && !backend.busy
-                MouseArea {
-                    id: downArea
-                    anchors.fill: parent
-                    enabled: parent.enabled
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: {
-                        backend.trayIndex = row.index
-                        backend.moveTray(1)
+                onChosen: {
+                    backend.trayIndex = row.index
+                    backend.moveTray(1)
+                }
+            }
+            ShotWord {
+                word: row.renaming ? qsTr("Save name") : qsTr("Rename")
+                visible: !row.card && row.exists
+                enabled: !backend.busy && (!row.renaming || renameInput.text.trim() !== "")
+                onChosen: {
+                    backend.trayIndex = row.index
+                    if (row.renaming) {
+                        if (backend.renameTrayFile(row.index, renameInput.text))
+                            row.renaming = false
+                    } else {
+                        renameInput.text = row.stemOf(row.modelData)
+                        row.renaming = true
+                        renameInput.forceActiveFocus()
+                        renameInput.selectAll()
                     }
                 }
             }
-            Label {
-                text: qsTr("Remove")
-                color: theme.foreground
-                opacity: removeArea.enabled ? 0.62 : 0.38
-                font.pixelSize: 13
+            ShotWord {
+                word: qsTr("Cancel")
+                visible: row.renaming
                 enabled: !backend.busy
-                MouseArea {
-                    id: removeArea
-                    anchors.fill: parent
-                    enabled: parent.enabled
-                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                    onClicked: {
-                        backend.trayIndex = row.index
-                        backend.removeTray()
-                    }
+                onChosen: row.renaming = false
+            }
+            ShotWord {
+                word: qsTr("Remove")
+                enabled: !backend.busy
+                onChosen: {
+                    backend.trayIndex = row.index
+                    backend.removeTray()
+                }
+            }
+            // A shot becomes B-roll, and B-roll becomes a shot again. A card is neither.
+            // The same take from another camera. The first file is nobody's second camera.
+            ShotWord {
+                wordObjectName: "angleToggle"
+                visible: !row.card && !row.broll && !row.angle && row.index > 0
+                word: qsTr("Second camera")
+                enabled: !backend.busy
+                onChosen: {
+                    backend.trayIndex = row.index
+                    backend.toggleAngle(row.index)
+                }
+            }
+            ShotWord {
+                wordObjectName: "brollToggle"
+                visible: !row.card
+                word: row.broll || row.angle ? qsTr("Shot") : qsTr("B-roll")
+                enabled: !backend.busy
+                onChosen: {
+                    backend.trayIndex = row.index
+                    if (row.angle)
+                        backend.toggleAngle(row.index)
+                    else
+                        backend.toggleBroll(row.index)
                 }
             }
         }

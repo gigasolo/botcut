@@ -3,7 +3,7 @@ name = "botcut"
 version = "0.1.0"
 description = "CLI rough cuts for BotCut"
 requires-python = ">=3.11"
-dependencies = ["requests"]
+dependencies = ["requests", "numpy>=1.26", "opencv-python-headless>=4.9"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -15,6 +15,9 @@ botcut-cli = "botcut.cli:main"
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+botcut = ["data/*.onnx", "data/*.md"]
 
 [tool.setuptools.packages.find]
 where = ["."]

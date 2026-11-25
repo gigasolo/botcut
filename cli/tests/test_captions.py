@@ -99,3 +99,25 @@ def test_captions_writes_srt_without_burning(tmp_path, capsys):
     assert "hello there" in text
     assert "rough_cut.srt" in capsys.readouterr().out
     assert not (tmp_path / "rough_cut.captioned.mp4").exists()
+
+
+def test_captions_guards_empty_words_and_assemble_mode(tmp_path):
+    from botcut.cli import captions
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "0-take.fake.words.json").write_text(json.dumps({"duration": 2, "words": []}))
+    doc = {
+        "stt": "fake",
+        "clips": [{"index": 0, "path": str(tmp_path / "take.mp4"), "duration": 2}],
+        "segments": [{"clip": 0, "start": 0.0, "end": 1.0, "reason": "fake"}],
+    }
+    cuts = tmp_path / "cuts.json"
+    cuts.write_text(json.dumps(doc))
+    with pytest.raises(SystemExit, match="No words to caption"):
+        captions(str(cuts), burn=True)
+
+    doc["mode"] = "assemble"
+    cuts.write_text(json.dumps(doc))
+    with pytest.raises(SystemExit, match="Assemble cuts have no transcript to caption"):
+        captions(str(cuts), burn=False)

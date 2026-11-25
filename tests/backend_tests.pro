@@ -31,3 +31,6 @@ SOURCES += \
     ../src/thumbprovider.cpp \
     ../src/timeline.cpp \
     ../src/thumbworker.cpp
+
+# The checkout this was built from, so uv can run cli/ when botcut-cli is not installed.
+DEFINES += BOTCUT_SOURCE_DIR=\\\"$$PWD/..\\\"

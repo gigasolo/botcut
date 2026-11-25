@@ -2,9 +2,8 @@ import QtQuick
 import "Format.js" as Format
 
 // The video as a row of clips over a filmstrip. Each clip has a handle at both
-// ends; whatever falls outside every clip is cut. Double-click a clip to split
-// it, double-click a gap or a split to join the clips around it, and hover a
-// clip to remove it. All times are in seconds.
+// ends; whatever falls outside every clip is cut. Double-click a gap to bring
+// it back, and hover a clip to remove it. All times are in seconds.
 Item {
     id: root
     implicitHeight: 76
@@ -83,10 +82,12 @@ Item {
             model: root.clips.length + 1
             Rectangle {
                 required property int index
-                readonly property real from: index === 0 ? 0 : root.clips[index - 1].end
-                readonly property real to: index === root.clips.length ? root.durationSec : root.clips[index].start
+                readonly property var prevClip: index > 0 && index - 1 < root.clips.length ? root.clips[index - 1] : null
+                readonly property var nextClip: index < root.clips.length ? root.clips[index] : null
+                readonly property real from: index === 0 ? 0 : (prevClip ? prevClip.end : 0)
+                readonly property real to: index === root.clips.length ? root.durationSec : (nextClip ? nextClip.start : root.durationSec)
                 readonly property bool droppedGap: {
-                    if (!root.plan || !root.clips || root.clips.length === 0)
+                    if (!root.plan || root.trimming || !root.clips || root.clips.length === 0)
                         return false
                     var row = index < root.clips.length ? root.clips[index] : root.clips[root.clips.length - 1]
                     if (!row)
@@ -177,10 +178,12 @@ Item {
             Item {
                 id: clipItem
                 required property int index
-                readonly property var range: root.clips[index]
+                readonly property var range: index < root.clips.length ? root.clips[index] : null
                 readonly property bool hovered: area.clipHovered === index
+                visible: range !== null
                 // Whole pixels, so handles meet the filmstrip without an antialiased seam.
-                x: Math.round(root.xForTime(range.start)); width: Math.max(4, Math.round(root.xForTime(range.end)) - x)
+                x: range ? Math.round(root.xForTime(range.start)) : 0
+                width: range ? Math.max(4, Math.round(root.xForTime(range.end)) - x) : 0
                 height: root.height
                 Rectangle {
                     anchors.fill: parent
@@ -216,23 +219,22 @@ Item {
         readonly property string hint: {
             if (area.gapHovered >= 0)
                 return "Double-click to restore"
-            if (area.splitHovered >= 0)
-                return "Double-click to join"
-            if (area.clipHovered < 0)
+            if (area.clipHovered < 0 || !root.plan)
                 return ""
-            if (!root.plan)
-                return area.onHandle ? "" : "Double-click to split"
             var row = root.clips[area.clipHovered]
             if (!row || row.text === undefined || row.text === null)
                 return ""
             return String(row.text).trim()
         }
         visible: root.enabled && (dragging || (area.mode === 0 && area.containsMouse && !area.removeHovered && hint !== ""))
-        width: label.implicitWidth + 20; height: dragging ? 32 : 26
+        width: Math.min(label.implicitWidth + 20, Math.max(80, root.width - 16)); height: dragging ? 32 : 26
         radius: 7; color: theme.raised
-        x: Math.max(0, Math.min(root.width - width, (dragging ? root.xForTime(area.activeTime) : area.mouseX) - width / 2)); y: 8
+        x: Math.max(0, Math.min(root.width - width, (dragging ? root.xForTime(area.activeDisplayTime) : area.mouseX) - width / 2)); y: 8
         Text {
             id: label; anchors.centerIn: parent; color: "white"
+            width: parent.width - 20
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
             text: parent.dragging ? Format.fmt(area.activeTime) : parent.hint
             font.pixelSize: parent.dragging ? 15 : 12
             font.family: parent.dragging ? "monospace" : Qt.application.font.family
@@ -249,6 +251,7 @@ Item {
         property int clipIndex: -1
         property bool leftEdge: true
         property real activeTime: 0
+        property real activeDisplayTime: 0
         // Where the playhead was when the drag began: the drag moves the
         // playhead along, so snapping to it live would catch on itself.
         property real dragStartPlayhead: 0
@@ -271,9 +274,10 @@ Item {
             root.timeline.moveEdgeBy(clipIndex, leftEdge, delta)
             var sourceEdge = root.timeline.edgeTime(clipIndex, leftEdge)
             activeTime = sourceEdge
+            activeDisplayTime = root.timeline.displayForSource(clipIndex, sourceEdge)
             planMoved = true
             // The in-point's display time overlaps the previous block until the gesture packs.
-            seek(root.timeline.displayForSource(clipIndex, sourceEdge), clipIndex, sourceEdge)
+            seek(activeDisplayTime, clipIndex, sourceEdge)
             if (!leftEdge && x >= root.width - 10)
                 edgeHold = 1
             else if (leftEdge && x <= 10)
@@ -286,7 +290,7 @@ Item {
 
         // The hovered clip's × sits in its top-right corner, inside the handle.
         function onRemove(x, y) {
-            if (clipHovered < 0 || root.clips.length < 2) return false
+            if (clipHovered < 0 || clipHovered >= root.clips.length || root.clips.length < 2) return false
             var right = root.xForTime(root.clips[clipHovered].end) - root.handleW - 4
             var width = root.xForTime(root.clips[clipHovered].end) - root.xForTime(root.clips[clipHovered].start)
             return width > 60 && x >= right - 20 && x <= right && y >= 7 && y <= 27
@@ -354,6 +358,7 @@ Item {
             }
             root.timeline.moveEdge(clipIndex, leftEdge, snap(t))
             activeTime = leftEdge ? root.clips[clipIndex].start : root.clips[clipIndex].end
+            activeDisplayTime = activeTime
             seek(activeTime)
         }
         onPressed: mouse => {
@@ -363,6 +368,7 @@ Item {
             if (hit.handle) {
                 mode = 1; clipIndex = hit.clip; leftEdge = hit.left; dragStartPlayhead = root.playheadSec
                 activeTime = leftEdge ? root.clips[clipIndex].start : root.clips[clipIndex].end
+                activeDisplayTime = activeTime
                 if (root.plan) {
                     pressX = mouse.x
                     planSpan = root.windowLen
@@ -370,18 +376,19 @@ Item {
                     edgeExtra = 0
                     planMoved = false
                     activeTime = root.timeline.edgeTime(clipIndex, leftEdge)
+                    activeDisplayTime = root.timeline.displayForSource(clipIndex, activeTime)
                 }
                 root.timeline.beginGesture()
             } else {
                 mode = 2; seek(root.timeForX(mouse.x))
             }
         }
-        onReleased: {
-            var reseek = root.plan && mode === 1 && planMoved && clipIndex >= 0
+        function finishInteraction(commit) {
+            var reseek = commit && root.plan && mode === 1 && planMoved && clipIndex >= 0
             var index = clipIndex
             var left = leftEdge
             if (mode === 1) root.timeline.endGesture()
-            if (mode === 3 && onRemove(mouseX, mouseY)) root.timeline.removeClip(clipHovered)
+            if (commit && mode === 3 && onRemove(mouseX, mouseY)) root.timeline.removeClip(clipHovered)
             edgeHold = 0
             edgeExtra = 0
             planMoved = false
@@ -393,12 +400,12 @@ Item {
                 seek(root.timeline.playheadForEdge(index, left), index, root.timeline.edgeTime(index, left))
             hover(mouseX, mouseY)
         }
+        onReleased: finishInteraction(true)
+        onCanceled: finishInteraction(false)
         onDoubleClicked: mouse => {
             if (onRemove(mouse.x, mouse.y)) return
             var hit = hitTest(mouse.x)
-            if (!root.plan && hit.split >= 0) root.timeline.joinClips(hit.split)
-            else if (!root.plan && hit.clip >= 0 && !hit.handle) root.timeline.split(root.timeForX(mouse.x))
-            else if (hit.clip < 0) root.timeline.restoreGap(hit.gap)
+            if (hit.clip < 0) root.timeline.restoreGap(hit.gap)
             hover(mouse.x, mouse.y)
         }
         onExited: { clipHovered = -1; gapHovered = -1; splitHovered = -1; removeHovered = false }

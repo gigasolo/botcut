@@ -1,8 +1,10 @@
 #pragma once
 
+#include <QByteArray>
 #include <QFileSystemWatcher>
 #include <QObject>
 #include <QProcess>
+#include <QSocketNotifier>
 #include <QTimer>
 
 // Follows the Omarchy accent, foreground, and background live, and Hyprland's
@@ -46,6 +48,9 @@ signals:
 private:
     void reload();
     void refreshRounding();
+    void connectHyprlandSocket();
+    void readHyprlandEvents();
+    void closeHyprlandSocket();
     void recomputeDerived();
     static QString mixToward(const QString &background, const QString &foreground, double amount);
 
@@ -64,6 +69,8 @@ private:
     QString m_hyprctl;
     int m_radius = 0;
     QProcess m_roundingProcess;
-    QTimer m_roundingPoll;
     QTimer m_roundingTimeout;
+    int m_hyprFd = -1;
+    QSocketNotifier *m_hyprNotifier = nullptr;
+    QByteArray m_hyprBuffer;
 };

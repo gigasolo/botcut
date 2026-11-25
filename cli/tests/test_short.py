@@ -7,7 +7,7 @@ from botcut.short import pick_highlight, short_args
 
 def test_short_args_crops_landscape_and_only_scales_vertical():
     wide = " ".join(short_args(1.25, 12.0, 1920, 1080))
-    assert "crop=ih*9/16:ih" in wide
+    assert "crop=606:1080" in wide
     assert "scale=1080:1920" in wide
     tall = " ".join(short_args(0.0, 8.0, 1080, 1920))
     assert "crop=" not in tall
@@ -15,7 +15,7 @@ def test_short_args_crops_landscape_and_only_scales_vertical():
 
     wide_gpu = short_args(1.25, 12.0, 1920, 1080, encoder="vaapi", device="/dev/dri/renderD128")
     video_filter = wide_gpu[wide_gpu.index("-vf") + 1]
-    assert "crop=ih*9/16:ih" in video_filter
+    assert "crop=606:1080" in video_filter
     assert "scale=1080:1920" in video_filter
     assert "subtitles=short.srt:" in video_filter
     assert video_filter.startswith("hwdownload,format=nv12,")
@@ -23,6 +23,10 @@ def test_short_args_crops_landscape_and_only_scales_vertical():
     assert wide_gpu[wide_gpu.index("-c:v") + 1] == "h264_vaapi"
     assert wide_gpu[wide_gpu.index("-c:a") + 1] == "aac"
     assert "libx264" not in wide_gpu
+
+    # Right-edge speaker stays strictly inside 1920px width (1314 + 606 == 1920).
+    right = short_args(1.0, 10.0, 1920, 1080, center=0.99)
+    assert "crop=606:1080:1314:0" in right[right.index("-vf") + 1]
 
 
 def test_highlight_sends_low_effort(monkeypatch):

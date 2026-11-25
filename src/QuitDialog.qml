@@ -78,7 +78,8 @@ Item {
             Label {
                 text: backend.busy ? qsTr("Stop the render and quit?")
                         : (host.leaveTarget === "lists"
-                           ? qsTr("Export your trim before you go to Lists?")
+                           ? (host.looseCut ? qsTr("Save your movie before you go to Lists?")
+                                            : qsTr("Export your trim before you go to Lists?"))
                            : (host.looseCut ? qsTr("Save your movie before you quit?")
                               : qsTr("Export your trim before you quit?")))
                 color: theme.foreground
@@ -116,7 +117,9 @@ Item {
                 DialogButton {
                     id: quitQuitButton
                     text: backend.busy ? qsTr("Stop and quit")
-                            : (host.leaveTarget === "lists" ? qsTr("Go to Lists without exporting")
+                            : (host.leaveTarget === "lists"
+                               ? (host.looseCut ? qsTr("Go to Lists without saving")
+                                                : qsTr("Go to Lists without exporting"))
                                : (host.looseCut ? qsTr("Quit without saving")
                                   : qsTr("Quit without exporting")))
                     focus: true

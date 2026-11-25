@@ -35,9 +35,12 @@ def post(
                 read_timeouts_left -= 1
                 _again(delays.pop(0), None)
                 continue
-            except requests.RequestException:
+            except requests.RequestException as exc:
                 if not delays:
-                    raise SystemExit(f"{label} connection failed")
+                    detail = _safe_body(str(exc), key).strip()
+                    kind = type(exc).__name__
+                    suffix = f" ({kind}: {detail})" if detail else f" ({kind})"
+                    raise SystemExit(f"{label} connection failed{suffix}")
                 _again(delays.pop(0), None)
                 continue
         finally:
@@ -49,6 +52,27 @@ def post(
             _again(delays.pop(0), response)
             continue
         raise SystemExit(f"{label} HTTP {response.status_code}: {_safe_body(response.text, key)}")
+
+
+KEY_REJECTED = {400, 401, 403}
+KEY_READ_TIMEOUT = 15.0
+
+
+def check_key(base_url: str, key: str) -> None:
+    """Ask xAI for its model list. Returns when the key is accepted, and says why when not."""
+    try:
+        response = requests.get(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=(CONNECT_TIMEOUT, KEY_READ_TIMEOUT),
+        )
+    except requests.RequestException:
+        raise SystemExit("Could not reach xAI to check the key.")
+    if response.status_code == 200:
+        return
+    if response.status_code in KEY_REJECTED:
+        raise SystemExit("xAI did not accept that key.")
+    raise SystemExit("Could not reach xAI to check the key.")
 
 
 def _again(default: float, response: requests.Response | None) -> None:

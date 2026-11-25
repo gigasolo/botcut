@@ -11,6 +11,11 @@
 #include <QStandardPaths>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     : QObject(parent),
@@ -43,18 +48,88 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
             emit changed();
         }
     });
-    m_roundingPoll.setInterval(1000);
-    connect(&m_roundingPoll, &QTimer::timeout, this, &Theme::refreshRounding);
-    if (!m_hyprctl.isEmpty())
-        m_roundingPoll.start();
+    if (directory.isEmpty() && !m_hyprctl.isEmpty())
+        connectHyprlandSocket();
     reload();
 }
 
 Theme::~Theme() {
+    closeHyprlandSocket();
     if (m_roundingProcess.state() != QProcess::NotRunning) {
         m_roundingProcess.kill();
         m_roundingProcess.waitForFinished(1000);
     }
+}
+
+void Theme::connectHyprlandSocket() {
+    const QString sig = QString::fromUtf8(qgetenv("HYPRLAND_INSTANCE_SIGNATURE"));
+    const QString runtime = QString::fromUtf8(qgetenv("XDG_RUNTIME_DIR"));
+    if (sig.isEmpty() || runtime.isEmpty())
+        return;
+    const QByteArray sockPath =
+        (runtime + QStringLiteral("/hypr/") + sig + QStringLiteral("/.socket2.sock")).toUtf8();
+    struct sockaddr_un addr {};
+    if (sockPath.size() >= static_cast<qsizetype>(sizeof(addr.sun_path)))
+        return;
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    addr.sun_family = AF_UNIX;
+    std::memcpy(addr.sun_path, sockPath.constData(), static_cast<size_t>(sockPath.size()) + 1);
+    if (::connect(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) != 0
+        && errno != EINPROGRESS) {
+        ::close(fd);
+        return;
+    }
+    m_hyprFd = fd;
+    m_hyprNotifier = new QSocketNotifier(m_hyprFd, QSocketNotifier::Read, this);
+    connect(m_hyprNotifier, &QSocketNotifier::activated, this, &Theme::readHyprlandEvents);
+}
+
+void Theme::readHyprlandEvents() {
+    if (m_hyprFd < 0)
+        return;
+    char buf[1024];
+    for (;;) {
+        const ssize_t n = ::read(m_hyprFd, buf, sizeof(buf));
+        if (n > 0) {
+            m_hyprBuffer.append(buf, static_cast<qsizetype>(n));
+            continue;
+        }
+        if (n == 0) {
+            closeHyprlandSocket();
+            return;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            break;
+        closeHyprlandSocket();
+        return;
+    }
+    bool reloadRounding = false;
+    int newline = -1;
+    while ((newline = m_hyprBuffer.indexOf('\n')) >= 0) {
+        const QByteArray line = m_hyprBuffer.left(newline);
+        m_hyprBuffer.remove(0, newline + 1);
+        if (line.startsWith("configreloaded>>"))
+            reloadRounding = true;
+    }
+    if (m_hyprBuffer.size() > 8192)
+        m_hyprBuffer.clear();
+    if (reloadRounding)
+        refreshRounding();
+}
+
+void Theme::closeHyprlandSocket() {
+    if (m_hyprNotifier) {
+        m_hyprNotifier->setEnabled(false);
+        m_hyprNotifier->deleteLater();
+        m_hyprNotifier = nullptr;
+    }
+    if (m_hyprFd >= 0) {
+        ::close(m_hyprFd);
+        m_hyprFd = -1;
+    }
+    m_hyprBuffer.clear();
 }
 
 void Theme::refreshRounding() {

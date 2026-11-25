@@ -6,8 +6,7 @@ import json
 import os
 
 from botcut.captions import subtitles_filter
-from botcut.net import post
-from botcut.pick import chat_fields, llm_url
+from botcut.llm import ask
 
 HIGHLIGHT_SCHEMA = {
     "type": "json_schema",
@@ -35,12 +34,10 @@ def pick_highlight(utts: list[dict]) -> dict:
             raise SystemExit("No utterances to highlight")
         chosen = ids[:3]
         return {"start_id": chosen[0], "end_id": chosen[-1], "title": "Fake highlight"}
-    key = os.environ.get("XAI_API_KEY")
-    if not key:
+    if not os.environ.get("XAI_API_KEY"):
         raise SystemExit("XAI_API_KEY is not set")
-    body = {
-        **chat_fields(),
-        "messages": [
+    return ask(
+        [
             {
                 "role": "system",
                 "content": (
@@ -50,27 +47,14 @@ def pick_highlight(utts: list[dict]) -> dict:
             },
             {"role": "user", "content": _user_message(utts)},
         ],
-        "response_format": HIGHLIGHT_SCHEMA,
-    }
-    response = post(
-        llm_url(),
-        key=key,
-        label="LLM",
-        read_timeout=120,
-        send=lambda: {
-            "headers": {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-            "json": body,
-        },
-    )
-    try:
-        parsed = json.loads(response.json()["choices"][0]["message"]["content"])
-        return {
+        HIGHLIGHT_SCHEMA,
+        what="a highlight",
+        parse=lambda parsed: {
             "start_id": int(parsed["start_id"]),
             "end_id": int(parsed["end_id"]),
             "title": str(parsed["title"]).strip(),
-        }
-    except (ValueError, KeyError, TypeError, IndexError):
-        raise SystemExit("LLM response was not a highlight")
+        },
+    )
 
 
 def kept_on_cut(utts: list[dict], segments: list[dict]) -> list[dict]:
@@ -97,8 +81,12 @@ def highlight_span(
     if not chosen:
         raise SystemExit(f"Highlight ids {lo}..{hi} match no utterances")
     spans: list[tuple[float, float]] = []
+    # The line the movie opens on plays at the very start, away from its place.
+    # A highlight that names it would otherwise run from there to its last line.
+    opening: list[tuple[float, float]] = []
     timeline = 0.0
     for seg in segments:
+        found = opening if seg.get("hook") else spans
         seg_start = float(seg["start"])
         seg_end = float(seg["end"])
         length = max(0.0, seg_end - seg_start)
@@ -121,8 +109,9 @@ def highlight_span(
             mapped_end = min(timeline + length, timeline + (float(word["end"]) - seg_start))
             if mapped_end < mapped_start:
                 mapped_end = mapped_start
-            spans.append((mapped_start, mapped_end))
+            found.append((mapped_start, mapped_end))
         timeline += length
+    spans = spans or opening
     if not spans:
         raise SystemExit(f"Highlight ids {lo}..{hi} have no words on the rough cut")
     return spans[0][0], spans[-1][1]
@@ -143,14 +132,22 @@ def short_args(
     srt_name: str = "short.srt",
     encoder: str = "x264",
     device: str | None = None,
+    center: float | None = None,
 ) -> list[str]:
+    """`center` is where the speaker is across the frame, 0 to 1. The crop follows it."""
     if encoder not in ("x264", "vaapi"):
         raise SystemExit(f"Unknown encoder {encoder}")
     if encoder == "vaapi" and not device:
         raise SystemExit("VA-API encode needs a device")
     filters = []
     if needs_crop(width, height):
-        filters.append("crop=ih*9/16:ih")
+        crop_w = int(height * 9 / 16) // 2 * 2
+        if center is None:
+            filters.append(f"crop={crop_w}:{height}")
+        else:
+            from botcut.frame import vertical_left
+
+            filters.append(f"crop={crop_w}:{height}:{vertical_left(width, height, center)}:0")
     filters.append("scale=1080:1920")
     filters.append(subtitles_filter(srt_name))
     video_filter = ",".join(filters)

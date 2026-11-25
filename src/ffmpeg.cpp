@@ -1,11 +1,15 @@
 #include "ffmpeg.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QProcess>
 #include <QStandardPaths>
+#include <QThread>
+
+#include <mutex>
 
 namespace ffmpeg {
 
@@ -13,6 +17,8 @@ namespace {
 // Upper bound on a synchronous probe so a hung/unresponsive file (e.g. a stalled
 // network mount) can't freeze the caller — load() runs probe() on the UI thread.
 constexpr int kProbeTimeoutMs = 15000;
+// Upper bound on a single thumbnail frame extraction so a corrupt file can't hang TrayThumbWorker.
+constexpr qint64 kThumbTimeoutMs = 10000;
 // Poll granularity while waiting on a thumbnail child, so cancellation is prompt.
 constexpr int kThumbPollMs = 50;
 
@@ -67,9 +73,14 @@ VideoInfo probe(const QString &path) {
         path,
     });
     if (!proc.waitForFinished(kProbeTimeoutMs)) {
-        proc.kill();
-        proc.waitForFinished(-1);
-        info.error = "ffprobe timed out reading this file.";
+        const bool timedOut = proc.error() == QProcess::Timedout;
+        const QString err = proc.errorString();
+        if (proc.state() != QProcess::NotRunning) {
+            proc.kill();
+            proc.waitForFinished(-1);
+        }
+        info.error = timedOut ? QStringLiteral("ffprobe timed out reading this file.")
+                              : (err.isEmpty() ? QStringLiteral("Could not start ffprobe.") : err);
         return info;
     }
 
@@ -146,10 +157,12 @@ QImage thumbnail(const QString &path, double time, int height,
     // Poll instead of waitForFinished(-1) so a cancel request can kill the child
     // promptly — otherwise the std::future destructor in ThumbWorker would block
     // the UI thread until ffmpeg finishes on its own.
+    QElapsedTimer elapsed;
+    elapsed.start();
     while (!proc.waitForFinished(kThumbPollMs)) {
         if (proc.state() == QProcess::NotRunning)
             break;  // failed to start, or exited between polls
-        if (cancel && cancel->load(std::memory_order_relaxed)) {
+        if ((cancel && cancel->load(std::memory_order_relaxed)) || elapsed.elapsed() >= kThumbTimeoutMs) {
             proc.kill();
             proc.waitForFinished(-1);
             return {};
@@ -191,48 +204,47 @@ QSize fittedSize(int width, int height, int shortSide) {
 }
 
 QString openedVaapiNode() {
-    static bool probed = false;
+    static std::once_flag probed;
     static QString found;
-    if (probed)
-        return found;
-    probed = true;
-    const QString ffmpegBin = toolPath(QStringLiteral("ffmpeg"));
-    if (ffmpegBin.isEmpty())
-        return {};
-    const QDir dri(QStringLiteral("/dev/dri"));
-    const QStringList names =
-        dri.entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot, QDir::Name);
-    for (const QString &name : names) {
-        if (!name.startsWith(QStringLiteral("renderD")))
-            continue;
-        const QString node = dri.absoluteFilePath(name);
-        QProcess proc;
-        proc.start(ffmpegBin, {
-            QStringLiteral("-hide_banner"),
-            QStringLiteral("-loglevel"),
-            QStringLiteral("error"),
-            QStringLiteral("-init_hw_device"),
-            QStringLiteral("vaapi=va:") + node,
-            QStringLiteral("-f"),
-            QStringLiteral("lavfi"),
-            QStringLiteral("-i"),
-            QStringLiteral("color=c=black:s=16x16:d=0.1"),
-            QStringLiteral("-frames:v"),
-            QStringLiteral("1"),
-            QStringLiteral("-f"),
-            QStringLiteral("null"),
-            QStringLiteral("-"),
-        });
-        if (!proc.waitForFinished(8000)) {
-            proc.kill();
-            proc.waitForFinished(1000);
-            continue;
+    std::call_once(probed, [] {
+        const QString ffmpegBin = toolPath(QStringLiteral("ffmpeg"));
+        if (ffmpegBin.isEmpty())
+            return;
+        const QDir dri(QStringLiteral("/dev/dri"));
+        const QStringList names =
+            dri.entryList(QDir::AllEntries | QDir::System | QDir::NoDotAndDotDot, QDir::Name);
+        for (const QString &name : names) {
+            if (!name.startsWith(QStringLiteral("renderD")))
+                continue;
+            const QString node = dri.absoluteFilePath(name);
+            QProcess proc;
+            proc.start(ffmpegBin, {
+                QStringLiteral("-hide_banner"),
+                QStringLiteral("-loglevel"),
+                QStringLiteral("error"),
+                QStringLiteral("-init_hw_device"),
+                QStringLiteral("vaapi=va:") + node,
+                QStringLiteral("-f"),
+                QStringLiteral("lavfi"),
+                QStringLiteral("-i"),
+                QStringLiteral("color=c=black:s=16x16:d=0.1"),
+                QStringLiteral("-frames:v"),
+                QStringLiteral("1"),
+                QStringLiteral("-f"),
+                QStringLiteral("null"),
+                QStringLiteral("-"),
+            });
+            if (!proc.waitForFinished(8000)) {
+                proc.kill();
+                proc.waitForFinished(1000);
+                continue;
+            }
+            if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
+                found = node;
+                break;
+            }
         }
-        if (proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0) {
-            found = node;
-            break;
-        }
-    }
+    });
     return found;
 }
 
@@ -340,6 +352,18 @@ QString vaapiDevice(QString *error) {
     if (node.isEmpty() && choice == QLatin1String("vaapi") && error)
         *error = QStringLiteral("BOTCUT_ENCODER=vaapi but no VA-API device opened");
     return node;
+}
+
+void warmupVaapi() {
+    const QString choice = QString::fromUtf8(qgetenv("BOTCUT_ENCODER")).trimmed().toLower();
+    if (choice == QLatin1String("x264"))
+        return;
+    static std::once_flag started;
+    std::call_once(started, [] {
+        QThread *worker = QThread::create([] { (void)openedVaapiNode(); });
+        QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+        worker->start();
+    });
 }
 
 QStringList trimArgs(const QString &src, const QString &dst,

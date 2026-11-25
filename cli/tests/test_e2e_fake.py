@@ -71,6 +71,11 @@ def test_fake_run_writes_a_playable_rough_cut(monkeypatch, tmp_path, capsys):
         assert {"clip", "start", "end", "reason"} <= set(seg)
         assert seg["end"] > seg["start"]
         assert seg["reason"] == "fake"
+    # How long each stage took is said once and kept beside the caches, not in cuts.json.
+    assert captured.rstrip().splitlines()[-1].startswith("Took ")
+    took = json.loads((out / "work" / "seconds.json").read_text())
+    assert list(took) == ["read", "listen", "stills", "outline", "choose", "proof", "level", "render"]
+    assert "seconds" not in doc.get("usage", {})
 
     probe = subprocess.run(
         [
@@ -132,6 +137,8 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
     assert "kept," in captured
     assert "dropped" in captured
     assert not (out / "rough_cut.mp4").exists()
+    took = json.loads((out / "work" / "seconds.json").read_text())
+    assert "choose" in took and "render" not in took
     doc = json.loads((out / "cuts.json").read_text())
     assert doc["intent"] == "a ride along the coast"
     assert doc["lines"]
@@ -149,6 +156,9 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
     render_saved(str(out))
     rendered = capsys.readouterr().out
     assert "Rendering" in rendered
+    # The render adds its own stages to what the cut took.
+    took = json.loads((out / "work" / "seconds.json").read_text())
+    assert "choose" in took and "render" in took
     probe = subprocess.run(
         [
             "ffprobe",
@@ -170,7 +180,7 @@ def test_decide_stops_before_ffmpeg_and_render_restores_a_line(monkeypatch, tmp_
 def test_trimmed_plan_keeps_hand_segments(monkeypatch, tmp_path):
     seen = {}
 
-    def fake_probe(path):
+    def fake_probe(path, need_audio=True):
         return {"path": path, "duration": 8.0, "width": 320, "height": 180, "audio": False}
 
     def fake_render(segments, clips, dst, *_args, **_kwargs):

@@ -29,13 +29,19 @@ Item {
 
         MouseArea { anchors.fill: parent }
 
-        Column {
-            id: column
-            anchors.top: parent.top
-            anchors.left: parent.left
-            anchors.right: parent.right
+        Flickable {
+            anchors.fill: parent
             anchors.margins: 24
-            spacing: 12
+            contentWidth: width
+            contentHeight: column.implicitHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded; width: 4 }
+
+            Column {
+                id: column
+                width: parent.width
+                spacing: 12
 
             Label {
                 text: qsTr("How BotCut works")
@@ -55,21 +61,21 @@ Item {
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Cut finds the lines worth keeping.")
+                text: qsTr("Cut makes the movie. It keeps the lines worth saying and saves the result in your movies folder.")
             }
             Label {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Drop lines or tell BotCut what to change, then Render.")
+                text: qsTr("To change it, drop or keep lines, or tell BotCut what you want. Then Update movie.")
             }
             Label {
                 width: parent.width
                 wrapMode: Text.WordWrap
                 color: theme.foreground
                 font.pixelSize: 13
-                text: qsTr("Watch, trim by hand if you need to, then Save.")
+                text: qsTr("Trim an edge by hand on the filmstrip if you need to.")
             }
 
             Row {
@@ -111,10 +117,10 @@ Item {
                             { keys: "Shift+Left / Right", action: qsTr("5 seconds") },
                             { keys: "Alt+Left / Right", action: qsTr("0.2 seconds") },
                             { keys: "[ / ]", action: qsTr("Previous or next edge") },
-                            { keys: "S", action: qsTr("Split") },
                             { keys: "X", action: qsTr("Remove or restore") },
                             { keys: "Ctrl / Alt Space", action: qsTr("Set the edges") },
                             { keys: "Ctrl+Z", action: qsTr("Undo") },
+                            { keys: "Ctrl+Shift+Z", action: qsTr("Redo") },
                             { keys: "Z", action: qsTr("Zoom") }
                         ]
                         delegate: KeyLine {}
@@ -133,7 +139,6 @@ Item {
                         model: [
                             { keys: "Space", action: qsTr("Play or pause") },
                             { keys: "Ctrl+S", action: qsTr("Save or export") },
-                            { keys: "Ctrl+O", action: qsTr("Open") },
                             { keys: "?", action: qsTr("Shortcuts") },
                             { keys: "Q", action: qsTr("Quit") }
                         ]
@@ -148,9 +153,11 @@ Item {
                 ActionButton {
                     text: qsTr("Close")
                     filled: true
+                    focusPolicy: Qt.TabFocus
                     onClicked: host.helpVisible = false
                 }
             }
+        }
         }
     }
 

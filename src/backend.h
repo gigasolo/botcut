@@ -5,7 +5,9 @@
 #include <QHash>
 #include <QImage>
 #include <QObject>
+#include <QPointer>
 #include <QProcess>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTimer>
@@ -34,6 +36,9 @@ class Backend : public QObject {
     Q_PROPERTY(int thumbRevision READ thumbRevision NOTIFY thumbsChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    // What went wrong with the last thing asked for, while nothing is running.
+    // It stays until the next job starts or the person moves on.
+    Q_PROPERTY(QString lastError READ lastError NOTIFY lastErrorChanged)
     // Where the founder is on shots → lines → movie. The window's one sentence.
     Q_PROPERTY(QString step READ step NOTIFY stepChanged)
     // The running job, empty when idle. progress is -1 when idle and 0..1 while it runs.
@@ -44,14 +49,36 @@ class Backend : public QObject {
     Q_PROPERTY(int trayIndex READ trayIndex WRITE setTrayIndex NOTIFY trayChanged)
     Q_PROPERTY(QString cutMode READ cutMode WRITE setCutMode NOTIFY cutModeChanged)
     Q_PROPERTY(QString sceneTransition READ sceneTransition WRITE setSceneTransition NOTIFY sceneTransitionChanged)
-    Q_PROPERTY(bool broll READ broll WRITE setBroll NOTIFY brollChanged)
+    // The tray files marked B-roll, in tray order. Their picture covers spoken lines.
+    Q_PROPERTY(QStringList brollFiles READ brollFiles NOTIFY trayChanged)
     Q_PROPERTY(bool brollMix READ brollMix WRITE setBrollMix NOTIFY brollMixChanged)
+    // The zoom on the speaker: off, cuts, push, or lines.
+    Q_PROPERTY(QString zoom READ zoom WRITE setZoom NOTIFY zoomChanged)
+    // Output resolution (source, 2160p, 1440p, 1080p, 720p) and aspect (source, landscape, portrait).
+    Q_PROPERTY(QString resolution READ resolution WRITE setResolution NOTIFY resolutionChanged)
+    Q_PROPERTY(QString aspect READ aspect WRITE setAspect NOTIFY aspectChanged)
+    Q_PROPERTY(bool pip READ pip WRITE setPip NOTIFY pipChanged)
+    Q_PROPERTY(QString preset READ preset NOTIFY presetChanged)
     Q_PROPERTY(QVariantList covers READ covers NOTIFY coversChanged)
+    // The tray files that are a second camera on a take another file filmed.
+    Q_PROPERTY(QStringList angleFiles READ angleFiles NOTIFY trayChanged)
+    // The stretches the movie plays on a second camera, as runs of lines like covers.
+    Q_PROPERTY(QVariantList angles READ angles NOTIFY coversChanged)
+    // The few spots in the cut worth a look: {kind, ids, text}.
+    Q_PROPERTY(QVariantList review READ review NOTIFY reviewChanged)
     Q_PROPERTY(QStringList cutClips READ cutClips NOTIFY cutClipsChanged)
+    Q_PROPERTY(QVariantList cutClipOffsets READ cutClipOffsets NOTIFY cutClipsChanged)
     Q_PROPERTY(QString pace READ pace WRITE setPace NOTIFY paceChanged)
     Q_PROPERTY(double maxPause READ maxPause NOTIFY paceChanged)
     Q_PROPERTY(QString intent READ intent WRITE setIntent NOTIFY intentChanged)
-    Q_PROPERTY(QStringList reviseNotes READ reviseNotes NOTIFY reviseNotesChanged)
+    Q_PROPERTY(QString movieTitle READ movieTitle WRITE setMovieTitle NOTIFY movieTitleChanged)
+    // Opening live-video title overlay shown as a removable card in the Shots list.
+    Q_PROPERTY(QString liveTitle READ liveTitle WRITE setLiveTitle NOTIFY liveTitleChanged)
+    // The chat about this line list: {role: "you" | "bot", text, change}. A bot
+    // turn carries the model's reply and the change it would make, or made.
+    Q_PROPERTY(QVariantList chat READ chat NOTIFY chatChanged)
+    // The last bot turn is a proposal that has not been applied or left.
+    Q_PROPERTY(bool proposalPending READ proposalPending NOTIFY chatChanged)
     Q_PROPERTY(bool canRevert READ canRevert NOTIFY canRevertChanged)
     Q_PROPERTY(QVariantList selects READ selects NOTIFY selectsChanged)
     Q_PROPERTY(bool gathering READ gathering NOTIFY gatheringChanged)
@@ -62,6 +89,9 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList recentCuts READ recentCuts NOTIFY recentsChanged)
     Q_PROPERTY(bool apiKeySet READ apiKeySet NOTIFY apiKeyChanged)
     Q_PROPERTY(bool renderedUnsaved READ renderedUnsaved NOTIFY renderedUnsavedChanged)
+    // The lines, the pace, the fade, or the B-roll changed since the movie on
+    // disk was rendered. Update movie renders them.
+    Q_PROPERTY(bool movieStale READ movieStale NOTIFY movieStaleChanged)
     Q_PROPERTY(bool roughCut READ roughCut NOTIFY infoChanged)
     // A plan cut's filmstrip is one block per cuts.json segment, not the baked file.
     Q_PROPERTY(bool planCut READ planCut NOTIFY planChanged)
@@ -84,6 +114,7 @@ public:
     int thumbRevision() const { return m_thumbRevision; }
     bool busy() const { return m_busy; }
     QString status() const { return m_status; }
+    QString lastError() const { return m_lastError; }
     QString step() const { return m_step; }
     QString job() const { return m_job; }
     QString jobText() const { return m_jobText; }
@@ -95,13 +126,25 @@ public:
     int trayIndex() const { return m_trayIndex; }
     QString cutMode() const { return m_cutMode; }
     QString sceneTransition() const { return m_sceneTransition; }
-    bool broll() const { return m_broll; }
+    QStringList brollFiles() const;
     bool brollMix() const { return m_brollMix; }
+    QString zoom() const { return m_zoom; }
+    QString resolution() const { return m_resolution; }
+    QString aspect() const { return m_aspect; }
+    bool pip() const { return m_pip; }
+    QString preset() const { return m_preset; }
     QVariantList covers() const { return m_covers; }
+    QStringList angleFiles() const;
+    QVariantList angles() const { return m_angles; }
+    QVariantList review() const { return m_review; }
     QStringList cutClips() const { return m_cutClips; }
+    QVariantList cutClipOffsets() const { return m_cutClipOffsets; }
     QString pace() const { return m_pace; }
     QString intent() const { return m_intent; }
-    QStringList reviseNotes() const { return m_reviseNotes; }
+    QString movieTitle() const { return m_movieTitle; }
+    QString liveTitle() const { return m_liveTitle; }
+    QVariantList chat() const { return m_chat; }
+    bool proposalPending() const { return m_proposalPending; }
     bool canRevert() const { return m_canRevert; }
     QVariantList selects() const { return m_selects; }
     QVariantList recentLists() const;
@@ -111,26 +154,31 @@ public:
     bool trayMissing() const;
     bool apiKeySet() const;
     bool renderedUnsaved() const { return m_renderedHere && !m_cutSaved; }
+    bool movieStale() const { return m_movieStale; }
     bool roughCut() const;
     bool planCut() const { return m_plan.active(); }
     QObject *plan() { return &m_plan; }
     void setTrayIndex(int index);
     void setCutMode(const QString &mode);
     void setSceneTransition(const QString &value);
-    void setBroll(bool value);
     void setBrollMix(bool value);
+    void setZoom(const QString &value);
+    void setResolution(const QString &value);
+    void setAspect(const QString &value);
+    void setPip(bool value);
+    Q_INVOKABLE void applyPreset(const QString &preset);
     void setPace(const QString &pace);
     void setIntent(const QString &intent);
+    void setMovieTitle(const QString &title);
+    void setLiveTitle(const QString &title);
     Timeline *timeline() { return &m_timeline; }
 
     // Load a video (probes it, then kicks off thumbnail generation).
     Q_INVOKABLE bool load(const QUrl &url);
-    Q_INVOKABLE bool loadKeepList(const QUrl &url);
-    static bool parseKeepList(const QByteArray &json, const QString &baseDir, QString *source,
-                              edit::Clips *clips, QString *error);
+    // Safe local file URL conversion (handles '#' and '?' in paths).
+    Q_INVOKABLE QUrl fileUrl(const QString &path) const;
 
     // Open native desktop file dialogs.
-    Q_INVOKABLE void openVideoDialog();
     Q_INVOKABLE void addVideosDialog();
     Q_INVOKABLE void addTrayFiles(const QStringList &paths);
     Q_INVOKABLE void addDropped(const QList<QUrl> &urls);
@@ -141,24 +189,61 @@ public:
     int trayThumbRevision() const { return m_trayThumbRevision; }
     Q_INVOKABLE void moveTray(int delta);
     Q_INVOKABLE void removeTray();
+    // Rename a source file on disk (preserving its folder and extension) and update all references.
+    Q_INVOKABLE bool renameTrayFile(int index, const QString &newBaseName);
+    // Rename the output movie (and matching sidecars) to match a new title.
+    Q_INVOKABLE bool renameMovie(const QString &newTitle);
+    // Generate a Matt-style minimal photo thumbnail beside the movie and embed it as cover art.
+    Q_INVOKABLE void makePhotoThumb(const QString &title = QString(),
+                                    const QString &aspect = QStringLiteral("landscape"));
+    // Build a full Ship Pack folder (chapters, post drafts, thumbnail, landscape + portrait, captions).
+    Q_INVOKABLE void makeShipPack(const QString &title = QString(),
+                                  const QString &resolution = QStringLiteral("1080p"),
+                                  bool includePortrait = true);
+    Q_INVOKABLE bool isBroll(const QString &path) const;
+    // Flip the shot at that tray index between a shot and B-roll. A card stays a card.
+    Q_INVOKABLE void toggleBroll(int index);
     Q_INVOKABLE void openCutListDialog();
     Q_INVOKABLE void saveCutListDialog();
     Q_INVOKABLE void reopenList(const QString &path);
     Q_INVOKABLE void watchRecent(const QString &path);
     Q_INVOKABLE void setApiKey(const QString &key);
+    // Asks xAI whether it accepts the saved key. A refused key is forgotten and
+    // lastError says so. A network failure keeps the key.
+    Q_INVOKABLE void checkApiKey();
     Q_INVOKABLE void startCut();
+    // Stops the running job and everything it started. The window goes back to
+    // the step it was on, with no error.
+    Q_INVOKABLE void cancelJob();
+    Q_INVOKABLE void dismissError();
     Q_INVOKABLE void restoreSelect(int id);
     Q_INVOKABLE void dropSelect(int id);
     Q_INVOKABLE void clearCover(int lineId);
+    // A shot becomes the second camera of the take before it, and back.
+    Q_INVOKABLE void toggleAngle(int index);
+    // Keep the run of lines this one is in on the main camera.
+    Q_INVOKABLE void stayOnMain(int lineId);
+    // Flip one cut inside a line: an um or a restart, taken out or put back.
+    Q_INVOKABLE void toggleWordCut(int id, int index);
+    // The line that opens the movie goes back to its place.
+    Q_INVOKABLE void clearHook();
     Q_INVOKABLE void renderSelects();
+    // Renders what changed, lines or a hand trim, over the movie this project already has.
+    Q_INVOKABLE void updateMovie();
     // Re-encode a hand-trimmed plan from its cuts.json. An untouched plan copies instead.
     Q_INVOKABLE void exportPlan();
     Q_INVOKABLE void writeCaptions();
     Q_INVOKABLE void makeShort();
+    // Re-render the current cut directly from source clips at the chosen resolution and aspect ratio.
+    Q_INVOKABLE void rerenderExport(const QString &resolution, const QString &aspect);
+    // Asks the model for a proposal and shows its reply. Nothing changes until applyProposal.
     Q_INVOKABLE bool sendRevise(const QString &note);
+    Q_INVOKABLE bool applyProposal();
+    Q_INVOKABLE void dismissProposal();
     Q_INVOKABLE void revertRevise();
-    // `place` is "open" (front of the tray) or "close" (end). The sentence is the prompt.
-    Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence);
+    // `place` is "open" (front of the tray) or "close" (end). `style` is "ai" or "typo".
+    Q_INVOKABLE bool makeCard(const QString &place, const QString &sentence,
+                              const QString &style = QStringLiteral("ai"));
     // Exports the clips as they are when the dialog opens.
     Q_INVOKABLE void exportDialog();
     // Opens the folder that contains the saved movie, not a player on the file.
@@ -191,19 +276,29 @@ signals:
     void thumbsChanged();
     void busyChanged();
     void statusChanged();
+    void lastErrorChanged();
+    // A short good-news line, such as "Wrote the captions".
+    void notice(const QString &message);
     void stepChanged();
     void jobChanged();
     void trayChanged();
     void trayThumbsChanged();
     void cutModeChanged();
     void sceneTransitionChanged();
-    void brollChanged();
     void brollMixChanged();
+    void zoomChanged();
+    void resolutionChanged();
+    void aspectChanged();
+    void pipChanged();
+    void presetChanged();
     void coversChanged();
+    void reviewChanged();
     void cutClipsChanged();
     void paceChanged();
     void intentChanged();
-    void reviseNotesChanged();
+    void movieTitleChanged();
+    void liveTitleChanged();
+    void chatChanged();
     void canRevertChanged();
     void selectsChanged();
     void recentsChanged();
@@ -212,18 +307,39 @@ signals:
     void exportDone(const QString &path);
     void exportFailed(const QString &message);
     void renderedUnsavedChanged();
+    void movieStaleChanged();
     void loadError(const QString &message);
     void planChanged();
 
 private:
     void setBusy(bool busy);
     void setStatus(const QString &status);
+    void setLastError(const QString &error);
+    // How to run botcut-cli: the program itself, or uv with a source checkout.
+    struct CliTool {
+        QString cli;
+        QString uv;
+        QString project;
+    };
+    CliTool cliTool() const;
+    void watchSideProcess(QProcess *proc);
     void refreshStep();
     QString computeStep() const;
     void failExport(const QString &tmpPath, const QString &message);
     void copyCut(const QUrl &dst);
     void finishSavedCut(const QString &outPath);
     void noteCutSaved(const QString &path);
+    void setMovieStale(bool stale);
+    // A change that the movie on disk does not have yet. Nothing to mark with no movie.
+    void touchMovie();
+    // Where this project's movie goes: the path it already has, or a new name in the movies folder.
+    QString movieForProject(const QString &projectDir);
+    // Puts a finished rough cut in the movies folder and opens it there, with its plan.
+    void publishMovie(const QString &roughCut, const QString &cutsPath, bool fresh);
+    void openPublished(const QString &movie, const QString &cutsPath, bool fresh);
+    void sayCovers(const QString &cutsPath);
+    void adoptProjectTray();
+    void pruneProjects() const;
     void startThumbs();
     void stopThumbs();
     struct TrayThumbEntry {
@@ -270,6 +386,15 @@ private:
     bool takeCover(int lineId);
     bool readReviseOutcome(const QString &cutsPath, QString *intent, QString *pace, bool *dip,
                            QString *deliver) const;
+    QString proposalFile() const;
+    QString chatHistoryFile() const;
+    bool writeChatHistory() const;
+    void appendChat(const QString &role, const QString &text, const QString &change = QString());
+    void dropLastYouTurn();
+    // What a proposal would do to the current list, as one line. Empty when nothing changes.
+    QString describeChange(const QJsonObject &proposal, bool past) const;
+    // The B-roll laid on the kept lines, as one line: "B-roll over 3 stretches, 31 s."
+    QString describeCovers() const;
     QUrl suggestedCutListUrl() const;
     Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys, bool ownsKeys,
             QObject *parent);
@@ -298,6 +423,10 @@ private:
     bool m_thumbWorkerDone = false;
     bool m_busy = false;
     QString m_status;
+    QString m_lastError;
+    bool m_cancelled = false;
+    // The cp or ffmpeg of a save or export, while it runs.
+    QPointer<QProcess> m_sideProcess;
     QString m_step = QStringLiteral("empty");
     QString m_job;
     QString m_jobText;
@@ -307,13 +436,24 @@ private:
     QString m_cutMode = QStringLiteral("speech");
     QString m_listPath;
     QString m_sceneTransition = QStringLiteral("dip");
-    bool m_broll = false;
+    // Absolute paths, a subset of m_tray. Keyed by path so a reorder needs no bookkeeping.
+    QSet<QString> m_brollFiles;
     bool m_brollMix = true;
+    QString m_zoom = QStringLiteral("off");
+    QString m_resolution = QStringLiteral("source");
+    QString m_aspect = QStringLiteral("source");
+    bool m_pip = false;
+    QString m_preset = QStringLiteral("custom");
     QString m_pace = QStringLiteral("open");
     QString m_planCuts;
     QString m_planMovie;
     QString m_intent;
-    QStringList m_reviseNotes;
+    QString m_movieTitle;
+    QString m_liveTitle;
+    QVariantList m_chat;
+    bool m_proposalPending = false;
+    // The change line of the pending proposal, in the past tense, for the Done turn.
+    QString m_pendingChange;
     QString m_reviseNote;
     QByteArray m_reviseStamp;
     bool m_canRevert = false;
@@ -324,8 +464,12 @@ private:
     QVariantList m_undoCovers;
     QVariantList m_selects;
     QVariantList m_covers;
+    QVariantList m_angles;
+    QVariantList m_review;
+    QSet<QString> m_angleFiles;
     // Paths from cuts.json, in clip-index order. The live tray can move without rewriting that file.
     QStringList m_cutClips;
+    QVariantList m_cutClipOffsets;
     bool m_gathering = true;
     QString m_apiKey;
     KeyStore *m_keys = nullptr;
@@ -336,8 +480,12 @@ private:
     QString m_launchProgram;
     bool m_renderedHere = false;
     bool m_cutSaved = false;
-    enum class CutStage { Idle, Decide, Run, Render, Review, Captions, Short, Revise, Card };
+    bool m_movieStale = false;
+    enum class CutStage { Idle, Run, Render, ExportRender, Captions, Short, Thumb, Ship, Propose, Revise, Card, Key };
     CutStage m_cutStage = CutStage::Idle;
+    QString m_exportRenderTarget;
+    QString m_thumbTarget;
+    QString m_shipTarget;
     QString m_cardPath;
     QString m_cardPlace;
     void startBesideCut(CutStage stage, const QString &running,
@@ -345,6 +493,13 @@ private:
                                           const QString &));
     QProcess *m_cutProcess = nullptr;
     QString m_cutLog;
-    QString m_cutLine;
+    QByteArray m_cutLine;
     QTimer m_thumbRevealTimer;
+    struct TrayMeta {
+        bool exists = false;
+        qint64 size = -1;
+    };
+    mutable QHash<QString, TrayMeta> m_trayMeta;
+    const TrayMeta &trayMetaFor(const QString &path) const;
+    void invalidateTrayMeta(const QString &path = QString());
 };

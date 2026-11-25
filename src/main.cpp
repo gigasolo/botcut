@@ -1,5 +1,6 @@
-// BotCut — a dead-simple video length trimmer. Qt Quick (QML) UI, ffmpeg cuts.
+// BotCut: shots in, a cut movie out. Qt Quick (QML) window, botcut-cli and ffmpeg underneath.
 
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -31,14 +32,14 @@ int main(int argc, char *argv[]) {
     // Modern, themeable controls (the same family Quickshell builds on).
     QQuickStyle::setStyle("Material");
 
+    QQmlApplicationEngine engine;
     auto *provider = new ThumbProvider();
+    // The engine takes ownership of the image provider; declaring engine before
+    // backend ensures backend is destroyed while provider is still alive.
+    engine.addImageProvider("thumbs", provider);
+
     Theme theme;
     Backend backend(provider, &app);
-
-    QQmlApplicationEngine engine;
-
-    // The engine takes ownership of the image provider.
-    engine.addImageProvider("thumbs", provider);
 
     engine.rootContext()->setContextProperty("theme", &theme);
     engine.rootContext()->setContextProperty("backend", &backend);
@@ -50,9 +51,9 @@ int main(int argc, char *argv[]) {
     // Optionally open a file passed on the command line.
     const QStringList args = app.arguments();
     if (args.size() > 1) {
-        const QString arg = args.at(1);
-        if (arg.endsWith(".json", Qt::CaseInsensitive))
-            backend.loadKeepList(QUrl::fromLocalFile(arg));
+        const QString arg = QFileInfo(args.at(1)).absoluteFilePath();
+        if (arg.endsWith(".botcut.json", Qt::CaseInsensitive))
+            backend.reopenList(arg);
         else
             backend.load(QUrl::fromLocalFile(arg));
     }

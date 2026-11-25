@@ -1,3 +1,4 @@
+import QtCore
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
@@ -39,6 +40,7 @@ ApplicationWindow {
     property bool helpVisible: false
     property bool quitConfirmVisible: false
     property bool settingsOpen: false
+    property bool exportOpen: false
     property bool settingsFromMovie: false
     property bool shotsPinned: false
     property bool titleCardOpen: false
@@ -48,10 +50,6 @@ ApplicationWindow {
         if (!quitConfirmVisible)
             leaveTarget = "";
     }
-    // Three columns from 1280 px. Below that the decisions sit under the picture.
-    readonly property bool wideInspector: width >= 1280
-    // Which rows the line list shows: all, kept, dropped, or unsure. Hides rows only.
-    property string lineFilter: "all"
     property int currentLine: -1
     property int lastSelectCount: 0
     readonly property int selectCount: backend.selects.length
@@ -62,8 +60,6 @@ ApplicationWindow {
         } else if (currentLine >= selectCount) {
             currentLine = selectCount > 0 ? 0 : -1;
         }
-        if (selectCount === 0)
-            lineFilter = "all";
         lastSelectCount = selectCount;
     }
     // The current line's words, shown over the picture. Never in the file.
@@ -75,17 +71,64 @@ ApplicationWindow {
             return "";
         return String(line.text);
     }
-    // The keys the status bar names, by what is on screen. Only keys the app has.
-    readonly property var keyHints: {
-        if (viewStep === "movie" && hasVideo) {
-            return [["Space", qsTr("play")], ["← →", qsTr("seek")], ["S", qsTr("split")],
-                    ["X", qsTr("remove")], ["Z", qsTr("zoom")]];
+    readonly property bool running: backend.job !== ""
+    // The one filled button, by step. A saved rough cut has none.
+    readonly property string filledText: {
+        var step = displayStep;
+        if (step === "empty")
+            return qsTr("Add shots…");
+        if (step === "needsKey")
+            return qsTr("Add xAI key…");
+        if (step === "shotsReady" || step === "missingShot")
+            return qsTr("Cut");
+        if (step === "lines" || step === "allDropped")
+            return qsTr("Render");
+        // linesCurrent has none: the movie already has these lines.
+        if (step === "linesStale" || step === "movieStale")
+            return qsTr("Update movie");
+        if (step === "movieUnsaved")
+            return qsTr("Save…");
+        if (step === "trimmed" || (step === "movieSaved" && !backend.roughCut))
+            return qsTr("Export…");
+        return "";
+    }
+    readonly property bool filledEnabled: {
+        var step = displayStep;
+        if (backend.busy || step === "missingShot" || step === "allDropped")
+            return false;
+        if (step === "shotsReady")
+            return backend.tray.length > 0 && !backend.trayMissing;
+        if (step === "lines" || step === "linesStale")
+            return keptLineCount() > 0;
+        if (step === "trimmed" || step === "movieSaved" || step === "movieStale")
+            return (backend.planCut ? backend.plan.duration : backend.duration) > 0;
+        return true;
+    }
+    function activateFilled() {
+        if (backend.busy || running)
+            return;
+        var step = displayStep;
+        if (step === "empty") {
+            backend.addVideosDialog();
+            return;
         }
-        if (viewStep === "lines")
-            return [["Space", qsTr("play")], ["↑ ↓", qsTr("line")], ["K", qsTr("keep")], ["D", qsTr("drop")]];
-        if (backend.tray.length > 0)
-            return [["Space", qsTr("play")], ["Alt ↑ ↓", qsTr("move")], ["Delete", qsTr("remove")]];
-        return [];
+        if (step === "needsKey") {
+            openSettings();
+            Qt.callLater(function() { focusApiKey(); });
+            return;
+        }
+        if (step === "shotsReady") {
+            if (backend.tray.length > 0 && !backend.trayMissing)
+                backend.startCut();
+            return;
+        }
+        if (step === "lines" && keptLineCount() > 0)
+            backend.renderSelects();
+        else if (step === "linesStale" || step === "movieStale")
+            updateMovie();
+        else if (step === "movieUnsaved" || step === "trimmed"
+                 || (step === "movieSaved" && !backend.roughCut))
+            exportVideo();
     }
     // The picture stays put. The pane follows the work, unless Shots was pinned.
     readonly property string viewStep: {
@@ -101,8 +144,11 @@ ApplicationWindow {
             return "working";
         if (backend.step !== "")
             return backend.step;
+        var behind = backend.planCut && (backend.movieStale || backend.plan.unexported);
         if (!gathering && hasVideo) {
-            if (backend.planCut ? backend.plan.unexported : timeline.unexported)
+            if (behind)
+                return "movieStale";
+            if (!backend.planCut && timeline.unexported)
                 return "trimmed";
             if (looseCut)
                 return "movieUnsaved";
@@ -112,8 +158,13 @@ ApplicationWindow {
             return "empty";
         if (missingShotCount() > 0)
             return "missingShot";
-        if (backend.selects.length > 0)
-            return keptLineCount() > 0 ? "lines" : "allDropped";
+        if (backend.selects.length > 0) {
+            if (keptLineCount() === 0)
+                return "allDropped";
+            if (!hasVideo || !backend.planCut)
+                return "lines";
+            return behind ? "linesStale" : "linesCurrent";
+        }
         if (backend.cutMode === "speech" && !backend.apiKeySet)
             return "needsKey";
         return "shotsReady";
@@ -123,6 +174,8 @@ ApplicationWindow {
             return backend.jobText !== "" ? backend.jobText : backend.status;
         if (noticeText !== "")
             return noticeText;
+        if (backend.lastError !== "")
+            return backend.lastError;
         var step = displayStep;
         if (step === "needsKey")
             return qsTr("Spoken cuts need an xAI key.");
@@ -131,23 +184,36 @@ ApplicationWindow {
         if (step === "shotsReady") {
             var count = backend.tray.length;
             if (backend.cutMode !== "speech")
-                return qsTr("Cut joins all %1 shots in this order.").arg(count);
-            return qsTr("%1 shots, in this order. Cut finds the lines worth keeping.").arg(count);
+                return count === 1 ? qsTr("Cut makes this one shot the movie.")
+                                   : qsTr("Cut joins all %1 shots in this order.").arg(count);
+            return count === 1 ? qsTr("1 shot. Cut makes the movie from the lines worth keeping.")
+                               : qsTr("%1 shots, in this order. Cut makes the movie from the lines worth keeping.").arg(count);
         }
-        if (step === "lines") {
-            var sentence = qsTr("%1 of %2 lines kept. Render makes the movie.")
-                    .arg(keptLineCount()).arg(backend.selects.length);
+        if (step === "lines" || step === "linesStale" || step === "linesCurrent") {
             var span = keptSpan();
+            var kept = qsTr("%1 of %2 lines kept").arg(keptLineCount()).arg(backend.selects.length);
             if (span > 0)
-                sentence += ", " + lineClock(span);
-            return sentence;
+                kept += ", " + lineClock(span);
+            var runs = coverRunCount();
+            if (runs === 1)
+                kept += ", " + qsTr("B-roll over 1 stretch");
+            else if (runs > 1)
+                kept += ", " + qsTr("B-roll over %1 stretches").arg(runs);
+            if (step === "linesStale")
+                return kept + qsTr(". The movie does not have these changes yet.");
+            if (step === "linesCurrent")
+                return kept + qsTr(". This is the movie as it stands.");
+            return kept + qsTr(". Render makes the movie.");
         }
+        if (step === "movieStale")
+            return backend.movieStale ? qsTr("The lines changed since this movie was made. Update movie renders them.")
+                                      : qsTr("Trimmed by hand. Update movie renders the trim.");
         if (step === "allDropped")
             return qsTr("Every line is dropped. Keep one to render.");
         if (step === "movieUnsaved")
-            return qsTr("Your movie is ready. It's only in a temporary folder until you save it.");
+            return qsTr("Your movie is ready, but it could not be put in your movies folder. Save says where it goes.");
         if (step === "trimmed")
-            return qsTr("Trimmed by hand. Export writes a new file. Captions and the short wait until then.");
+            return qsTr("Trimmed by hand. Export writes a new file.");
         if (step === "movieSaved")
             return qsTr("Saved as %1.").arg(fileName(backend.source));
         if (step === "empty")
@@ -157,8 +223,9 @@ ApplicationWindow {
         return "";
     }
     readonly property bool actionNeedsYou: displayStep === "needsKey" || displayStep === "missingShot"
+                                           || (!running && backend.lastError !== "")
                                            || displayStep === "allDropped"
-    readonly property bool dialogUp: settingsOpen || helpVisible || titleCardOpen
+    readonly property bool dialogUp: settingsOpen || exportOpen || helpVisible || titleCardOpen
                                      || confirmCutOpen || quitConfirmVisible
     readonly property bool lineKeys: viewStep === "lines" && !controlFocused && !dialogUp
                                      && !backend.busy && !editing && !planPane.paceKeys
@@ -182,7 +249,6 @@ ApplicationWindow {
     property bool planPlaying: false
     property int planIndex: -1
     property string planSource: ""
-    readonly property string statusText: noticeText !== "" ? noticeText : backend.status
 
     readonly property var timeline: backend.planCut ? backend.plan : backend.timeline
     // Quitting only warns about unexported cuts. Clips spanning the whole
@@ -190,12 +256,13 @@ ApplicationWindow {
     readonly property bool unexported: hasVideo && timeline.unexported
     // A rendered movie with no handle edits lives only in /tmp until it is saved.
     readonly property bool looseCut: backend.renderedUnsaved && !unexported
-    // Editing shortcuts go quiet while a dialog is up, a handle is dragged, or a job is running.
-    readonly property bool editing: hasVideo && !gathering && !settingsOpen
-                                   && (backend.planCut ? backend.plan.duration : backend.duration) > 0
+    readonly property real mediaDuration: backend.planCut ? backend.plan.duration : backend.duration
+    // Editing shortcuts go quiet while a dialog is up, a handle is dragged, a job is running, or a text field has focus.
+    readonly property bool editing: hasVideo && !gathering && !settingsOpen && !exportOpen
+                                   && mediaDuration > 0
                                    && !quitConfirmVisible && !helpVisible && !titleCardOpen
                                    && !confirmCutOpen && !editBar.interacting
-                                   && !backend.busy
+                                   && !backend.busy && !controlFocused
 
     Material.theme: Material.Dark
     Material.accent: win.accent
@@ -214,9 +281,12 @@ ApplicationWindow {
     function fileUrl(path) {
         if (!path)
             return "";
-        if (String(path).indexOf("file:") === 0)
+        if (typeof backend.fileUrl === "function")
+            return backend.fileUrl(path);
+        var s = String(path);
+        if (s.indexOf("file:") === 0)
             return path;
-        return "file://" + encodeURI(path);
+        return "file://" + encodeURI(s).replace(/#/g, "%23").replace(/\?/g, "%3F");
     }
     function lineClock(seconds) {
         var whole = Math.max(0, Math.floor(seconds));
@@ -230,6 +300,25 @@ ApplicationWindow {
             var line = backend.selects[i];
             if (line && line.keep !== false)
                 n++;
+        }
+        return n;
+    }
+    // Runs of B-roll whose first line is kept.
+    function coverRunCount() {
+        var n = 0;
+        var covers = backend.covers;
+        if (!covers)
+            return 0;
+        for (var c = 0; c < covers.length; c++) {
+            if (!covers[c])
+                continue;
+            for (var i = 0; i < backend.selects.length; i++) {
+                var line = backend.selects[i];
+                if (line && line.keep !== false && Number(line.id) === Number(covers[c].line)) {
+                    n++;
+                    break;
+                }
+            }
         }
         return n;
     }
@@ -267,6 +356,115 @@ ApplicationWindow {
             return false;
         return isFinite(Number(line.start)) && isFinite(Number(line.end));
     }
+    // Seconds of kept lines before this one, in list order.
+    function cutOffset(index) {
+        var total = 0;
+        var lines = backend.selects;
+        for (var i = 0; i < index && i < lines.length; ++i) {
+            if (keptLine(lines[i]))
+                total += Math.max(0, Number(lines[i].end) - Number(lines[i].start));
+        }
+        return total;
+    }
+    // The kept line at this many seconds into the cut, or the last one past the end.
+    function cutLineAt(seconds) {
+        var at = 0;
+        var last = -1;
+        var lines = backend.selects;
+        for (var i = 0; i < lines.length; ++i) {
+            if (!keptLine(lines[i]))
+                continue;
+            var len = Math.max(0, Number(lines[i].end) - Number(lines[i].start));
+            if (seconds < at + len)
+                return i;
+            at += len;
+            last = i;
+        }
+        return last;
+    }
+    onCutPreviewChanged: endCutChain()
+
+    readonly property var selectPositions: {
+        var lines = backend.selects;
+        var map = {};
+        if (!lines)
+            return map;
+        for (var p = 0; p < lines.length; ++p) {
+            if (lines[p] && lines[p].id !== undefined)
+                map[Number(lines[p].id)] = p;
+        }
+        return map;
+    }
+    readonly property real activeCutOffset: cutOffset(cutChain ? cutLine : currentLine)
+    // Where playback is on the timeline under the picture. Cut time while the
+    // cut is the preview; the source clip's own time while Original is.
+    readonly property real cutTimeNow: {
+        if (!gathering)
+            return 0;
+        var pos = movie.player.position / 1000;
+        if (!cutPreview)
+            return pos;
+        var i = cutChain ? cutLine : currentLine;
+        var lines = backend.selects;
+        if (i < 0 || i >= lines.length)
+            return 0;
+        var line = lines[i];
+        if (!keptLine(line))
+            return activeCutOffset;
+        var len = Math.max(0, Number(line.end) - Number(line.start));
+        return activeCutOffset + Math.max(0, Math.min(len, pos - Number(line.start)));
+    }
+    readonly property real cutTotal: cutPreview ? keptSpan() : movie.player.duration / 1000
+    // The B-roll or second-camera picture over the line that is playing, or null.
+    // The voice is the main player's; this only chooses what the picture shows.
+    readonly property var coverNow: {
+        if (!gathering || linePlayStart < 0)
+            return null;
+        var hasCovers = backend.covers && backend.covers.length > 0;
+        var hasAngles = backend.angles && backend.angles.length > 0;
+        if (!hasCovers && !hasAngles)
+            return null;
+        var i = cutChain ? cutLine : currentLine;
+        var lines = backend.selects;
+        if (i < 0 || i >= lines.length)
+            return null;
+        var paths = backend.cutClips && backend.cutClips.length > 0 ? backend.cutClips : backend.tray;
+        var posSec = movie.player.position / 1000;
+        if (hasCovers) {
+            var broll = Format.coverAt(lines, i, backend.covers, paths, posSec, backend.maxPause, selectPositions);
+            if (broll)
+                return broll;
+        }
+        if (hasAngles)
+            return Format.angleAt(lines, i, backend.angles, paths, backend.cutClipOffsets, posSec, selectPositions);
+        return null;
+    }
+    // A click on the timeline. Playing keeps playing from there; paused shows that frame.
+    function seekCut(seconds) {
+        if (!gathering)
+            return;
+        var playing = movie.player.playbackState === MediaPlayer.PlayingState && !movie.player.priming;
+        if (!cutPreview) {
+            endCutChain();
+            linePlayStart = Math.max(0, Math.round(seconds * 1000));
+            linePlayEnd = -1;
+            linePreview = false;
+            lineHold = !playing;
+            ensureAudioOutput();
+            movie.player.armLine();
+            return;
+        }
+        var i = cutLineAt(seconds);
+        if (i < 0)
+            return;
+        var line = backend.selects[i];
+        var from = Number(line.start) + Math.max(0, seconds - cutOffset(i));
+        currentLine = i;
+        if (playing)
+            playCutFrom(i, from);
+        else
+            playLine(line, false, from);
+    }
     function clearCutChain() {
         cutChain = false;
         cutLine = -1;
@@ -283,7 +481,7 @@ ApplicationWindow {
         if (movie.player.playbackState === MediaPlayer.PlayingState)
             movie.player.pause();
     }
-    function playLine(line, playThrough) {
+    function playLine(line, playThrough, fromSec) {
         if (!gathering || !line)
             return;
         var clip = line.clip;
@@ -293,7 +491,10 @@ ApplicationWindow {
             playThrough = true;
         // One line, not the chain. The chain's end must not keep running.
         clearCutChain();
-        linePlayStart = Math.max(0, Math.round(line.start * 1000));
+        var startSec = Number(line.start);
+        if (fromSec !== undefined && isFinite(Number(fromSec)))
+            startSec = Math.max(startSec, Number(fromSec));
+        linePlayStart = Math.max(0, Math.round(startSec * 1000));
         linePlayEnd = Math.max(linePlayStart, Math.round(line.end * 1000));
         linePreview = playThrough;
         lineHold = !playThrough;
@@ -301,6 +502,29 @@ ApplicationWindow {
             backend.trayIndex = clip;
         ensureAudioOutput();
         movie.player.armLine();
+    }
+    // Where a line sits in the list, counted from one, for a person to read.
+    function lineNumber(id) {
+        var rows = backend.selects;
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i] && Number(rows[i].id) === Number(id))
+                return i + 1;
+        }
+        return Number(id) + 1;
+    }
+    // Go to a line the cut said is worth a look: Lines, that row, that moment in the picture.
+    function showSpot(id) {
+        var rows = backend.selects;
+        for (var i = 0; i < rows.length; i++) {
+            if (!rows[i] || Number(rows[i].id) !== Number(id))
+                continue;
+            shotsPinned = false;
+            if (hasVideo && !gathering)
+                backend.showShots();
+            currentLine = i;
+            showLine(rows[i]);
+            return;
+        }
     }
     // Play, then seek, then pause. A seek while paused clears the picture.
     function showLine(line) {
@@ -358,17 +582,19 @@ ApplicationWindow {
             movie.player.position = linePlayStart;
         }
     }
-    function showNotice(text) {
+    function showNotice(text, persist) {
         noticeText = text;
-        noticeTimer.restart();
-    }
-    function openVideo() {
-        backend.openVideoDialog();
+        if (persist)
+            noticeTimer.stop();
+        else
+            noticeTimer.restart();
     }
     function openSettings() {
         settingsFromMovie = hasVideo && !gathering;
         if (movie.player.playbackState === MediaPlayer.PlayingState)
             movie.player.pause();
+        // Settings says what xAI thinks of the key. An older failure is not about that.
+        backend.dismissError();
         settingsOpen = true;
     }
     function closeSettings() {
@@ -381,6 +607,7 @@ ApplicationWindow {
     // Back to the recent lists. The files on disk stay where they are.
     function closeProjectNow() {
         movie.player.stop();
+        movie.stopCover();
         planPlaying = false;
         shotsPinned = false;
         currentLine = -1;
@@ -389,7 +616,7 @@ ApplicationWindow {
     function closeProject() {
         if (backend.busy)
             return;
-        if (unexported) {
+        if (unexported || looseCut) {
             leaveTarget = "lists";
             if (movie.player.playbackState === MediaPlayer.PlayingState)
                 movie.player.pause();
@@ -428,31 +655,10 @@ ApplicationWindow {
         else
             backend.restoreSelect(line.id);
     }
-    // K and D are the one toggle, each way. A line already there stays there.
-    function keepCurrentLine() {
-        if (backend.busy || currentLine < 0 || currentLine >= backend.selects.length)
-            return;
-        var line = backend.selects[currentLine];
-        if (line && line.keep === false)
-            backend.restoreSelect(line.id);
-    }
-    function dropCurrentLine() {
-        if (backend.busy || currentLine < 0 || currentLine >= backend.selects.length)
-            return;
-        var line = backend.selects[currentLine];
-        if (line && line.keep !== false)
-            backend.dropSelect(line.id);
-    }
     function playCurrentLine() {
         if (currentLine < 0 || currentLine >= backend.selects.length)
             return;
         playLine(backend.selects[currentLine]);
-    }
-    // The one revise snapshot, through the chat so it can say what happened.
-    function undoRevise() {
-        if (backend.busy || !backend.canRevert)
-            return;
-        planPane.undoRevise();
     }
     function nudgeShot(delta) {
         if (backend.busy || backend.tray.length === 0)
@@ -482,12 +688,21 @@ ApplicationWindow {
         } else if (backend.duration <= 0) {
             return;
         }
+        if (backend.planCut && (backend.plan.unexported || backend.movieStale)) {
+            updateMovie();
+            return;
+        }
         movie.player.pause();
         planPlaying = false;
-        if (backend.planCut && backend.plan.unexported)
-            backend.exportPlan();
-        else
-            backend.exportDialog();
+        backend.exportDialog();
+    }
+    // Lines or a handle changed. Render them over the movie this plan already has.
+    function updateMovie() {
+        if (backend.busy)
+            return;
+        movie.player.pause();
+        planPlaying = false;
+        backend.updateMovie();
     }
     function ensureAudioOutput() {
         if (audioOutput === null && (win.hasVideo || win.previewing)) {
@@ -595,12 +810,17 @@ ApplicationWindow {
             return backend.plan.playheadForEdge(best, false);
         return backend.plan.displayForSource(best, bestSource);
     }
-    function playCutFrom(index) {
+    function playCutFrom(index, fromSec) {
         var lines = backend.selects;
         if (!lines || index < 0 || index >= lines.length || !keptLine(lines[index]))
             return false;
         var line = lines[index];
         var start = Number(line.start);
+        if (fromSec !== undefined && isFinite(Number(fromSec)))
+            start = Math.max(start, Math.min(Number(line.end), Number(fromSec)));
+        // The row follows the cut as it plays.
+        if (gathering)
+            currentLine = index;
         var end = Number(line.end);
         var clip = Number(line.clip);
         var path = "";
@@ -951,13 +1171,6 @@ ApplicationWindow {
         }
     }
 
-    Shortcut {
-        sequence: "S"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.editing
-        onActivated: timeline.split(editBar.playheadSec)
-    }
 
     Shortcut {
         sequences: ["X", "Delete", "Backspace"]
@@ -995,36 +1208,37 @@ ApplicationWindow {
         sequence: "Ctrl+Z"
         context: Qt.ApplicationShortcut
         enabled: win.editing && timeline.canUndo
-        onActivated: timeline.undo()
+        onActivated: {
+            timeline.undo();
+            win.showNotice(qsTr("Undone."));
+        }
     }
 
     Shortcut {
         sequences: ["Ctrl+Shift+Z", "Ctrl+Y"]
         context: Qt.ApplicationShortcut
         enabled: win.editing && timeline.canRedo
-        onActivated: timeline.redo()
+        onActivated: {
+            timeline.redo();
+            win.showNotice(qsTr("Redone."));
+        }
     }
 
     Shortcut {
         sequence: "Ctrl+S"
         context: Qt.ApplicationShortcut
-        enabled: win.hasVideo && backend.duration > 0 && !backend.busy
+        enabled: win.hasVideo && win.mediaDuration > 0 && !backend.busy
         onActivated: {
             win.quitConfirmVisible = false;
             exportVideo();
         }
     }
 
-    Shortcut {
-        sequence: "Ctrl+O"
-        context: Qt.ApplicationShortcut
-        enabled: !win.quitConfirmVisible && !backend.busy
-        onActivated: openVideo()
-    }
 
     Shortcut {
         sequence: "Q"
         context: Qt.ApplicationShortcut
+        enabled: !win.controlFocused && !win.dialogUp
         onActivated: {
             if (!win.quitConfirmVisible)
                 requestQuit();
@@ -1034,6 +1248,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "?"
         context: Qt.ApplicationShortcut
+        enabled: !win.controlFocused && (!win.dialogUp || win.helpVisible)
         onActivated: {
             if (!win.quitConfirmVisible)
                 win.helpVisible = !win.helpVisible;
@@ -1050,6 +1265,8 @@ ApplicationWindow {
             }
             if (win.settingsOpen)
                 closeSettings();
+            else if (win.exportOpen)
+                win.exportOpen = false;
             else if (win.titleCardOpen)
                 win.titleCardOpen = false;
             else if (win.confirmCutOpen)
@@ -1058,20 +1275,32 @@ ApplicationWindow {
                 win.quitConfirmVisible = false;
             else if (win.helpVisible)
                 win.helpVisible = false;
+            else if (win.controlFocused && win.activeFocusItem)
+                win.activeFocusItem.focus = false;
         }
     }
 
     Shortcut {
         sequence: "Up"
         context: Qt.ApplicationShortcut
-        enabled: win.lineKeys
-        onActivated: moveLine(-1)
+        enabled: win.lineKeys || (win.shotKeys && !planPane.paceOpen)
+        onActivated: {
+            if (win.lineKeys)
+                moveLine(-1);
+            else if (backend.trayIndex > 0)
+                backend.trayIndex = backend.trayIndex - 1;
+        }
     }
     Shortcut {
         sequence: "Down"
         context: Qt.ApplicationShortcut
-        enabled: win.lineKeys
-        onActivated: moveLine(1)
+        enabled: win.lineKeys || (win.shotKeys && !planPane.paceOpen)
+        onActivated: {
+            if (win.lineKeys)
+                moveLine(1);
+            else if (backend.trayIndex + 1 < backend.tray.length)
+                backend.trayIndex = backend.trayIndex + 1;
+        }
     }
     Shortcut {
         sequences: ["Return", "Enter"]
@@ -1085,20 +1314,6 @@ ApplicationWindow {
         autoRepeat: false
         enabled: win.lineKeys
         onActivated: toggleCurrentLine()
-    }
-    Shortcut {
-        sequence: "K"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.lineKeys
-        onActivated: keepCurrentLine()
-    }
-    Shortcut {
-        sequence: "D"
-        context: Qt.ApplicationShortcut
-        autoRepeat: false
-        enabled: win.lineKeys
-        onActivated: dropCurrentLine()
     }
     Shortcut {
         sequence: "Alt+Up"
@@ -1125,7 +1340,7 @@ ApplicationWindow {
         sequences: ["Ctrl+Return", "Ctrl+Enter", "Ctrl+R"]
         context: Qt.ApplicationShortcut
         enabled: !win.dialogUp && !backend.busy && backend.job === "" && !win.controlFocused
-        onActivated: actionBar.activateFilled()
+        onActivated: win.activateFilled()
     }
 
 
@@ -1187,38 +1402,12 @@ ApplicationWindow {
         }
     }
 
-    // A word on a chip in the transport bar: Previous, Next.
-    component WordChip: Rectangle {
-        id: wordChip
-        property string word
-        signal clicked()
-        Layout.alignment: Qt.AlignVCenter
-        implicitWidth: chipWord.implicitWidth + 16
-        implicitHeight: 28
-        radius: theme.radius
-        color: chipHit.containsMouse && wordChip.enabled ? theme.hover : theme.raised
-        Label {
-            id: chipWord
-            anchors.centerIn: parent
-            text: wordChip.word
-            color: theme.foreground
-            opacity: wordChip.enabled ? 1 : 0.38
-            font.pixelSize: 13
-        }
-        MouseArea {
-            id: chipHit
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: wordChip.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-            onClicked: wordChip.clicked()
-        }
-    }
-
     MoviePlayer {
         id: movie
         host: win
         film: editBar
         videoItem: videoOut
+        coverItem: coverOut
     }
 
     Timer {
@@ -1226,6 +1415,12 @@ ApplicationWindow {
         interval: 5000
         repeat: false
         onTriggered: win.noticeText = ""
+    }
+
+    Settings {
+        id: layoutSettings
+        category: "layout"
+        property var columnsSplit
     }
 
     Item {
@@ -1245,455 +1440,332 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: 0
 
-            // The top bar: BotCut, the file, the step, and the one next action.
+            // The top bar: BotCut, the file, the steps, Settings, Help.
             ActionBar {
-                id: actionBar
+                id: topBar
                 Layout.fillWidth: true
-                Layout.preferredHeight: actionBar.implicitHeight
+                Layout.preferredHeight: topBar.implicitHeight
                 host: win
             }
 
-            RowLayout {
+            // The left column and the stage, with a handle between them that
+            // remembers where it was dragged.
+            SplitView {
+                id: columns
+                objectName: "columnsSplit"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: 0
+                orientation: Qt.Horizontal
+                handle: Rectangle {
+                    implicitWidth: 7
+                    implicitHeight: columns.height
+                    color: theme.surface
+                    Rectangle {
+                        anchors.right: parent.right
+                        width: 1
+                        height: parent.height
+                        color: theme.line
+                    }
+                    Rectangle {
+                        anchors.right: parent.right
+                        width: 2
+                        height: parent.height
+                        color: theme.foreground
+                        opacity: 0.38
+                        visible: SplitHandle.hovered || SplitHandle.pressed
+                    }
+                }
+                Component.onCompleted: {
+                    if (layoutSettings.columnsSplit)
+                        columns.restoreState(layoutSettings.columnsSplit)
+                }
+                Component.onDestruction: layoutSettings.columnsSplit = columns.saveState()
 
-                // The lines column. About 400 px with three columns, narrower below that.
                 PlanPane {
                     id: planPane
-                    Layout.preferredWidth: win.wideInspector ? 400 : 340
-                    Layout.minimumWidth: Layout.preferredWidth
-                    Layout.maximumWidth: Layout.preferredWidth
-                    Layout.fillHeight: true
+                    SplitView.preferredWidth: 360
+                    SplitView.minimumWidth: 300
+                    SplitView.maximumWidth: 560
+                    SplitView.fillHeight: true
                     host: win
                     film: editBar
-                    decisions: inspector
+                    decisions: cutRow
                 }
 
-                Rectangle {
-                    Layout.preferredWidth: 1
-                    Layout.fillHeight: true
-                    color: theme.line
-                }
+                // The stage: the picture, one transport bar with the timeline,
+                // the cut row, and on Movie the filmstrip that trims.
+                ColumnLayout {
+                    id: stage
+                    SplitView.fillWidth: true
+                    SplitView.minimumWidth: 320
+                    spacing: 0
 
-                // The stage and the decisions: side by side from 1280 px, and
-                // the decisions under the picture below that.
-                GridLayout {
-                    id: workspace
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    columns: win.wideInspector ? 2 : 1
-                    columnSpacing: 0
-                    rowSpacing: 0
-
-                    // The stage: the picture, then one transport bar, then the
-                    // block row that jumps or the filmstrip that trims, each at
-                    // the picture well's width.
-                    ColumnLayout {
-                        id: stage
+                    Item {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
-                        spacing: 0
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.topMargin: 12
+                        Layout.bottomMargin: transport.visible ? 8 : 12
 
-                        Item {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
-                            Layout.topMargin: 12
-                            Layout.bottomMargin: transport.visible ? 8 : 12
+                        Rectangle {
+                            objectName: "pictureWell"
+                            anchors.fill: parent
+                            radius: theme.radius
+                            color: "black"
+                            clip: true
 
-                            Rectangle {
+                            VideoOutput {
+                                id: videoOut
                                 anchors.fill: parent
-                                radius: theme.radius
-                                color: "black"
-                                clip: true
-
-                                VideoOutput {
-                                    id: videoOut
-                                    anchors.fill: parent
-                                }
-                                Connections {
-                                    target: videoOut.videoSink
-                                    function onVideoFrameChanged(frame) {
-                                        movie.player.finishPriming();
-                                    }
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    z: 1
-                                    enabled: win.hasVideo || win.previewing
-                                    cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onClicked: togglePlay()
-                                }
-                                Column {
-                                    visible: win.gathering && backend.tray.length === 0
-                                    z: 2
-                                    anchors.centerIn: parent
-                                    width: Math.min(440, parent.width - 48)
-                                    spacing: 8
-                                    Label {
-                                        width: parent.width
-                                        horizontalAlignment: Text.AlignHCenter
-                                        wrapMode: Text.WordWrap
-                                        text: qsTr("Drop the shots for this movie here.")
-                                        color: theme.foreground
-                                        font.pixelSize: 16
-                                    }
-                                    Label {
-                                        width: parent.width
-                                        horizontalAlignment: Text.AlignHCenter
-                                        wrapMode: Text.WordWrap
-                                        text: qsTr("MP4, MOV, or MKV, straight from your phone or camera.")
-                                        color: theme.foreground
-                                        opacity: 0.62
-                                        font.pixelSize: 13
-                                    }
-                                    ActionButton {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: qsTr("Trim one file instead…")
-                                        enabled: !backend.busy
-                                        onClicked: openVideo()
-                                    }
-                                }
-                                // The current line's words, over the picture. In
-                                // the window only. The export never carries them.
-                                Rectangle {
-                                    visible: win.viewStep === "lines" && captionLabel.text !== ""
-                                    z: 2
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    anchors.bottom: parent.bottom
-                                    anchors.bottomMargin: 16
-                                    width: Math.min(captionLabel.implicitWidth + 24, Math.round(parent.width * 0.8))
-                                    height: captionLabel.implicitHeight + 12
-                                    radius: theme.radius
-                                    color: Qt.rgba(0, 0, 0, 0.75)
-                                    Label {
-                                        id: captionLabel
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
-                                        anchors.topMargin: 6
-                                        anchors.bottomMargin: 6
-                                        text: win.currentLineText
-                                        color: "white"
-                                        font.pixelSize: 14
-                                        horizontalAlignment: Text.AlignHCenter
-                                        wrapMode: Text.WordWrap
-                                    }
+                            }
+                            Connections {
+                                target: videoOut.videoSink
+                                function onVideoFrameChanged(frame) {
+                                    movie.player.finishPriming();
                                 }
                             }
-                        }
-
-                        // The transport: Previous, play, Next, the clock, and Cut
-                        // or Original, in one bar under the picture. In the window
-                        // only. Export never sees it.
-                        RowLayout {
-                            id: transport
-                            // The rules live here. Item.visible is effective, so reading a
-                            // child's visible back would latch the bar hidden.
-                            readonly property bool playShown: win.hasVideo ? !win.gathering : win.previewing
-                            readonly property bool stepShown: win.viewStep === "lines" && backend.selects.length > 0
-                            readonly property bool modeShown: stepShown
-                                                              || (win.hasVideo && !win.gathering && backend.planCut)
-                            readonly property bool clockShown: win.hasVideo && !win.gathering
-                            visible: playShown || modeShown || clockShown
-                            Layout.fillWidth: true
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
-                            Layout.bottomMargin: blockRow.visible || editBar.visible ? 8 : 12
-                            Layout.preferredHeight: 36
-                            Layout.minimumHeight: 36
-                            spacing: 8
-
-                            // Previous and Next move the current line. They never start playback.
-                            WordChip {
-                                visible: transport.stepShown
-                                word: qsTr("Previous")
-                                enabled: win.currentLine > 0
-                                onClicked: moveLine(-1)
+                            // The B-roll picture over a covered line, once it has a frame.
+                            VideoOutput {
+                                id: coverOut
+                                objectName: "coverOut"
+                                anchors.fill: parent
+                                visible: movie.coverShown
                             }
-                            PlayButton {
-                                id: playButton
-                                // The shot preview while gathering, or the open movie.
-                                visible: transport.playShown
-                                enabled: win.gathering || backend.duration > 0
-                                Layout.alignment: Qt.AlignVCenter
-                                playing: movie.player.playbackState === MediaPlayer.PlayingState
-                                         && !movie.player.priming
+                            Connections {
+                                target: coverOut.videoSink
+                                function onVideoFrameChanged(frame) {
+                                    movie.coverFrame();
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                z: 1
+                                enabled: win.hasVideo || win.previewing
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                                 onClicked: togglePlay()
                             }
-                            WordChip {
-                                visible: transport.stepShown
-                                word: qsTr("Next")
-                                enabled: win.currentLine >= 0 && win.currentLine < backend.selects.length - 1
-                                onClicked: moveLine(1)
-                            }
-                            Rectangle {
-                                id: movieClockChip
-                                visible: transport.clockShown
-                                Layout.alignment: Qt.AlignVCenter
-                                implicitWidth: movieClock.implicitWidth + 16
-                                implicitHeight: 28
-                                radius: theme.radius
-                                color: theme.raised
+                            Column {
+                                visible: win.gathering && backend.tray.length === 0
+                                z: 2
+                                anchors.centerIn: parent
+                                width: Math.min(440, parent.width - 48)
+                                spacing: 8
                                 Label {
-                                    id: movieClock
-                                    anchors.centerIn: parent
-                                    text: lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
+                                    width: parent.width
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    text: qsTr("Drop the shots for this movie here.")
                                     color: theme.foreground
+                                    font.pixelSize: 16
+                                }
+                                Label {
+                                    width: parent.width
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
+                                    text: qsTr("MP4, MOV, or MKV, straight from your phone or camera.")
+                                    color: theme.foreground
+                                    opacity: 0.62
                                     font.pixelSize: 13
-                                    font.family: "monospace"
                                 }
                             }
-                            Item {
-                                Layout.fillWidth: true
-                                Layout.preferredHeight: 1
-                            }
-                            PreviewModeWord {
-                                id: modeChip
-                                // Lines, and the movie while the plan is the movie.
-                                // Not Shots, and not a plain file with no line list.
-                                visible: transport.modeShown
-                                Layout.alignment: Qt.AlignVCenter
-                            }
-                        }
-
-                        // One block per line that has a start and an end, in order,
-                        // each as wide as its share of the spoken time. Kept is the
-                        // accent, dropped the washed accent the filmstrip uses for a
-                        // dropped gap, unsure a thin accent mark above the block.
-                        // A click shows that line. Nothing here trims.
-                        Rectangle {
-                            id: blockRow
-                            visible: win.viewStep === "lines" && blocks.length > 0
-                            Layout.fillWidth: true
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
-                            Layout.bottomMargin: editBar.visible ? 8 : 12
-                            Layout.preferredHeight: 56
-                            Layout.minimumHeight: 56
-                            radius: theme.radius
-                            color: theme.surface
-                            border.width: 1
-                            border.color: theme.line
-
-                            readonly property var blocks: {
-                                var out = [];
-                                var at = 0;
-                                var lines = backend.selects;
-                                for (var i = 0; i < lines.length; i++) {
-                                    var line = lines[i];
-                                    if (!line)
-                                        continue;
-                                    var start = Number(line.start);
-                                    var end = Number(line.end);
-                                    if (!isFinite(start) || !isFinite(end))
-                                        continue;
-                                    var len = Math.max(0, end - start);
-                                    out.push({ index: i, at: at, len: len,
-                                               kept: line.keep !== false,
-                                               unsure: line.reason === "unique?" });
-                                    at += len;
-                                }
-                                return out;
-                            }
-                            readonly property real total: blocks.length > 0
-                                    ? blocks[blocks.length - 1].at + blocks[blocks.length - 1].len : 0
-
-                            Row {
-                                anchors.left: parent.left
-                                anchors.top: parent.top
-                                anchors.leftMargin: 10
-                                anchors.topMargin: 8
-                                spacing: 12
-                                Row {
-                                    spacing: 5
-                                    Rectangle {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 10
-                                        height: 6
-                                        radius: 1
-                                        color: theme.accent
-                                    }
-                                    Label {
-                                        text: qsTr("Kept")
-                                        color: theme.foreground
-                                        opacity: 0.62
-                                        font.pixelSize: 11
-                                    }
-                                }
-                                Row {
-                                    spacing: 5
-                                    Rectangle {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 10
-                                        height: 6
-                                        radius: 1
-                                        color: theme.accent
-                                        opacity: 0.24
-                                    }
-                                    Label {
-                                        text: qsTr("Dropped")
-                                        color: theme.foreground
-                                        opacity: 0.62
-                                        font.pixelSize: 11
-                                    }
-                                }
-                                Row {
-                                    spacing: 5
-                                    Rectangle {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: 2
-                                        height: 8
-                                        color: theme.accent
-                                    }
-                                    Label {
-                                        text: qsTr("Unsure")
-                                        color: theme.foreground
-                                        opacity: 0.62
-                                        font.pixelSize: 11
-                                    }
-                                }
-                            }
-                            Label {
-                                anchors.right: parent.right
-                                anchors.top: parent.top
-                                anchors.rightMargin: 10
-                                anchors.topMargin: 8
-                                width: Math.max(0, parent.width / 2 - 20)
-                                horizontalAlignment: Text.AlignRight
-                                text: qsTr("Click a block to show that line")
-                                color: theme.foreground
-                                opacity: 0.38
-                                font.pixelSize: 11
-                                elide: Text.ElideRight
-                            }
-                            Item {
-                                id: blockTrack
-                                anchors.left: parent.left
-                                anchors.right: parent.right
+                            // The current line's words, over the picture. In
+                            // the window only. The export never carries them.
+                            Rectangle {
+                                visible: win.viewStep === "lines" && captionLabel.text !== ""
+                                z: 2
+                                anchors.horizontalCenter: parent.horizontalCenter
                                 anchors.bottom: parent.bottom
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
-                                anchors.bottomMargin: 8
-                                height: 22
-                                Repeater {
-                                    model: blockRow.blocks
-                                    delegate: Item {
-                                        id: block
-                                        required property var modelData
-                                        readonly property real fromX: blockRow.total > 0
-                                                ? Math.round(modelData.at / blockRow.total * blockTrack.width) : 0
-                                        readonly property real toX: blockRow.total > 0
-                                                ? Math.round((modelData.at + modelData.len) / blockRow.total * blockTrack.width) : 0
-                                        x: fromX
-                                        width: Math.max(2, toX - fromX - 1)
-                                        height: blockTrack.height
-                                        Rectangle {
-                                            anchors.fill: parent
-                                            anchors.topMargin: 6
-                                            radius: 2
-                                            color: theme.accent
-                                            opacity: block.modelData.kept ? 1
-                                                     : (blockHit.containsMouse && !backend.busy ? 0.38 : 0.24)
-                                        }
-                                        Rectangle {
-                                            visible: block.modelData.unsure
-                                            x: 0
-                                            y: 0
-                                            width: 2
-                                            height: 4
-                                            color: theme.accent
-                                        }
-                                        Rectangle {
-                                            visible: block.modelData.index === win.currentLine
-                                            anchors.fill: parent
-                                            anchors.topMargin: 4
-                                            anchors.leftMargin: -2
-                                            anchors.rightMargin: -2
-                                            anchors.bottomMargin: -2
-                                            radius: 3
-                                            color: "transparent"
-                                            border.width: 1
-                                            border.color: theme.foreground
-                                        }
-                                        MouseArea {
-                                            id: blockHit
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: {
-                                                win.currentLine = block.modelData.index;
-                                                win.showLine(backend.selects[block.modelData.index]);
-                                            }
-                                        }
-                                    }
+                                anchors.bottomMargin: 16
+                                width: Math.min(captionLabel.implicitWidth + 24, Math.round(parent.width * 0.8))
+                                height: captionLabel.implicitHeight + 12
+                                radius: theme.radius
+                                color: Qt.rgba(0, 0, 0, 0.75)
+                                Label {
+                                    id: captionLabel
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 12
+                                    anchors.rightMargin: 12
+                                    anchors.topMargin: 6
+                                    anchors.bottomMargin: 6
+                                    text: win.currentLineText
+                                    color: "white"
+                                    font.pixelSize: 14
+                                    horizontalAlignment: Text.AlignHCenter
+                                    wrapMode: Text.WordWrap
                                 }
                             }
-                        }
-
-                        EditBar {
-                            id: editBar
-                            objectName: "editBar"
-                            visible: win.hasVideo && !win.gathering
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: implicitHeight
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
-                            Layout.bottomMargin: editBar.zoomed ? 4 : 12
-                            onScrub: (seconds, segment, source) => {
-                                movie.player.pause();
-                                if (backend.planCut && segment >= 0) {
-                                    planPlaying = false;
-                                    armPlanIndex(segment, source, false);
-                                    return;
-                                }
-                                seekTo(seconds);
-                            }
-                        }
-
-                        Label {
-                            visible: editBar.visible && editBar.zoomed
-                            Layout.fillWidth: true
-                            Layout.leftMargin: 12
-                            Layout.rightMargin: 12
-                            Layout.bottomMargin: 12
-                            text: qsTr("Zoomed to one shot. Z zooms out.")
-                            color: theme.foreground
-                            opacity: 0.62
-                            font.pixelSize: 13
-                            elide: Text.ElideRight
                         }
                     }
 
-                    // The decisions. A 280 px column on the right from 1280 px;
-                    // three short columns under the picture below that. Hidden
-                    // when nothing applies, as on the empty home.
-                    Inspector {
-                        id: inspector
+                    // The transport: play, the clock, the timeline on Lines, and
+                    // Cut or Original, in one bar under the picture.
+                    RowLayout {
+                        id: transport
+                        // The rules live here. Item.visible is effective, so reading a
+                        // child's visible back would latch the bar hidden.
+                        readonly property bool playShown: win.hasVideo ? !win.gathering : win.previewing
+                        readonly property bool linesShown: win.gathering && win.viewStep === "lines"
+                                                           && backend.selects.length > 0
+                        readonly property bool modeShown: linesShown
+                                                          || (win.hasVideo && !win.gathering && backend.planCut)
+                        readonly property bool clockShown: (win.hasVideo && !win.gathering) || linesShown
+                        visible: playShown || modeShown || clockShown
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: cutRow.visible || editBar.visible ? 8 : 12
+                        Layout.preferredHeight: 36
+                        Layout.minimumHeight: 36
+                        spacing: 8
+
+                        PlayButton {
+                            id: playButton
+                            // The shot preview while gathering, or the open movie.
+                            visible: transport.playShown
+                            enabled: win.gathering || win.mediaDuration > 0
+                            Layout.alignment: Qt.AlignVCenter
+                            playing: movie.player.playbackState === MediaPlayer.PlayingState
+                                     && !movie.player.priming
+                            onClicked: togglePlay()
+                        }
+                        Rectangle {
+                            id: movieClockChip
+                            visible: transport.clockShown
+                            Layout.alignment: Qt.AlignVCenter
+                            implicitWidth: movieClock.implicitWidth + 16
+                            implicitHeight: 28
+                            radius: theme.radius
+                            color: theme.raised
+                            Label {
+                                id: movieClock
+                                objectName: "transportClock"
+                                anchors.centerIn: parent
+                                text: transport.linesShown
+                                      ? lineClock(win.cutTimeNow) + " / " + lineClock(win.cutTotal)
+                                      : lineClock(editBar.playheadSec) + " / " + lineClock(win.timeline.keptDuration)
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                font.family: "monospace"
+                            }
+                        }
+                        // One plain track for the cut: where playback is, and a
+                        // click to go there. The rows on the left are how you
+                        // jump to a line; this only shows where you are.
+                        Item {
+                            id: lineTimeline
+                            objectName: "lineTimeline"
+                            visible: transport.linesShown
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 40
+                            Layout.preferredHeight: 36
+                            Layout.alignment: Qt.AlignVCenter
+                            readonly property real share: win.cutTotal > 0
+                                    ? Math.max(0, Math.min(1, win.cutTimeNow / win.cutTotal)) : 0
+                            Rectangle {
+                                id: track
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                height: 4
+                                radius: 2
+                                color: theme.raised
+                            }
+                            Rectangle {
+                                x: Math.round(track.width * lineTimeline.share) - 1
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 2
+                                height: 14
+                                radius: 1
+                                color: theme.accent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                enabled: !backend.busy && win.cutTotal > 0
+                                cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                function seekAt(x) {
+                                    var share = Math.max(0, Math.min(1, x / Math.max(1, width)));
+                                    win.seekCut(share * win.cutTotal);
+                                }
+                                onPressed: (mouse) => seekAt(mouse.x)
+                                onPositionChanged: (mouse) => {
+                                    if (pressed)
+                                        seekAt(mouse.x);
+                                }
+                            }
+                        }
+                        Item {
+                            visible: !lineTimeline.visible
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                        }
+                        PreviewModeWord {
+                            id: modeChip
+                            // Lines, and the movie while the plan is the movie.
+                            // Not Shots, and not a plain file with no line list.
+                            visible: transport.modeShown
+                            Layout.alignment: Qt.AlignVCenter
+                        }
+                    }
+
+                    // The decisions: the sentence, the pace, and the fade, in one
+                    // row under the picture. Above the filmstrip so the open pace
+                    // list can hang over it.
+                    CutRow {
+                        id: cutRow
                         host: win
-                        wide: win.wideInspector
                         visible: hasContent
-                        Layout.fillWidth: !win.wideInspector
-                        Layout.fillHeight: win.wideInspector
-                        Layout.preferredWidth: win.wideInspector ? 280 : 100
-                        Layout.minimumWidth: win.wideInspector ? 280 : 0
-                        Layout.maximumWidth: win.wideInspector ? 280 : 100000
+                        z: 5
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: editBar.visible ? 8 : 12
+                        Layout.preferredHeight: 36
+                        Layout.minimumHeight: 36
+                    }
+
+                    EditBar {
+                        id: editBar
+                        objectName: "editBar"
+                        visible: win.hasVideo && !win.gathering
+                        Layout.fillWidth: true
                         Layout.preferredHeight: implicitHeight
-                        Layout.minimumHeight: win.wideInspector ? 0 : implicitHeight
-                        Layout.leftMargin: win.wideInspector ? 0 : 12
-                        Layout.rightMargin: win.wideInspector ? 0 : 12
-                        Layout.bottomMargin: win.wideInspector ? 0 : 12
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: editBar.zoomed ? 4 : 12
+                        onScrub: (seconds, segment, source) => {
+                            movie.player.pause();
+                            if (backend.planCut && segment >= 0) {
+                                planPlaying = false;
+                                armPlanIndex(segment, source, false);
+                                return;
+                            }
+                            seekTo(seconds);
+                        }
+                    }
+
+                    Label {
+                        visible: editBar.visible && editBar.zoomed
+                        Layout.fillWidth: true
+                        Layout.leftMargin: 12
+                        Layout.rightMargin: 12
+                        Layout.bottomMargin: 12
+                        text: qsTr("Zoomed to one shot. Z zooms out.")
+                        color: theme.foreground
+                        opacity: 0.62
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
                     }
                 }
             }
 
-            // The status bar: the sentence, this step's quiet tools, and the keys.
+            // The action bar: this step's sentence, its quiet buttons, and the
+            // one filled button, together.
             Rectangle {
-                id: statusBar
+                id: actionBar
+                objectName: "actionBar"
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.max(40, statusSentence.implicitHeight + 12)
+                Layout.preferredHeight: Math.max(56, actionSentence.implicitHeight + 20)
                 Layout.minimumHeight: Layout.preferredHeight
                 color: theme.surface
 
@@ -1708,124 +1780,252 @@ ApplicationWindow {
                     anchors.fill: parent
                     anchors.leftMargin: 16
                     anchors.rightMargin: 16
-                    spacing: 8
+                    spacing: 12
 
                     Label {
-                        id: statusSentence
+                        id: actionSentence
+                        objectName: "actionSentence"
+                        visible: !win.running
                         Layout.fillWidth: true
-                        Layout.minimumWidth: 240
+                        Layout.minimumWidth: 200
                         Layout.alignment: Qt.AlignVCenter
                         text: win.actionSentence
                         color: win.actionNeedsYou || win.noticeText !== "" ? theme.accent : theme.foreground
                         opacity: win.noticeText !== "" || win.actionNeedsYou ? 1 : 0.62
-                        font.pixelSize: 12
+                        font.pixelSize: 13
                         wrapMode: Text.WordWrap
                         verticalAlignment: Text.AlignVCenter
                     }
 
-                    // This step's quiet tools. Show the file comes first after a save.
+                    // This step's quiet buttons. Show the file comes first after a save.
                     RowLayout {
                         id: quietTools
-                        spacing: 4
+                        spacing: 6
                         Layout.alignment: Qt.AlignVCenter
 
                         ActionButton {
+                            raised: true
                             text: qsTr("Open a saved list\u2026")
-                            visible: !actionBar.running && win.displayStep === "empty"
+                            visible: !win.running && win.displayStep === "empty"
                             enabled: !backend.busy
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: backend.openCutListDialog()
                         }
                         ActionButton {
+                            raised: true
                             text: qsTr("Keep every shot instead")
-                            visible: !actionBar.running && win.displayStep === "needsKey"
+                            visible: !win.running && win.displayStep === "needsKey"
                             enabled: !backend.busy
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: backend.cutMode = "assemble"
                         }
                         ActionButton {
+                            objectName: "cutAgainButton"
+                            raised: true
+                            text: qsTr("Cut again\u2026")
+                            visible: !win.running && win.gathering
+                                     && (win.displayStep === "lines" || win.displayStep === "allDropped"
+                                         || win.displayStep === "linesStale" || win.displayStep === "linesCurrent")
+                            enabled: !backend.busy && backend.tray.length > 0 && !backend.trayMissing
+                            Layout.minimumWidth: implicitWidth
+                            Layout.maximumWidth: implicitWidth
+                            onClicked: win.confirmCutOpen = true
+                        }
+                        ActionButton {
                             objectName: "showFileButton"
+                            raised: true
                             text: qsTr("Show the file")
-                            filled: false
-                            visible: !actionBar.running && win.displayStep === "movieSaved" && backend.roughCut
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
                             enabled: !backend.busy
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: backend.showFile()
                         }
                         ActionButton {
                             objectName: "captionsButton"
+                            raised: true
                             text: qsTr("Captions")
-                            visible: !actionBar.running && win.displayStep === "movieSaved" && backend.roughCut
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
                             enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: backend.writeCaptions()
                         }
                         ActionButton {
                             objectName: "shortButton"
+                            raised: true
                             text: qsTr("Vertical short")
-                            visible: !actionBar.running && win.displayStep === "movieSaved" && backend.roughCut
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
                             enabled: !backend.busy && !(backend.planCut && backend.plan.unexported)
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: backend.makeShort()
                         }
                         ActionButton {
-                            text: qsTr("Export another size\u2026")
-                            visible: !actionBar.running && win.displayStep === "movieSaved" && backend.roughCut
+                            raised: true
+                            objectName: "rerenderButton"
+                            text: qsTr("Re-render\u2026")
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
+                                     && !win.looseCut && !win.unexported
+                            enabled: !backend.busy
+                            Layout.minimumWidth: implicitWidth
+                            Layout.maximumWidth: implicitWidth
+                            onClicked: win.exportOpen = true
+                        }
+                        ActionButton {
+                            raised: true
+                            objectName: "saveCopyButton"
+                            text: qsTr("Save a copy\u2026")
+                            visible: !win.running && win.displayStep === "movieSaved" && backend.roughCut
                                      && !win.looseCut && !win.unexported
                             enabled: !backend.busy && (backend.planCut ? backend.plan.duration : backend.duration) > 0
-                            implicitHeight: 28
-                            topPadding: 4
-                            bottomPadding: 4
                             Layout.minimumWidth: implicitWidth
                             Layout.maximumWidth: implicitWidth
                             onClicked: exportVideo()
                         }
                     }
 
-                    // The keys this screen answers to. Only when the row has room.
-                    Row {
-                        id: keyHintRow
-                        visible: win.keyHints.length > 0
-                                 && statusBar.width - 288 - quietTools.implicitWidth >= 320
+                    ActionButton {
+                        id: filledButton
+                        objectName: "cutButton"
+                        text: win.filledText
+                        filled: win.displayStep !== "missingShot" && win.displayStep !== "allDropped"
+                        visible: !win.running && win.filledText !== ""
+                        enabled: win.filledEnabled
+                        Layout.minimumWidth: implicitWidth
+                        Layout.maximumWidth: implicitWidth
                         Layout.alignment: Qt.AlignVCenter
-                        spacing: 12
-                        Repeater {
-                            model: win.keyHints
-                            delegate: Row {
-                                required property var modelData
-                                spacing: 4
-                                Label {
-                                    text: modelData[0]
-                                    color: theme.foreground
-                                    opacity: 0.62
-                                    font.pixelSize: 11
-                                    font.family: "monospace"
+                        onClicked: win.activateFilled()
+                    }
+                    ActionButton {
+                        objectName: "stopButton"
+                        raised: true
+                        text: qsTr("Stop")
+                        visible: win.running && backend.busy
+                        Layout.minimumWidth: implicitWidth
+                        Layout.maximumWidth: implicitWidth
+                        Layout.alignment: Qt.AlignVCenter
+                        onClicked: backend.cancelJob()
+                    }
+                }
+
+                // Centered animated segmented progress indicator while any job is running.
+                Item {
+                    id: jobProgressPill
+                    objectName: "jobProgressPill"
+                    visible: win.running
+                    anchors.centerIn: parent
+                    width: Math.min(340, Math.max(220, actionBar.width * 0.34))
+                    height: 40
+
+                    readonly property int activeStage: {
+                        var j = String(backend.job || "")
+                        var p = Number(backend.progress)
+                        if (j === "rendering" || p >= 0.60)
+                            return 3
+                        if (j === "choosing" || p >= 0.38)
+                            return 2
+                        if (j === "transcribing" || p >= 0.12)
+                            return 1
+                        return 0
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 5
+
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            spacing: 8
+
+                            // Pulsing live-activity indicator so the user always sees active work.
+                            Rectangle {
+                                id: liveDot
+                                width: 8
+                                height: 8
+                                radius: 4
+                                color: theme.accent
+                                SequentialAnimation on opacity {
+                                    running: win.running
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: 0.35; to: 1.0; duration: 650; easing.type: Easing.InOutSine }
+                                    NumberAnimation { from: 1.0; to: 0.35; duration: 650; easing.type: Easing.InOutSine }
                                 }
-                                Label {
-                                    text: modelData[1]
-                                    color: theme.foreground
-                                    opacity: 0.38
-                                    font.pixelSize: 11
+                            }
+
+                            Label {
+                                id: jobButton
+                                text: backend.jobText
+                                color: theme.foreground
+                                font.pixelSize: 13
+                                font.weight: Font.DemiBold
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: jobProgressPill.width - 24
+                            }
+                        }
+
+                        // 4-segment step bar with smooth fill and continuous animated shimmer.
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Repeater {
+                                model: 4
+                                Rectangle {
+                                    id: segTrack
+                                    required property int index
+                                    Layout.fillWidth: true
+                                    height: 5
+                                    radius: 2.5
+                                    clip: true
+                                    color: theme.raised
+
+                                    readonly property bool done: index < jobProgressPill.activeStage
+                                    readonly property bool current: index === jobProgressPill.activeStage
+                                    readonly property real segFill: {
+                                        if (done)
+                                            return 1.0
+                                        if (!current)
+                                            return 0.0
+                                        var p = Number(backend.progress)
+                                        if (p < 0)
+                                            return 0.35
+                                        var starts = [0.0, 0.12, 0.38, 0.60]
+                                        var ends = [0.12, 0.38, 0.60, 1.0]
+                                        return Math.max(0.18, Math.min(1.0, (p - starts[index]) / (ends[index] - starts[index])))
+                                    }
+
+                                    Rectangle {
+                                        height: parent.height
+                                        width: parent.width * segTrack.segFill
+                                        radius: parent.radius
+                                        color: theme.accent
+                                        opacity: segTrack.done ? 0.95 : 0.78
+                                        Behavior on width {
+                                            NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+                                        }
+                                    }
+
+                                    // Continuous gliding shimmer across the active segment.
+                                    Rectangle {
+                                        id: shimmer
+                                        visible: segTrack.current && win.running
+                                        width: Math.max(18, parent.width * 0.45)
+                                        height: parent.height
+                                        radius: parent.radius
+                                        color: theme.foreground
+                                        opacity: 0.42
+                                        NumberAnimation on x {
+                                            running: shimmer.visible
+                                            loops: Animation.Infinite
+                                            from: -shimmer.width
+                                            to: segTrack.width + shimmer.width
+                                            duration: 1100
+                                            easing.type: Easing.InOutSine
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1836,6 +2036,10 @@ ApplicationWindow {
 
         SettingsDialog {
             id: settingsDialog
+            host: win
+        }
+        ExportDialog {
+            id: exportDialog
             host: win
         }
         HelpDialog { host: win }
@@ -1871,17 +2075,20 @@ ApplicationWindow {
         function onGatheringChanged() {
             if (backend.gathering || !backend.planCut || !win.hasVideo)
                 return;
-            // Back on Watch. The filmstrip time is the picture, not the head of the file.
+            // Back on Movie. The filmstrip time is the picture, not the head of the file.
             win.armPlan(editBar.playheadSec, false);
         }
         function onExportDone(path) {
             win.showNotice("Saved " + path);
         }
+        function onNotice(message) {
+            win.showNotice(message);
+        }
         function onExportFailed(message) {
-            win.showNotice("Export failed: " + message);
+            win.showNotice("Export failed: " + message, true);
         }
         function onLoadError(message) {
-            win.showNotice("Cannot open video: " + message);
+            win.showNotice("Cannot open video: " + message, true);
         }
     }
 

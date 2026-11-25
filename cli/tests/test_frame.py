@@ -51,10 +51,11 @@ def test_the_frame_holds_on_the_face_or_where_a_talking_head_sits():
 
 
 def test_the_punch_in_is_a_crop_around_the_speaker_that_stays_in_the_picture():
-    # 1920 / 1.12 = 1714, 1080 / 1.12 = 964, both even. Centered on the face at (0.5, 0.35).
-    assert punch_crop(_clip(face={"x": 0.4, "y": 0.2, "w": 0.2, "h": 0.3})) == "crop=1714:964:103:0"
-    # A speaker at the right edge: the crop stops at the edge and does not show black.
-    assert punch_crop(_clip(face={"x": 0.85, "y": 0.6, "w": 0.15, "h": 0.3})) == "crop=1714:964:206:116"
+    # Eye-line locked: round(1920 / 1.08) = 1778, round(1080 / 1.08) = 1000, both even.
+    # Anchored on face (0.5, 0.35): left = 0.5*(1920-1778)=71, top = 0.35*(1080-1000)=28.
+    assert punch_crop(_clip(face={"x": 0.4, "y": 0.2, "w": 0.2, "h": 0.3})) == "crop=1778:1000:71:28"
+    # Speaker near right/bottom edge stays inside picture and keeps eye-line proportional.
+    assert punch_crop(_clip(face={"x": 0.85, "y": 0.6, "w": 0.15, "h": 0.3})) == "crop=1778:1000:131:60"
 
 
 def _said(uid, start, end, keep=True):
@@ -109,8 +110,8 @@ def test_the_slow_push_starts_wide_at_a_join_and_carries_on_across_a_cut_inside_
     assert push_starts(pieces, lines) == [0.0, 5.0, 0.0]
     assert push_starts(pieces) == [0.0, 0.0, 0.0]
     move = push_filter(_clip(face={"x": 0.4, "y": 0.2, "w": 0.2, "h": 0.3}), 5.0)
-    # Half a percent a second from where it had got to, never past eight percent, toward the face.
-    assert "min(1+0.005*(on/30+5.000),1.08)" in move
+    # 0.3% per second up to 5%, anchored on the face eye-line.
+    assert "min(1+0.003*(on/30+5.000),1.05)" in move
     assert move.startswith("perspective=x0='W*0.5000*(1-1/(")
     assert "y0='H*0.3500*(1-1/(" in move
     assert move.endswith(":sense=source:eval=frame:interpolation=cubic")
@@ -170,7 +171,7 @@ def test_no_zoom_unless_asked_and_only_the_speaker_is_zoomed():
 
     # On cuts. First piece wide. After the join: the speaker tight, the B-roll as shot, the speaker tight again.
     branches, _ = graph(zoom="cuts")
-    assert [("crop=1714:964:103:0" in part) for part in branches] == [False, True, False, True]
+    assert [("crop=1778:1000:71:28" in part) for part in branches] == [False, True, False, True]
     # On VA-API the zoomed pieces are decoded in software, where the crop runs.
     _, args = graph(zoom="cuts", encoder="vaapi", device="/dev/dri/renderD128")
     assert args.count("-hwaccel") < len(branches)
@@ -182,9 +183,9 @@ def test_no_zoom_unless_asked_and_only_the_speaker_is_zoomed():
     assert "(on/30+0.000)" in branches[0] and "(on/30+0.000)" in branches[1]
     assert "(on/30+6.000)" in branches[3]
 
-    # Key lines. Line 3 is the one that carries the point: 1920 / 1.15 = 1669, 1080 / 1.15 = 939, made even.
+    # Key lines. Line 3 is the one that carries the point: CLOSE_IN=1.10 -> 1744x982, eye-line locked at (0.5, 0.35).
     branches, _ = graph(zoom="lines", close=[3])
-    assert [("crop=1668:938:126:0" in part) for part in branches] == [False, False, False, True]
+    assert [("crop=1744:982:88:34" in part) for part in branches] == [False, False, False, True]
     # With no line named, or the named line gone, nothing is zoomed.
     assert graph(zoom="lines")[0] == plain
     assert graph(zoom="lines", close=[42])[0] == plain
@@ -323,16 +324,32 @@ def _look(piece):
 
 
 def test_auto_goes_tight_at_a_jump_cut_once_the_framing_has_been_held():
-    # Five lines of five seconds, each its own piece: a jump cut between every two.
-    lines = [_said(i, 10 * i, 10 * i + 5) for i in range(5)]
-    segs = [{"clip": 0, "start": 10 * i, "end": 10 * i + 5, "reason": "x"} for i in range(5)]
+    # Five lines of seven seconds (above medium 6s hold), each its own piece: a jump cut between every two.
+    lines = [_said(i, 12 * i, 12 * i + 7) for i in range(5)]
+    segs = [{"clip": 0, "start": 12 * i, "end": 12 * i + 7, "reason": "x"} for i in range(5)]
     assert [_look(piece) for piece in _auto_pieces(segs, lines)] == ["wide", "tight", "wide", "tight", "wide"]
-    # Tight is a fifth closer: 1920 / 1.2 = 1600, 1080 / 1.2 = 900.
-    assert _auto_pieces(segs, lines)[1]["punch"].startswith("crop=1600:900:")
-    # Jumps that come two seconds apart do not make the framing flicker: it is held four seconds.
+    # Medium tight is 1.10x: round(1920 / 1.10) = 1744, round(1080 / 1.10) = 982.
+    assert _auto_pieces(segs, lines)[1]["punch"].startswith("crop=1744:982:")
+    # Jumps two seconds apart do not flicker: medium holds 6 seconds (3 pieces of 2s).
     quick = [_said(i, 4 * i, 4 * i + 2) for i in range(6)]
     pieces = [{"clip": 0, "start": 4 * i, "end": 4 * i + 2, "reason": "x"} for i in range(6)]
-    assert [_look(piece) for piece in _auto_pieces(pieces, quick)] == ["wide", "wide", "tight", "tight", "wide", "wide"]
+    assert [_look(piece) for piece in _auto_pieces(pieces, quick)] == ["wide", "wide", "wide", "tight", "tight", "tight"]
+
+
+def test_zoom_levels_subtle_medium_bold():
+    from botcut.media import cut_pieces
+
+    clips = [_clip("/tmp/talk.mp4", duration=200.0)]
+    lines = [_said(i, 15 * i, 15 * i + 9) for i in range(3)]
+    segs = [{"clip": 0, "start": 15 * i, "end": 15 * i + 9, "reason": "x"} for i in range(3)]
+
+    subtle = cut_pieces(segs, clips, polish=True, lines=lines, zoom="subtle")
+    medium = cut_pieces(segs, clips, polish=True, lines=lines, zoom="medium")
+    bold = cut_pieces(segs, clips, polish=True, lines=lines, zoom="bold")
+    # 1920/1.06=1810, 1920/1.10=1744, 1920/1.15=1670
+    assert subtle[1]["punch"].startswith("crop=1810:1018:")
+    assert medium[1]["punch"].startswith("crop=1744:982:")
+    assert bold[1]["punch"].startswith("crop=1670:938:")
 
 
 def test_auto_never_changes_framing_at_a_cut_inside_a_line():
@@ -355,14 +372,14 @@ def test_auto_shows_a_line_that_matters_tight_and_comes_back_wide_from_other_pic
     clips, segs, lines, covers = _zoom_case()
     clips[0]["duration"] = 20.0
     pieces = _auto_pieces(segs, lines, close=[3], clips=clips, covers=covers)
-    # Line 0 wide. After the jump, tight. B-roll over line 2 is left as shot. Line 3 matters: tight.
+    # Line 0 wide (5s < 6s medium hold, so line 1 stays wide/push). B-roll over line 2 is left as shot. Line 3 matters: tight.
     assert [(piece["clip"], _look(piece)) for piece in pieces] == [
-        (0, "wide"), (0, "tight"), (1, "wide"), (0, "tight"),
+        (0, "wide"), (0, "push"), (1, "wide"), (0, "tight"),
     ]
     # Without the line that matters, the speaker comes back from the B-roll wide, on the slow
     # push the ten-second stretch around the B-roll is given.
     plain = _auto_pieces(segs, lines, clips=clips, covers=covers)
-    assert [_look(piece) for piece in plain] == ["wide", "tight", "wide", "push"]
+    assert [_look(piece) for piece in plain] == ["wide", "push", "wide", "push"]
 
 
 def test_the_zoom_follows_a_speaker_who_moves():
@@ -375,7 +392,7 @@ def test_the_zoom_follows_a_speaker_who_moves():
     # Nothing was seen within twenty seconds of this moment: the shot's one face is used.
     assert focus(clip, at=100.0) == (0.5, 0.35)
     left, right = punch_crop(clip, 1.2, at=12.0), punch_crop(clip, 1.2, at=55.0)
-    assert left == "crop=1600:900:0:0" and right == "crop=1600:900:320:0"
+    assert left == "crop=1600:900:96:72" and right == "crop=1600:900:224:72"
 
 
 def test_faces_are_found_once_per_still_and_a_still_without_one_adds_nothing(tmp_path, monkeypatch):

@@ -423,15 +423,33 @@ def trim_cuts(utt: dict, phrases: list, known: list[dict] | None = None) -> list
     return sorted(found, key=lambda cut: cut["from"])
 
 
-def cut_words(segments: list[dict], lines: list[dict]) -> list[dict]:
-    """Take the chosen cuts of the kept lines out of the ranges that will be rendered."""
+def cut_words(
+    segments: list[dict],
+    lines: list[dict],
+    silences_by_clip: list[list[tuple[float, float]]] | None = None,
+) -> list[dict]:
+    """Take the chosen cuts of the kept lines out of the ranges that will be rendered.
+
+    When `silences_by_clip` is given, a filler/crutch cut immediately adjacent to a pause
+    coalesces into one clean cut instead of leaving a short silent stub and a double jump.
+    """
     gone: dict[int, list[tuple[float, float]]] = {}
     for line in lines:
         if not line.get("keep"):
             continue
+        clip_idx = int(line["clip"])
+        sils = _silences_for(silences_by_clip or [], clip_idx)
         for cut in line.get("cuts") or []:
-            if cut.get("cut"):
-                gone.setdefault(int(line["clip"]), []).append((float(cut["start"]), float(cut["end"])))
+            if not cut.get("cut"):
+                continue
+            cs, ce = float(cut["start"]), float(cut["end"])
+            # Coalesce with any immediately adjacent silence (within 0.15s) to avoid double jump cuts.
+            for s_start, s_end in sils:
+                if abs(s_end - cs) <= 0.15 and s_end - s_start > 0.12:
+                    cs = min(cs, s_start + 0.12)
+                if abs(s_start - ce) <= 0.15 and s_end - s_start > 0.12:
+                    ce = max(ce, s_end - 0.12)
+            gone.setdefault(clip_idx, []).append((cs, ce))
     if not gone:
         return segments
     out = []
@@ -504,14 +522,22 @@ CHUNK_OVERLAP = 10
 CHUNK_WORKERS = 3
 
 
-def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> list[dict]:
+def pick(
+    utts: list[dict],
+    intent: str = "",
+    outline: dict | None = None,
+    *,
+    max_pause: float = 0.85,
+) -> list[dict]:
     if os.environ.get("BOTCUT_FAKE") == "1":
         return [_kept(u["id"], "fake", range(len(u.get("cuts") or []))) for u in utts]
     # The key is asked for where the request is made, so a replayed answer needs none.
     parts = chunks(utts)
     retaken = {uid for group in (outline or {}).get("retakes") or [] for uid in group}
     if len(parts) == 1:
-        return _ask_keep(utts, intent, before=outline_note(outline, utts, utts), prefer=retaken)
+        return _ask_keep(
+            utts, intent, before=outline_note(outline, utts, utts), prefer=retaken, max_pause=max_pause
+        )
     from concurrent.futures import ThreadPoolExecutor
 
     def ask(numbered: tuple[int, dict]) -> list[dict]:
@@ -526,6 +552,7 @@ def pick(utts: list[dict], intent: str = "", outline: dict | None = None) -> lis
             note,
             before=outline_note(outline, part["lines"], utts),
             prefer=retaken,
+            max_pause=max_pause,
         )
         return [item for item in kept if item["id"] in part["owned"]]
 
@@ -579,7 +606,9 @@ def folds(utts: list[dict]) -> bool:
     return OUTLINE_MIN_LINES <= len(utts) <= CHUNK_LINES
 
 
-def read_and_choose(utts: list[dict], intent: str = "") -> tuple[dict, list[dict]]:
+def read_and_choose(
+    utts: list[dict], intent: str = "", *, max_pause: float = 0.85
+) -> tuple[dict, list[dict]]:
     """The outline and the kept lines of a shoot that fits in one request."""
 
     def parse(parsed):
@@ -592,7 +621,7 @@ def read_and_choose(utts: list[dict], intent: str = "") -> tuple[dict, list[dict
     return ask(
         [
             {"role": "system", "content": system_prompt(intent) + FOLD_NOTE},
-            {"role": "user", "content": user_content(utts)},
+            {"role": "user", "content": user_content(utts, max_pause=max_pause)},
         ],
         FOLD_SCHEMA,
         what="a keep list",
@@ -603,17 +632,23 @@ def read_and_choose(utts: list[dict], intent: str = "") -> tuple[dict, list[dict
     )
 
 
-def read_shoot(utts: list[dict], intent: str = "", plan: dict | None = None) -> tuple[dict, list[dict]]:
+def read_shoot(
+    utts: list[dict],
+    intent: str = "",
+    plan: dict | None = None,
+    *,
+    max_pause: float = 0.85,
+) -> tuple[dict, list[dict]]:
     """Read the shoot and choose its lines: in one request when it fits, otherwise outline, then choose.
 
     `plan` is an outline already in hand, for a long shoot whose outline was
     asked for while the stills were being read.
     """
     if folds(utts):
-        return read_and_choose(utts, intent)
+        return read_and_choose(utts, intent, max_pause=max_pause)
     if plan is None:
         plan = outline(utts, intent)
-    return plan, pick(utts, intent, plan)
+    return plan, pick(utts, intent, plan, max_pause=max_pause)
 
 
 def _kept(uid, reason, cuts, trim=()) -> dict:
@@ -664,12 +699,13 @@ def _ask_keep(
     *,
     before: str = "",
     prefer: set[int] | None = None,
+    max_pause: float = 0.85,
 ) -> list[dict]:
     # A reply that is not the schema is asked for once more before the cut stops.
     return ask(
         [
             {"role": "system", "content": system_prompt(intent) + note},
-            {"role": "user", "content": user_content(utts, before=before, prefer=prefer)},
+            {"role": "user", "content": user_content(utts, before=before, prefer=prefer, max_pause=max_pause)},
         ],
         KEEP_SCHEMA,
         what="a keep list",
@@ -805,28 +841,200 @@ def snap(segments: list[dict], silences_by_clip: list[list[tuple[float, float]]]
     return snapped
 
 
+# Dead-air stalls longer than this always cut, even inside a cooldown window.
+MAJOR_STALL = 1.5
+
+PACE_PROFILES: dict[str, dict[str, float]] = {
+    "open": {
+        "trigger": 1.40,
+        "pad_out": 0.35,
+        "pad_in": 0.25,
+        "min_savings": 0.80,
+        "min_cut_gap": 4.0,
+        "mid_sentence_delta": -0.20,
+        "beat_bonus": 0.40,
+    },
+    "measured": {
+        "trigger": 0.85,
+        "pad_out": 0.22,
+        "pad_in": 0.18,
+        "min_savings": 0.35,
+        "min_cut_gap": 2.5,
+        "mid_sentence_delta": -0.25,
+        "beat_bonus": 0.35,
+    },
+    "tight": {
+        "trigger": 0.55,
+        "pad_out": 0.16,
+        "pad_in": 0.12,
+        "min_savings": 0.25,
+        "min_cut_gap": 1.5,
+        "mid_sentence_delta": -0.15,
+        "beat_bonus": 0.25,
+    },
+    "frenzied": {
+        "trigger": 0.35,
+        "pad_out": 0.10,
+        "pad_in": 0.08,
+        "min_savings": 0.15,
+        "min_cut_gap": 0.8,
+        "mid_sentence_delta": -0.05,
+        "beat_bonus": 0.15,
+    },
+}
+
+
+def pace_profile(max_pause: float) -> dict[str, float | str]:
+    """Map a max_pause value to a prosody-aware pause-tightening profile."""
+    mp = float(max_pause)
+    if mp >= 1.20:
+        name = "open"
+    elif mp >= 0.70:
+        name = "measured"
+    elif mp >= 0.45:
+        name = "tight"
+    else:
+        name = "frenzied"
+    base = PACE_PROFILES[name]
+    pad_out = float(base["pad_out"])
+    pad_in = float(base["pad_in"])
+    # Never let retained air exceed the requested trigger on custom max_pause values.
+    if pad_out + pad_in >= mp > 0:
+        scale = (mp * 0.6) / (pad_out + pad_in)
+        pad_out = round(pad_out * scale, 3)
+        pad_in = round(pad_in * scale, 3)
+    return {
+        "name": name,
+        "trigger": mp,
+        "pad_out": pad_out,
+        "pad_in": pad_in,
+        "min_savings": float(base["min_savings"]),
+        "min_cut_gap": float(base["min_cut_gap"]),
+        "mid_sentence_delta": float(base["mid_sentence_delta"]),
+        "beat_bonus": float(base["beat_bonus"]),
+    }
+
+
+_TERMINAL_PUNCT = re.compile(r"""[.!?…]["'”’)\]]*$""")
+
+
+def _pause_context(
+    clip_idx: int,
+    silence_start: float,
+    silence_end: float,
+    lines_by_clip: dict[int, list[dict]],
+    beat_end_ids: set[int],
+) -> str:
+    """Classify a silence as 'beat', 'sentence', or 'mid' from kept lines and outline beats."""
+    clip_lines = lines_by_clip.get(clip_idx)
+    if not clip_lines:
+        return "sentence"
+    # A silence strictly inside a kept utterance is a mid-sentence hesitation.
+    for line in clip_lines:
+        if line["start"] + 0.05 < silence_start and silence_end < line["end"] - 0.05:
+            return "mid"
+    prev_line: dict | None = None
+    for line in clip_lines:
+        if line["end"] <= silence_start + 0.25:
+            prev_line = line
+        else:
+            break
+    if prev_line is None:
+        return "sentence"
+    if prev_line["id"] in beat_end_ids:
+        return "beat"
+    if _TERMINAL_PUNCT.search(prev_line["text"].strip()):
+        return "sentence"
+    return "mid"
+
+
 def tighten(
     segments: list[dict],
     silences_by_clip: list[list[tuple[float, float]]],
     max_pause: float,
+    *,
+    lines: list[dict] | None = None,
+    beats: list[dict] | None = None,
 ) -> list[dict]:
+    profile = pace_profile(max_pause)
+    base_trigger = float(profile["trigger"])
+    base_pad_out = float(profile["pad_out"])
+    base_pad_in = float(profile["pad_in"])
+    min_savings = float(profile["min_savings"])
+    min_cut_gap = float(profile["min_cut_gap"])
+    mid_delta = float(profile["mid_sentence_delta"])
+    beat_bonus = float(profile["beat_bonus"])
+
+    lines_by_clip: dict[int, list[dict]] = {}
+    for line in lines or []:
+        if not isinstance(line, dict) or not line.get("keep"):
+            continue
+        try:
+            cidx = int(line["clip"])
+            lines_by_clip.setdefault(cidx, []).append(
+                {
+                    "id": int(line.get("id", -1)),
+                    "start": float(line["start"]),
+                    "end": float(line["end"]),
+                    "text": str(line.get("text") or ""),
+                }
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    for rows in lines_by_clip.values():
+        rows.sort(key=lambda row: row["end"])
+
+    beat_end_ids: set[int] = set()
+    for beat in beats or []:
+        if not isinstance(beat, dict):
+            continue
+        try:
+            beat_end_ids.add(int(beat["last"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+
     tightened = []
     for seg in segments:
         pieces = [dict(seg)]
-        for silence_start, silence_end in _silences_for(silences_by_clip, seg["clip"]):
-            if silence_end - silence_start <= max_pause:
+        last_cut_at: float | None = None
+        clip_idx = int(seg["clip"])
+        for silence_start, silence_end in _silences_for(silences_by_clip, clip_idx):
+            dur = silence_end - silence_start
+            trigger = base_trigger
+            pad_out = base_pad_out
+            pad_in = base_pad_in
+            if lines_by_clip:
+                ctx = _pause_context(clip_idx, silence_start, silence_end, lines_by_clip, beat_end_ids)
+                if ctx == "beat":
+                    trigger += beat_bonus
+                    pad_out += 0.08
+                    pad_in += 0.07
+                elif ctx == "mid":
+                    trigger = max(0.30, trigger + mid_delta)
+            if dur <= trigger:
+                continue
+            if dur - (pad_out + pad_in) < min_savings:
+                continue
+            if last_cut_at is not None and (silence_start - last_cut_at) < min_cut_gap and dur <= MAJOR_STALL:
                 continue
             nxt = []
+            did_cut = False
             for piece in pieces:
                 if silence_start >= piece["start"] and silence_end <= piece["end"]:
-                    left_end = silence_start + 0.15
-                    right_start = silence_end - 0.15
+                    left_end = silence_start + pad_out
+                    right_start = silence_end - pad_in
+                    if right_start <= left_end:
+                        nxt.append(piece)
+                        continue
                     if left_end - piece["start"] > 0:
                         nxt.append({**piece, "end": left_end})
                     if piece["end"] - right_start > 0:
                         nxt.append({**piece, "start": right_start})
+                    did_cut = True
                 else:
                     nxt.append(piece)
+            if did_cut:
+                last_cut_at = silence_end
             pieces = nxt
         tightened.extend(pieces)
     return tightened
@@ -974,13 +1182,26 @@ TRIM_NOTE = (
     "never most of a line, and never what a cut on offer already takes. Most lines get an empty list.\n\n"
 )
 
+TRIM_NOTE_GENTLE = (
+    "For a line you keep, return as trim only clear stumbles, stutters, or the abandoned start of a "
+    "thought that is said again in other words, copied exactly as written. Leave natural conversational "
+    "connectors (\"you know\", \"I mean\", \"so\", \"like\") intact so the edit stays smooth without "
+    "mid-sentence jump cuts. Never trim words the sentence needs, never most of a line, and never "
+    "what a cut on offer already takes. Almost all lines get an empty list.\n\n"
+)
 
-def _user_message(utts: list[dict]) -> str:
+
+def trim_note_for_pace(max_pause: float) -> str:
+    """Scale mid-sentence word-trim aggressiveness with pace (gentle on open/measured, tight on tight/frenzied)."""
+    return TRIM_NOTE_GENTLE if float(max_pause) >= 0.70 else TRIM_NOTE
+
+
+def _user_message(utts: list[dict], *, max_pause: float = 0.85) -> str:
     rows = "\n".join(
         f"[{u['id']}] (clip {u['clip']}, {u['start']:.2f}-{u['end']:.2f}) {u['text']}{_offer(u)}"
         for u in utts
     )
-    return (CUTS_NOTE if any(u.get("cuts") for u in utts) else "") + TRIM_NOTE + rows
+    return (CUTS_NOTE if any(u.get("cuts") for u in utts) else "") + trim_note_for_pace(max_pause) + rows
 
 
 def shown_stills(ready: list[dict], prefer: set[int] | None = None) -> list[dict]:
@@ -1007,7 +1228,7 @@ def shown_stills(ready: list[dict], prefer: set[int] | None = None) -> list[dict
 
 
 def user_content(
-    utts: list[dict], *, before: str = "", prefer: set[int] | None = None
+    utts: list[dict], *, before: str = "", prefer: set[int] | None = None, max_pause: float = 0.85
 ) -> str | list[dict]:
     """Text when no still exists. Otherwise the lines, then one JPEG per shown line.
 
@@ -1015,7 +1236,7 @@ def user_content(
     """
     ready = [u for u in utts if u.get("still") and os.path.isfile(str(u["still"]))]
     if not ready:
-        return before + _user_message(utts)
+        return before + _user_message(utts, max_pause=max_pause)
     ready = shown_stills(ready, prefer)
     parts: list[dict] = [
         {
@@ -1025,7 +1246,7 @@ def user_content(
                 "Drop a blurred, dark, or unusable picture. Keep a clean look. "
                 "Return ids and reasons only. A reason may mention the picture.\n\n"
                 + before
-                + _user_message(utts)
+                + _user_message(utts, max_pause=max_pause)
             ),
         }
     ]

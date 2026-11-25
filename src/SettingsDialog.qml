@@ -200,7 +200,9 @@ Item {
                 Repeater {
                     model: [
                         { value: "off", word: qsTr("Off") },
-                        { value: "auto", word: qsTr("Auto") }
+                        { value: "subtle", word: qsTr("Subtle") },
+                        { value: "medium", word: qsTr("Medium") },
+                        { value: "bold", word: qsTr("Bold") }
                     ]
                     ActionButton {
                         required property var modelData
@@ -218,8 +220,13 @@ Item {
                 color: theme.foreground
                 opacity: 0.62
                 font.pixelSize: 12
-                text: backend.zoom !== "off" ? qsTr("Goes closer at a cut between lines, so the jump reads as a change of shot, and on the few lines that carry the point. A long stretch moves in slowly. The first render takes longer.")
-                    : qsTr("The picture plays as it was shot.")
+                text: backend.zoom === "subtle"
+                      ? qsTr("Subtle 6% eye-locked shifts on major cuts (8s hold) with a gentle 3% drift on long takes.")
+                      : backend.zoom === "bold"
+                        ? qsTr("Dynamic 15% eye-locked framing (4.5s hold) with a 7% slow push for punchy social edits.")
+                        : backend.zoom !== "off"
+                          ? qsTr("Balanced 10% eye-locked framing at cuts (6s hold) and key lines, with a 5% slow push on long takes.")
+                          : qsTr("The picture plays as it was shot.")
             }
             RowLayout {
                 width: parent.width

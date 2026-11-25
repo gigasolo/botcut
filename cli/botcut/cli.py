@@ -68,8 +68,8 @@ from botcut.stt import key_terms, terms_mark, transcribe_fake, transcribe_local,
 
 
 ZOOM_HELP = (
-    "zoom in on the speaker: all three ways together (auto), or only at a join between lines (cuts), "
-    "slowly between joins (push), or on the lines that carry the point (lines)"
+    "eye-locked zoom on the speaker: subtle (6% / 8s hold), medium (10% / 6s hold, alias: auto), "
+    "bold (15% / 4.5s hold), or legacy cuts/push/lines"
 )
 
 # Shots sent to the transcriber at once, and stills grabbed at once.
@@ -791,17 +791,21 @@ def run(
         finally:
             if ahead:
                 ahead.shutdown(wait=False, cancel_futures=True)
-        plan, chosen = read_shoot(utts, movie, plan)
+        try:
+            plan, chosen = read_shoot(utts, movie, plan, max_pause=max_pause)
+        except TypeError:
+            plan, chosen = read_shoot(utts, movie, plan)
         clock.lap("choose")
     else:
         plan = no_outline()
         chosen = []
     segs, unknown = segments(utts, chosen, [clip["duration"] for clip in clips])
+    lines = decision_lines(utts, chosen)
+    plan_beats = (plan or {}).get("beats") if isinstance(plan, dict) else None
     if snap_edges:
         segs = snap(segs, silences_by_clip)
-    segs = tighten(segs, silences_by_clip, max_pause)
-    lines = decision_lines(utts, chosen)
-    segs = settle(cut_words(segs, lines), lines)
+    segs = tighten(segs, silences_by_clip, max_pause, lines=lines, beats=plan_beats)
+    segs = settle(cut_words(segs, lines, silences_by_clip=silences_by_clip), lines)
     changes = no_changes()
     if speech:
         # The cut is read back once, as a viewer gets it, and what trips is fixed.
@@ -810,7 +814,12 @@ def run(
         if changed(changes):
             lines = apply_changes(lines, changes)
             segs = _segments_for_lines(
-                lines, [clip["duration"] for clip in clips], silences_by_clip, snap_edges, max_pause
+                lines,
+                [clip["duration"] for clip in clips],
+                silences_by_clip,
+                snap_edges,
+                max_pause,
+                beats=plan_beats,
             )
         clock.lap("proof")
     dropped = [line for line in lines if not line["keep"]]
@@ -1264,7 +1273,8 @@ def render_saved(
             [float(clip["duration"]) for clip in clips],
             _load_silences(out, clips),
             bool(tighten_doc.get("snap", True)),
-            float(tighten_doc.get("max_pause", 0.8)),
+            float(tighten_doc.get("max_pause", 1.4)),
+            beats=(doc.get("outline") or {}).get("beats") if isinstance(doc.get("outline"), dict) else None,
         )
         # The opening line plays first for as long as it is kept. Dropped, it opens nothing.
         # Adding a live title clears any lifted hook so the title fades over the actual opening footage.
@@ -1321,7 +1331,13 @@ def render_saved(
 
 
 def _segments_for_lines(
-    lines: list, durations: list, silences: list, snap_edges: bool, max_pause: float
+    lines: list,
+    durations: list,
+    silences: list,
+    snap_edges: bool,
+    max_pause: float,
+    *,
+    beats: list[dict] | None = None,
 ) -> list:
     utts = [
         {
@@ -1341,7 +1357,14 @@ def _segments_for_lines(
     segs, _unknown = segments(utts, keep, durations)
     if snap_edges:
         segs = snap(segs, silences)
-    return settle(cut_words(tighten(segs, silences, max_pause), lines), lines)
+    return settle(
+        cut_words(
+            tighten(segs, silences, max_pause, lines=lines, beats=beats),
+            lines,
+            silences_by_clip=silences,
+        ),
+        lines,
+    )
 
 
 def _load_silences(out: str, clips: list) -> list:

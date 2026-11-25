@@ -22,7 +22,7 @@ CutLaunch cutRunLaunch(const QStringList &files, const QString &mode, const QStr
                        const QString &botcutCli, const QString &uv, const QString &cliProject,
                        const QString &intent = QString(), bool decide = false,
                        const QString &sceneTransition = QStringLiteral("dip"),
-                       double maxPause = 0.8, const QStringList &brollFiles = {},
+                       double maxPause = 1.4, const QStringList &brollFiles = {},
                        bool brollMix = true, const QString &zoom = QStringLiteral("off"),
                        const QStringList &angleFiles = {},
                        const QString &resolution = QStringLiteral("source"),

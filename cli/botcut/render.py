@@ -46,6 +46,9 @@ RATE = 48000
 # How far each side of a join inside a shot reaches into the other. The two
 # overlap for twice this, one fading down as the other comes up.
 CROSS = 0.012
+# Pause/retake joins use a slightly gentler room-tone crossfade to hide noise-floor steps.
+PAUSE_CROSS = 0.025
+PAUSE_CROSS_GAP = 0.35
 # A B-roll shot's own sound, under the voice.
 BED = 0.25
 BED_FADE = 0.03
@@ -354,6 +357,7 @@ def mix(
     total = runs[-1]["end"] if runs else 0
     out = np.zeros((total, 2), dtype=np.float32)
     cross = int(CROSS * RATE)
+    pause_cross = int(PAUSE_CROSS * RATE)
     dip = _transition(scene_transition) == "dip"
     for number, run in enumerate(runs):
         source = sounds.of(run["clip"])
@@ -364,8 +368,8 @@ def mix(
         after = runs[number + 1] if number + 1 < len(runs) else None
         src = int(round(run["source"] * RATE))
         # A crossfade needs sound on the far side of the join, on both sides of it.
-        lead = cross if polish and _crosses(before, run, dip, cross) else 0
-        tail = cross if polish and _crosses(run, after, dip, cross) else 0
+        lead = _join_cross(before, run, dip, cross, pause_cross) if polish else 0
+        tail = _join_cross(run, after, dip, cross, pause_cross) if polish else 0
         lead = min(lead, src, run["begin"])
         tail = min(tail, total - run["end"])
         chunk = _take(source, src - lead, lead + count + tail)
@@ -408,6 +412,20 @@ def _crosses(left: dict | None, right: dict | None, dip: bool, cross: int) -> bo
         return False
     # Each side has to be long enough to hold the overlap and still play.
     return min(left["end"] - left["begin"], right["end"] - right["begin"]) > 4 * cross
+
+
+def _join_cross(
+    left: dict | None, right: dict | None, dip: bool, word_cross: int, pause_cross: int
+) -> int:
+    """Return the crossfade half-width in samples: 25ms for pause/retake joins, 12ms for tight word cuts."""
+    if left is None or right is None:
+        return 0
+    if left["clip"] == right["clip"]:
+        left_src_end = left["source"] + (left["end"] - left["begin"]) / RATE
+        gap = abs(right["source"] - left_src_end)
+        if gap > PAUSE_CROSS_GAP and _crosses(left, right, dip, pause_cross):
+            return pause_cross
+    return word_cross if _crosses(left, right, dip, word_cross) else 0
 
 
 def _shape(chunk, count: int, *, rising: bool, equal_power: bool) -> None:

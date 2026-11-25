@@ -856,11 +856,13 @@ def cut_pieces(
 
         close_by_clip = close_spans(lines, close)
     auto = None
+    zprof: dict[str, float] | None = None
     stretches: list[float] = []
-    if zoom == "auto":
-        from botcut.frame import AutoFraming, close_spans, push_starts, stretch_lengths
+    if zoom in ("subtle", "medium", "bold", "auto"):
+        from botcut.frame import AutoFraming, close_spans, push_starts, stretch_lengths, zoom_profile
 
-        auto = AutoFraming()
+        zprof = zoom_profile(zoom)
+        auto = AutoFraming(hold=zprof["hold"])
         close_by_clip = close_spans(lines, close)
         pushed = push_starts(segments, lines)
         stretches = stretch_lengths(segments, lines)
@@ -971,13 +973,29 @@ def cut_pieces(
                     punch = push_filter(video, pushed[i] + float(video_start) - seg_start, at=middle)
                 elif auto:
                     runs_on = j == 0 and i > 0 and inside_a_line(segments[i - 1], seg, lines)
+                    cut_gap = (
+                        abs(float(seg["start"]) - float(segments[i - 1]["end"]))
+                        if (j == 0 and i > 0 and int(segments[i - 1]["clip"]) == spoken)
+                        else 0.0
+                    )
                     if auto.frame(
-                        spoken, float(span), close=bool(piece.get("tight")), runs_on=runs_on, same_footage=j > 0
+                        spoken,
+                        float(span),
+                        close=bool(piece.get("tight")),
+                        runs_on=runs_on,
+                        same_footage=j > 0,
+                        gap=cut_gap,
                     ):
-                        punch = punch_crop(video, TIGHT, at=middle)
-                    elif stretches[i] >= PUSH_STRETCH:
+                        punch = punch_crop(video, zprof["tight"] if zprof else TIGHT, at=middle)
+                    elif stretches[i] >= (zprof["push_stretch"] if zprof else PUSH_STRETCH):
                         # A long wide stretch creeps in, so it is not a locked-off frame for half a minute.
-                        punch = push_filter(video, pushed[i] + float(video_start) - seg_start, at=middle)
+                        punch = push_filter(
+                            video,
+                            pushed[i] + float(video_start) - seg_start,
+                            at=middle,
+                            rate=zprof["push_rate"] if zprof else 0.003,
+                            max_zoom=zprof["push_max"] if zprof else 1.05,
+                        )
             elif auto and not own:
                 auto.other_picture()
             row = {

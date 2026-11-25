@@ -91,7 +91,8 @@ QString defaultCutIntent() {
 }
 
 QString zoomValue(const QString &zoom) {
-    static const QStringList known{QStringLiteral("auto"), QStringLiteral("cuts"), QStringLiteral("push"),
+    static const QStringList known{QStringLiteral("subtle"), QStringLiteral("medium"), QStringLiteral("bold"),
+                                   QStringLiteral("auto"), QStringLiteral("cuts"), QStringLiteral("push"),
                                    QStringLiteral("lines")};
     return known.contains(zoom) ? zoom : QStringLiteral("off");
 }

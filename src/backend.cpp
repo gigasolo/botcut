@@ -253,11 +253,11 @@ Backend::Backend(ThumbProvider *provider, FilePicker *filePicker, KeyStore *keys
     // Only an explicit false is voice only. A missing or unknown value stays mix.
     const QString storedMix = QSettings().value(QStringLiteral("brollMix"), true).toString();
     m_brollMix = storedMix != QLatin1String("false");
-    // No zoom unless one was chosen.
+    // No zoom unless one was chosen. Map older zoom kinds to Medium so the button highlights.
     m_zoom = zoomValue(QSettings().value(QStringLiteral("zoom")).toString());
-    // The window offers Off and Auto. One of the older kinds, chosen before, is Auto now.
-    if (m_zoom != QLatin1String("off"))
-        m_zoom = QStringLiteral("auto");
+    if (m_zoom != QLatin1String("off") && m_zoom != QLatin1String("subtle")
+        && m_zoom != QLatin1String("medium") && m_zoom != QLatin1String("bold"))
+        m_zoom = QStringLiteral("medium");
     m_resolution = resolutionValue(QSettings().value(QStringLiteral("resolution")).toString());
     m_aspect = aspectValue(QSettings().value(QStringLiteral("aspect")).toString());
     m_pip = QSettings().value(QStringLiteral("pip"), false).toBool();
@@ -1312,12 +1312,12 @@ QString Backend::describeChange(const QJsonObject &proposal, bool past) const {
 
 double Backend::maxPause() const {
     if (m_pace == QLatin1String("frenzied"))
-        return 0.1;
+        return 0.35;
     if (m_pace == QLatin1String("tight"))
-        return 0.28;
+        return 0.55;
     if (m_pace == QLatin1String("measured"))
-        return 0.4;
-    return 0.8;
+        return 0.85;
+    return 1.4;
 }
 
 void Backend::setCutMode(const QString &mode) {

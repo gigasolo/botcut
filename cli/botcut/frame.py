@@ -15,24 +15,58 @@ from pathlib import Path
 from botcut.llm import ask
 
 # Punched-in pieces show this much of the frame, around the speaker.
-PUNCH_IN = 1.12
+PUNCH_IN = 1.08
 # Below this height an enlarged picture starts to look soft, so it is left alone.
 PUNCH_MIN_HEIGHT = 1080
 # The ways a spoken shot can be zoomed. Off is the default.
-ZOOMS = ("off", "auto", "cuts", "push", "lines")
-# Auto: a tight framing shows this much of the frame less. It is enough to read as another shot.
-TIGHT = 1.2
+# Three editorial auto-framing intensities (subtle, medium, bold) plus legacy aliases.
+ZOOMS = ("off", "subtle", "medium", "bold", "auto", "cuts", "push", "lines")
+AUTO_ZOOMS = ("subtle", "medium", "bold", "auto")
+# Auto: default (medium) tight framing — subtle "invisible B-cam" jump-cut mask.
+TIGHT = 1.10
 # Auto: a wide stretch has to run this long before it is worth a slow push.
 PUSH_STRETCH = 8.0
 # A face found this far from the moment being framed says nothing about it.
 FACE_REACH = 20.0
 # On cuts: a framing is held this long before it may change.
 ZOOM_HOLD = 4.0
+# Auto framing: ignore tiny micro-trims so small pause cuts don't cause unnecessary zoom hops.
+SMALL_JUMP_GAP = 0.45
 # Slow push: this much closer every second, up to this much.
-PUSH_RATE = 0.005
-PUSH_MAX = 1.08
+PUSH_RATE = 0.003
+PUSH_MAX = 1.05
 # Key lines: a named line shows this much of the frame less, with this lead and tail.
-CLOSE_IN = 1.15
+CLOSE_IN = 1.10
+
+ZOOM_PROFILES: dict[str, dict[str, float]] = {
+    "subtle": {
+        "tight": 1.06,
+        "push_rate": 0.002,
+        "push_max": 1.03,
+        "hold": 8.0,
+        "push_stretch": 10.0,
+    },
+    "medium": {
+        "tight": 1.10,
+        "push_rate": 0.003,
+        "push_max": 1.05,
+        "hold": 6.0,
+        "push_stretch": 8.0,
+    },
+    "bold": {
+        "tight": 1.15,
+        "push_rate": 0.0045,
+        "push_max": 1.07,
+        "hold": 4.5,
+        "push_stretch": 7.0,
+    },
+}
+
+
+def zoom_profile(zoom: str) -> dict[str, float]:
+    """Return the framing profile for subtle, medium (or legacy auto), or bold."""
+    key = "medium" if zoom == "auto" else zoom
+    return dict(ZOOM_PROFILES.get(key, ZOOM_PROFILES["medium"]))
 CLOSE_LEAD = 0.25
 CLOSE_TAIL = 0.40
 CLOSE_PIECE_MIN = 0.5
@@ -325,13 +359,14 @@ def can_punch_in(clip: dict) -> bool:
 
 
 def punch_crop(clip: dict, amount: float = PUNCH_IN, at: float | None = None) -> str:
-    """The crop that shows 1/amount of the frame around the speaker, kept inside the picture."""
+    """Eye-line-locked crop showing 1/amount of the frame, keeping the speaker's eyes on the same coordinate."""
     width, height = int(clip["width"]), int(clip["height"])
-    crop_w = int(width / amount) // 2 * 2
-    crop_h = int(height / amount) // 2 * 2
+    crop_w = round(width / amount) // 2 * 2
+    crop_h = round(height / amount) // 2 * 2
     cx, cy = focus(clip, at)
-    left = min(max(0, round(cx * width - crop_w / 2)), width - crop_w)
-    top = min(max(0, round(cy * height - crop_h / 2)), height - crop_h)
+    # Anchor zoom on (cx, cy) so the speaker's eye-line stays fixed across wide -> tight cuts.
+    left = min(max(0, round(cx * (width - crop_w))), width - crop_w)
+    top = min(max(0, round(cy * (height - crop_h))), height - crop_h)
     return f"crop={crop_w}:{crop_h}:{left}:{top}"
 
 
@@ -413,8 +448,15 @@ def push_starts(segments: list[dict], lines: list[dict] | None = None) -> list[f
     return starts
 
 
-def push_filter(clip: dict, started: float = 0.0, at: float | None = None) -> str:
-    """A slow, even move in toward the speaker, PUSH_RATE a second up to PUSH_MAX.
+def push_filter(
+    clip: dict,
+    started: float = 0.0,
+    at: float | None = None,
+    *,
+    rate: float = PUSH_RATE,
+    max_zoom: float = PUSH_MAX,
+) -> str:
+    """A slow, even move in toward the speaker, `rate` a second up to `max_zoom`.
 
     `started` is how many seconds the push has already run when this piece
     begins. The picture is resampled between pixels on every frame, so the move
@@ -422,7 +464,7 @@ def push_filter(clip: dict, started: float = 0.0, at: float | None = None) -> st
     """
     cx, cy = focus(clip, at)
     fps = float(clip.get("fps") or 0) or 30.0
-    zoom = f"min(1+{PUSH_RATE:g}*(on/{fps:g}+{max(0.0, started):.3f}),{PUSH_MAX:g})"
+    zoom = f"min(1+{rate:g}*(on/{fps:g}+{max(0.0, started):.3f}),{max_zoom:g})"
     left = f"W*{cx:.4f}*(1-1/({zoom}))"
     top = f"H*{cy:.4f}*(1-1/({zoom}))"
     right = f"{left}+W/({zoom})"
@@ -462,28 +504,40 @@ class AutoFraming:
     shot, B-roll, another camera, comes back wide.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, hold: float = ZOOM_HOLD) -> None:
         self.tight = False
         self.held = 0.0
         self.clip: int | None = None
+        self.hold = float(hold)
 
     def other_picture(self) -> None:
         """B-roll, a card, or another camera played. The speaker comes back wide."""
         self.clip = None
 
-    def frame(self, clip: int, length: float, *, close: bool, runs_on: bool, same_footage: bool) -> bool:
+    def frame(
+        self,
+        clip: int,
+        length: float,
+        *,
+        close: bool,
+        runs_on: bool,
+        same_footage: bool,
+        gap: float = 0.0,
+    ) -> bool:
         """True when this piece of the speaker plays tight.
 
         `close` is a line named to be shown close, `runs_on` a cut inside a
-        line, and `same_footage` a piece that follows the one before it in
-        the file with nothing taken out.
+        line, `same_footage` a piece that follows the one before it in the
+        file with nothing taken out, and `gap` is how many seconds of source
+        footage were cut between the previous piece and this one.
         """
         fresh = self.clip != clip
+        tiny_trim = 0.0 < gap < SMALL_JUMP_GAP
         if close:
             tight = True
         elif fresh or same_footage:
             tight = False
-        elif runs_on or self.held < ZOOM_HOLD:
+        elif runs_on or tiny_trim or self.held < self.hold:
             tight = self.tight
         else:
             tight = not self.tight

@@ -1671,20 +1671,25 @@ void BackendTests::gatherLabelsFit() {
     QCOMPARE(backend.cutMode(), QStringLiteral("speech"));
     QVERIFY(visibleTextStartsWith(window, QStringLiteral("Keep each moment")));
 
-    // Zoom is two words, off until it is chosen, and the note says what the choice does.
+    // Zoom offers Off, Subtle, Medium, and Bold, off until chosen, and the note describes each.
     QCOMPARE(backend.zoom(), QStringLiteral("off"));
     QQuickItem *zoomNote = window->findChild<QQuickItem *>(QStringLiteral("zoomNote"));
     QVERIFY(zoomNote);
     QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("The picture plays")));
-    for (const QString &word : {QStringLiteral("Off"), QStringLiteral("Auto")})
+    for (const QString &word : {QStringLiteral("Off"), QStringLiteral("Subtle"), QStringLiteral("Medium"), QStringLiteral("Bold")})
         QVERIFY2(visibleItemWithText(window, word), qPrintable(word));
     for (const QString &word : {QStringLiteral("On cuts"), QStringLiteral("Slow push"), QStringLiteral("Key lines")})
         QVERIFY2(!visibleItemWithText(window, word), qPrintable(word));
-    QQuickItem *zoomAuto = visibleItemWithText(window, QStringLiteral("Auto"));
-    QVERIFY(zoomAuto);
-    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomAuto));
-    QCOMPARE(backend.zoom(), QStringLiteral("auto"));
-    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Goes closer at a cut")));
+    QQuickItem *zoomSubtle = visibleItemWithText(window, QStringLiteral("Subtle"));
+    QVERIFY(zoomSubtle);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomSubtle));
+    QCOMPARE(backend.zoom(), QStringLiteral("subtle"));
+    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Subtle 6%")));
+    QQuickItem *zoomMedium = visibleItemWithText(window, QStringLiteral("Medium"));
+    QVERIFY(zoomMedium);
+    QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomMedium));
+    QCOMPARE(backend.zoom(), QStringLiteral("medium"));
+    QVERIFY(zoomNote->property("text").toString().startsWith(QStringLiteral("Balanced 10%")));
     QQuickItem *zoomOff = visibleItemWithText(window, QStringLiteral("Off"));
     QVERIFY(zoomOff);
     QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier, itemCenter(zoomOff));
@@ -3816,7 +3821,7 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
                                              QStringLiteral("assemble"), QStringLiteral("--intent"),
                                              defaultCutIntent(), QStringLiteral("--scene-transition"),
                                              QStringLiteral("dip"), QStringLiteral("--max-pause"),
-                                             QStringLiteral("0.8"), QStringLiteral("--b-roll-sound"),
+                                             QStringLiteral("1.4"), QStringLiteral("--b-roll-sound"),
                                              QStringLiteral("mix"), QStringLiteral("--zoom"),
                                              QStringLiteral("off")}));
     QVERIFY(direct.error.isEmpty());
@@ -3852,7 +3857,7 @@ void BackendTests::cutLaunchUsesTheCliOrUv() {
              QStringLiteral("off"));
     QVERIFY(!hard.arguments.contains(QStringLiteral("--decide")));
     QCOMPARE(hard.arguments.at(hard.arguments.indexOf(QStringLiteral("--max-pause")) + 1),
-             QStringLiteral("0.8"));
+             QStringLiteral("1.4"));
 
     const CutLaunch frenzied = cutRunLaunch(files, QStringLiteral("speech"), QStringLiteral("/tmp/out"),
                                              QStringLiteral("/usr/bin/botcut-cli"), QString(), QString(),
@@ -3961,45 +3966,45 @@ void BackendTests::sceneTransitionRoundTrips() {
     QCOMPARE(first.brollMix(), true);
     // No zoom until one is chosen.
     QCOMPARE(first.zoom(), QStringLiteral("off"));
-    first.setZoom(QStringLiteral("auto"));
-    QCOMPARE(first.zoom(), QStringLiteral("auto"));
+    first.setZoom(QStringLiteral("subtle"));
+    QCOMPARE(first.zoom(), QStringLiteral("subtle"));
     QCOMPARE(first.pace(), QStringLiteral("open"));
-    QCOMPARE(first.maxPause(), 0.8);
+    QCOMPARE(first.maxPause(), 1.4);
     first.setSceneTransition(QStringLiteral("off"));
     QCOMPARE(first.sceneTransition(), QStringLiteral("off"));
     first.setBrollMix(false);
     QCOMPARE(first.brollMix(), false);
     first.setPace(QStringLiteral("frenzied"));
     QCOMPARE(first.pace(), QStringLiteral("frenzied"));
-    QCOMPARE(first.maxPause(), 0.1);
+    QCOMPARE(first.maxPause(), 0.35);
     first.setPace(QStringLiteral("tight"));
-    QCOMPARE(first.maxPause(), 0.28);
+    QCOMPARE(first.maxPause(), 0.55);
     first.setPace(QStringLiteral("measured"));
-    QCOMPARE(first.maxPause(), 0.4);
+    QCOMPARE(first.maxPause(), 0.85);
 
     auto *againPicker = new FakeFilePicker;
     Backend again(&provider, againPicker);
     QCOMPARE(again.sceneTransition(), QStringLiteral("off"));
     QCOMPARE(again.brollMix(), false);
-    QCOMPARE(again.zoom(), QStringLiteral("auto"));
-    // One of the older kinds, chosen before there was Auto, comes back as Auto.
+    QCOMPARE(again.zoom(), QStringLiteral("subtle"));
+    // One of the older kinds, chosen before Subtle/Medium/Bold, comes back as Medium.
     QSettings().setValue(QStringLiteral("zoom"), QStringLiteral("push"));
     {
         auto *olderPicker = new FakeFilePicker;
         Backend older(&provider, olderPicker);
-        QCOMPARE(older.zoom(), QStringLiteral("auto"));
+        QCOMPARE(older.zoom(), QStringLiteral("medium"));
     }
     again.setZoom(QStringLiteral("sideways"));
     QCOMPARE(again.zoom(), QStringLiteral("off"));
     QCOMPARE(again.pace(), QStringLiteral("measured"));
-    QCOMPARE(again.maxPause(), 0.4);
+    QCOMPARE(again.maxPause(), 0.85);
     again.setSceneTransition(QStringLiteral("nope"));
     QCOMPARE(again.sceneTransition(), QStringLiteral("dip"));
     again.setBrollMix(true);
     QCOMPARE(again.brollMix(), true);
     again.setPace(QStringLiteral("nope"));
     QCOMPARE(again.pace(), QStringLiteral("open"));
-    QCOMPARE(again.maxPause(), 0.8);
+    QCOMPARE(again.maxPause(), 1.4);
 
     auto *thirdPicker = new FakeFilePicker;
     Backend third(&provider, thirdPicker);
@@ -5384,15 +5389,15 @@ void BackendTests::reviseDropsALineAndReverts() {
     QCOMPARE(revised.value(QStringLiteral("tighten")).toObject().value(QStringLiteral("snap")).toBool(), true);
     QCOMPARE(revised.value(QStringLiteral("segments")).toArray().at(0).toObject().value(QStringLiteral("end")).toDouble(),
              4.0);
-    QCOMPARE(backend.maxPause(), 0.1);
+    QCOMPARE(backend.maxPause(), 0.35);
     const CutLaunch nextCut = cutRunLaunch(
         {QStringLiteral("/tmp/a.mp4")}, QStringLiteral("speech"), out, QStringLiteral("/usr/bin/botcut-cli"),
         QString(), QString(), backend.intent(), false, backend.sceneTransition(), backend.maxPause());
     QCOMPARE(nextCut.arguments.at(nextCut.arguments.indexOf(QStringLiteral("--max-pause")) + 1),
-             QStringLiteral("0.1"));
+             QStringLiteral("0.35"));
     QVERIFY(backend.writeSelects(cuts));
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
-             0.1);
+             0.35);
     QCOMPARE(backend.covers().size(), 0);
     QVERIFY(!readRoot().contains(QStringLiteral("covers")));
 
@@ -5407,7 +5412,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     backend.revertRevise();
     QCOMPARE(backend.intent(), QStringLiteral("A quiet ride"));
     QCOMPARE(backend.pace(), QStringLiteral("measured"));
-    QCOMPARE(backend.maxPause(), 0.4);
+    QCOMPARE(backend.maxPause(), 0.85);
     QCOMPARE(backend.sceneTransition(), QStringLiteral("dip"));
     QVERIFY(!backend.canRevert());
     QCOMPARE(backend.chat().size(), 3);
@@ -5422,7 +5427,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QCOMPARE(lineById(backend.selects(), 1).value(QStringLiteral("still")).toString(),
              QStringLiteral("/tmp/1.jpg"));
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
-             0.1);
+             0.35);
     const QJsonArray restoredLines = readRoot().value(QStringLiteral("lines")).toArray();
     QCOMPARE(restoredLines.size(), 2);
     QCOMPARE(restoredLines.at(1).toObject().value(QStringLiteral("keep")).toBool(), true);
@@ -5449,7 +5454,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QCOMPARE(backend.intent(), QStringLiteral("A frenzied cut."));
     QVERIFY(!lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
-             0.1);
+             0.35);
     QVERIFY(secondArgs.contains(QStringLiteral("--pace")));
     QCOMPARE(secondArgs.at(secondArgs.indexOf(QStringLiteral("--pace")) + 1), QStringLiteral("tight"));
     QCOMPARE(secondArgs.at(secondArgs.lastIndexOf(QStringLiteral("--")) + 1),
@@ -5458,7 +5463,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QVERIFY(!secondArgs.join(QLatin1Char(' ')).contains(QStringLiteral("supersecret")));
     backend.revertRevise();
     QCOMPARE(backend.pace(), QStringLiteral("tight"));
-    QCOMPARE(backend.maxPause(), 0.28);
+    QCOMPARE(backend.maxPause(), 0.55);
     QCOMPARE(backend.intent(), QStringLiteral("Hand edit"));
     QCOMPARE(backend.sceneTransition(), QStringLiteral("off"));
     QVERIFY(lineById(backend.selects(), 2).value(QStringLiteral("keep")).toBool());
@@ -5474,7 +5479,7 @@ void BackendTests::reviseDropsALineAndReverts() {
     QVERIFY(!backend.applyProposal());
     QCOMPARE(backend.chat().size(), 8);
     QCOMPARE(readRoot().value(QStringLiteral("tighten")).toObject().value(QStringLiteral("max_pause")).toDouble(),
-             0.1);
+             0.35);
 
     backend.setPace(QStringLiteral("open"));
     backend.setSceneTransition(QStringLiteral("dip"));

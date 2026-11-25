@@ -68,8 +68,8 @@ from botcut.stt import key_terms, terms_mark, transcribe_fake, transcribe_local,
 
 
 ZOOM_HELP = (
-    "eye-locked zoom on the speaker: subtle (6% / 8s hold), medium (10% / 6s hold, alias: auto), "
-    "bold (15% / 4.5s hold), or legacy cuts/push/lines"
+    "eye-locked zoom on the speaker: subtle (6%% / 8s hold), medium (10%% / 6s hold, alias: auto), "
+    "bold (15%% / 4.5s hold), or legacy cuts/push/lines"
 )
 
 # Shots sent to the transcriber at once, and stills grabbed at once.
